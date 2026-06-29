@@ -544,6 +544,36 @@ test('server probes default broker URL when broker-url is omitted', async () => 
   }
 });
 
+test('server broker probing does not require global fetch', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    id: 'checkout-main',
+    brokerUrl: broker.origin,
+  });
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = undefined;
+    const status = await getJson(`${server.origin}/_pwdev/status`);
+    assert.equal(status.statusCode, 200);
+    assert.equal(status.body.broker.configured, true);
+    assert.equal(status.body.broker.reachable, true);
+    assert.equal(status.body.broker.status.running, true);
+    assert.deepEqual(broker.requests[0], {
+      method: 'GET',
+      path: '/_broker/status',
+      body: {},
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server validates browser task metadata', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));

@@ -1001,28 +1001,40 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
  */
 async function brokerJson(brokerUrl, pathname, options = {}) {
   const url = new URL(pathname, ensureTrailingSlash(brokerUrl));
-  let response;
-  try {
-    response = await fetch(url, {
+  const requestBody = options.body === undefined ? undefined : JSON.stringify(options.body);
+  const { statusCode, text } = await new Promise((resolve, reject) => {
+    const request = http.request(url, {
       method: options.method ?? 'GET',
-      headers: options.body ? { 'content-type': 'application/json' } : undefined,
-      body: options.body ? JSON.stringify(options.body) : undefined,
+      headers: requestBody ? {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(requestBody),
+      } : undefined,
+    }, (response) => {
+      let responseText = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        responseText += chunk;
+      });
+      response.on('end', () => {
+        resolve({ statusCode: response.statusCode || 0, text: responseText });
+      });
     });
-  } catch (cause) {
-    const error = new Error(`Broker is unreachable at ${brokerUrl}: ${cause?.message || 'fetch failed'}`);
-    error.statusCode = 503;
-    throw error;
-  }
-  const text = await response.text();
+    request.once('error', (cause) => {
+      const error = new Error(`Broker is unreachable at ${brokerUrl}: ${cause?.message || 'request failed'}`);
+      error.statusCode = 503;
+      reject(error);
+    });
+    request.end(requestBody);
+  });
   let payload;
   try {
     payload = text ? JSON.parse(text) : {};
   } catch {
     payload = { ok: false, error: text };
   }
-  if (!response.ok) {
-    const error = new Error(payload.error || `Broker request failed: ${response.status}`);
-    error.statusCode = response.status;
+  if (statusCode < 200 || statusCode >= 300) {
+    const error = new Error(payload.error || `Broker request failed: ${statusCode}`);
+    error.statusCode = statusCode || 502;
     throw error;
   }
   return payload;
