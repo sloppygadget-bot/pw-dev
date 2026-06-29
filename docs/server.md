@@ -25,16 +25,15 @@ Start the broker:
 npm start -- broker --standby
 ```
 
-Start the server paired with that broker:
+Start the server. It probes the default broker URL `http://127.0.0.1:18080`:
 
 ```bash
-npm start -- server \
-  --port 9696 \
-  --broker-url http://127.0.0.1:18080
+npm start -- server --port 9696
 ```
 
-If `--broker-url` is missing, `GET /_pwdev/status` reports the broker as
-missing and browser lifecycle routes return `503`.
+Use `--broker-url` only when the broker runs somewhere else. If the default or
+configured broker is not reachable, `GET /_pwdev/status` reports
+`reachable: false` and browser lifecycle routes return `503`.
 
 ## Agent Discovery
 
@@ -62,7 +61,7 @@ const status = await fetch(`${baseUrl}/_pwdev/status`)
   .then((response) => response.json());
 
 if (!status.broker?.configured) {
-  throw new Error(status.broker?.message || 'pw-dev broker is not configured');
+  throw new Error('pw-dev broker status is unavailable');
 }
 
 if (status.broker.reachable === false) {
@@ -309,17 +308,19 @@ CDP URLs, but it also leaves a raw broker API escape hatch for advanced tooling.
 
 ## Broker Diagnostics
 
-Missing broker configuration:
+Default broker configured but unreachable:
 
 ```json
 {
-  "configured": false,
-  "missing": true,
-  "message": "pw-dev broker is not configured. Start or pair a broker with --broker-url."
+  "configured": true,
+  "reachable": false,
+  "url": "http://127.0.0.1:18080",
+  "default": true,
+  "error": "Broker is unreachable at http://127.0.0.1:18080: fetch failed"
 }
 ```
 
-Configured but unreachable broker:
+Explicit broker configured but unreachable:
 
 ```json
 {
@@ -366,5 +367,5 @@ Reachable broker:
 [packages/server/test/server.test.js](/home/pengxie/work/pw-dev/packages/server/test/server.test.js)
 
 - Covers static serving, manifest/status endpoints, registry operations,
-  app browser lifecycle, missing broker diagnostics, HTTP proxying, and
+  app browser lifecycle, broker reachability diagnostics, HTTP proxying, and
   WebSocket upgrade proxying.

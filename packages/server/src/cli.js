@@ -112,7 +112,7 @@ Options:
   --branch <name>  Branch name for /_pwdev/manifest
   --app-url <url>  App URL. Default: this server origin
   --broker-url <url>
-                  Pair this server with a pw-dev broker
+                  Broker URL. Default: http://127.0.0.1:18080
   --cdp-url <url>  CDP URL for browser automation
   --profile <name> Broker profile for browser automation
   --proxy-forward-id <id>

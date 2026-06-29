@@ -26,6 +26,8 @@ const MIME_TYPES = new Map([
   ['.webp', 'image/webp'],
 ]);
 
+const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
+
 /**
  * Options for `startPwDevServer`.
  *
@@ -42,7 +44,7 @@ const MIME_TYPES = new Map([
  * @property {string=} worktree Local worktree path. Defaults to `root`.
  * @property {string=} branch Source branch name for display/discovery.
  * @property {string=} appUrl URL of the actual app devserver. Defaults to this server's origin.
- * @property {string=} brokerUrl Broker base URL paired with this server for browser lifecycle endpoints.
+ * @property {string=} brokerUrl Broker base URL paired with this server for browser lifecycle endpoints. Defaults to `http://127.0.0.1:18080`.
  * @property {string=} cdpUrl Optional Playwright CDP URL for direct browser attachment.
  * @property {string=} profile Optional broker profile name for the app.
  * @property {string=} proxyId Optional proxy registry id for the app.
@@ -183,7 +185,7 @@ const MIME_TYPES = new Map([
  * location as normal app metadata.
  *
  * @typedef {object} PwDevBrokerPairing
- * @property {() => { configured: boolean, url?: string, missing?: true, message?: string }} summary Returns broker configuration status.
+ * @property {() => { configured: boolean, url: string, default?: boolean }} summary Returns broker configuration status.
  * @property {() => Promise<Record<string, unknown>>} status Returns broker configuration and reachability status.
  * @property {(overrideUrl?: string) => string} resolve Returns an override URL or the configured broker URL.
  */
@@ -999,11 +1001,18 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
  */
 async function brokerJson(brokerUrl, pathname, options = {}) {
   const url = new URL(pathname, ensureTrailingSlash(brokerUrl));
-  const response = await fetch(url, {
-    method: options.method ?? 'GET',
-    headers: options.body ? { 'content-type': 'application/json' } : undefined,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      method: options.method ?? 'GET',
+      headers: options.body ? { 'content-type': 'application/json' } : undefined,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+  } catch (cause) {
+    const error = new Error(`Broker is unreachable at ${brokerUrl}: ${cause?.message || 'fetch failed'}`);
+    error.statusCode = 503;
+    throw error;
+  }
   const text = await response.text();
   let payload;
   try {
@@ -1026,38 +1035,28 @@ async function brokerJson(brokerUrl, pathname, options = {}) {
  * @returns {PwDevBrokerPairing}
  */
 function createBrokerPairing({ brokerUrl } = {}) {
-  const configuredUrl = brokerUrl ? normalizeBrokerUrl(brokerUrl) : undefined;
+  const configuredUrl = normalizeBrokerUrl(brokerUrl ?? DEFAULT_BROKER_URL);
+  const usesDefault = !brokerUrl;
   return {
     summary() {
-      if (!configuredUrl) {
-        return {
-          configured: false,
-          missing: true,
-          message: 'pw-dev broker is not configured. Start or pair a broker with --broker-url.',
-        };
-      }
-      return { configured: true, url: configuredUrl };
+      return omitUndefined({ configured: true, url: configuredUrl, default: usesDefault || undefined });
     },
     async status() {
-      if (!configuredUrl) return this.summary();
       try {
         const status = await brokerJson(configuredUrl, '/_broker/status');
-        return { configured: true, reachable: true, url: configuredUrl, status };
+        return omitUndefined({ configured: true, reachable: true, url: configuredUrl, default: usesDefault || undefined, status });
       } catch (error) {
-        return {
+        return omitUndefined({
           configured: true,
           reachable: false,
           url: configuredUrl,
+          default: usesDefault || undefined,
           error: error?.message || 'Broker is unreachable',
-        };
+        });
       }
     },
     resolve(overrideUrl) {
-      const resolved = overrideUrl ? normalizeBrokerUrl(overrideUrl) : configuredUrl;
-      if (resolved) return resolved;
-      const error = new Error('pw-dev broker is not configured. Start or pair a broker with --broker-url.');
-      error.statusCode = 503;
-      throw error;
+      return overrideUrl ? normalizeBrokerUrl(overrideUrl) : configuredUrl;
     },
   };
 }
@@ -1439,7 +1438,7 @@ const status = await fetch('${serverUrl}/_pwdev/status')
   .then((response) => response.json());
 
 if (!status.broker?.configured) {
-  throw new Error(status.broker?.message || 'pw-dev broker is not configured');
+  throw new Error('pw-dev broker status is unavailable');
 }
 
 if (status.broker.reachable === false) {
@@ -1578,7 +1577,7 @@ function pwDevClientSource(serverUrl) {
 export async function assertPwDevReady({ serverUrl = '${serverUrl}' } = {}) {
   const status = await loadPwDevStatus({ serverUrl });
   if (!status.broker?.configured) {
-    throw new Error(status.broker?.message || 'pw-dev broker is not configured');
+    throw new Error('pw-dev broker status is unavailable');
   }
   if (status.broker.reachable === false) {
     throw new Error(\`pw-dev broker is unreachable: \${status.broker.error}\`);

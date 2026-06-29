@@ -523,7 +523,7 @@ test('server rejects unknown app proxyId on browser start', async () => {
   }
 });
 
-test('server reports missing broker for browser lifecycle', async () => {
+test('server probes default broker URL when broker-url is omitted', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({ root, port: 0, id: 'checkout-main' });
   try {
@@ -535,12 +535,9 @@ test('server reports missing broker for browser lifecycle', async () => {
 
     const status = await getJson(`${server.origin}/_pwdev/status`);
     assert.equal(status.statusCode, 200);
-    assert.equal(status.body.broker.configured, false);
-    assert.equal(status.body.broker.missing, true);
-
-    const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {});
-    assert.equal(started.statusCode, 503);
-    assert.match(started.body.error, /broker is not configured/);
+    assert.equal(status.body.broker.configured, true);
+    assert.equal(status.body.broker.default, true);
+    assert.equal(status.body.broker.url, 'http://127.0.0.1:18080');
   } finally {
     await server.close();
     fs.rmSync(root, { recursive: true, force: true });

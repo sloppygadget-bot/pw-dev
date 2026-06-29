@@ -59,8 +59,7 @@ const browser = await chromium.connectOverCDP('http://127.0.0.1:18080');
 ```bash
 npm start -- server \
   --root examples/static-site \
-  --port 9696 \
-  --broker-url http://127.0.0.1:18080
+  --port 9696
 ```
 
 Expose app metadata for agents:
@@ -68,10 +67,12 @@ Expose app metadata for agents:
 ```bash
 npm start -- server \
   --root examples/static-site \
-  --broker-url http://127.0.0.1:18080 \
   --app-url http://127.0.0.1:5173 \
   --profile checkout-main
 ```
+
+By default the server probes the broker at `http://127.0.0.1:18080`. Use
+`--broker-url` only when the broker runs somewhere else.
 
 Discovery endpoints:
 
