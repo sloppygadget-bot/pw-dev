@@ -1,0 +1,27 @@
+{
+  "name": "@pw-dev/cdp-broker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Chrome session broker with persistent profiles and CDP forwarding.",
+  "type": "module",
+  "bin": {
+    "pw-cdp-broker": "./bin/pw-cdp-broker.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./server": "./src/server.js",
+    "./browser-manager": "./src/browser-manager.js",
+    "./chrome": "./src/chrome.js",
+    "./profiles": "./src/profiles.js",
+    "./proxy-forwards": "./src/proxy-forwards.js",
+    "./cli": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node bin/pw-cdp-broker.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}

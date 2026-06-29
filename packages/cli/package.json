@@ -1,0 +1,21 @@
+{
+  "name": "@pw-dev/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pw-dev command dispatcher.",
+  "type": "module",
+  "bin": {
+    "pw-dev": "./bin/pw-dev.js"
+  },
+  "exports": {
+    ".": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node bin/pw-dev.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}

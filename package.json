@@ -1,0 +1,27 @@
+{
+  "name": "pw-dev",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dependency-light Playwright/Chrome dev tooling with selectable local browser broker and server components.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "bin": {
+    "pw-dev": "./bin/pw-dev.js"
+  },
+  "scripts": {
+    "start": "node bin/pw-dev.js",
+    "broker": "node packages/cdp-broker/bin/pw-cdp-broker.js",
+    "server": "node packages/server/bin/pw-dev-server.js",
+    "test": "node --test packages/*/test/*.test.js",
+    "test:broker": "node --test packages/cdp-broker/test/*.test.js",
+    "test:server": "node --test packages/server/test/*.test.js",
+    "test:cli": "node --test packages/cli/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
