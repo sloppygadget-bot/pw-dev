@@ -35,5 +35,5 @@ Commands:
 
 Examples:
   pw-dev broker --profile work-okta
-  pw-dev server --root examples/static-site --port 3100`;
+  pw-dev server --root examples/static-site --port 9696`;
 }

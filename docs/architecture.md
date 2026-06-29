@@ -148,7 +148,7 @@ The manifest is the main agent contract:
       "pwd": "xxx"
     }
   },
-  "cdpUrl": "http://127.0.0.1:3100/_pwdev/broker/instances/bkr_feature_tax",
+  "cdpUrl": "http://127.0.0.1:9696/_pwdev/broker/instances/bkr_feature_tax",
   "profile": "checkout-feature-tax",
   "proxyId": "whistle-main"
 }

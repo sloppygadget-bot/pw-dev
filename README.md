@@ -59,7 +59,7 @@ const browser = await chromium.connectOverCDP('http://127.0.0.1:18080');
 ```bash
 npm start -- server \
   --root examples/static-site \
-  --port 3100 \
+  --port 9696 \
   --broker-url http://127.0.0.1:18080
 ```
 
@@ -89,7 +89,7 @@ whether the required broker component is configured and reachable.
 Register reusable proxy metadata with the central server:
 
 ```bash
-curl -X POST http://127.0.0.1:3100/_pwdev/proxies \
+curl -X POST http://127.0.0.1:9696/_pwdev/proxies \
   -H 'content-type: application/json' \
   -d '{
     "id": "whistle-main",
@@ -102,7 +102,7 @@ curl -X POST http://127.0.0.1:3100/_pwdev/proxies \
 Register parallel branch apps with the central server:
 
 ```bash
-curl -X POST http://127.0.0.1:3100/_pwdev/apps \
+curl -X POST http://127.0.0.1:9696/_pwdev/apps \
   -H 'content-type: application/json' \
   -d '{
     "id": "fortisase-dev",

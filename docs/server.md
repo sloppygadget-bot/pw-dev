@@ -29,7 +29,7 @@ Start the server paired with that broker:
 
 ```bash
 npm start -- server \
-  --port 3100 \
+  --port 9696 \
   --broker-url http://127.0.0.1:18080
 ```
 
@@ -39,7 +39,7 @@ missing and browser lifecycle routes return `503`.
 ## Agent Discovery
 
 Agents should not need hardcoded pw-dev knowledge beyond the base server URL.
-Given `PW_DEV_URL=http://127.0.0.1:3100`, the discovery sequence is:
+Given `PW_DEV_URL=http://127.0.0.1:9696`, the discovery sequence is:
 
 ```text
 GET /_pwdev/status
@@ -86,7 +86,7 @@ Register shared proxy metadata first when multiple apps should use the same
 Whistle or HTTP proxy:
 
 ```bash
-curl -X POST http://127.0.0.1:3100/_pwdev/proxies \
+curl -X POST http://127.0.0.1:9696/_pwdev/proxies \
   -H 'content-type: application/json' \
   -d '{
     "id": "whistle-main",
@@ -102,7 +102,7 @@ Use `brokerProxyForwardId` instead of `proxyUrl` when the broker owns the
 forward, but do not set both fields.
 
 ```bash
-curl -X POST http://127.0.0.1:3100/_pwdev/apps \
+curl -X POST http://127.0.0.1:9696/_pwdev/apps \
   -H 'content-type: application/json' \
   -d '{
     "id": "fortisase-dev",
@@ -143,7 +143,7 @@ production accounts, personal credentials, or sensitive tokens.
 Start the app browser:
 
 ```bash
-curl -X POST http://127.0.0.1:3100/_pwdev/apps/checkout-tax/browser/start \
+curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/start \
   -H 'content-type: application/json' \
   -d '{
     "ignoreSslErrors": true,
@@ -165,7 +165,7 @@ The server calls broker `POST /_broker/start`, then stores a server-proxied
   "profile": "checkout-tax",
   "proxyForwardId": "whistle",
   "browserInstanceId": "bkr_checkout-tax",
-  "cdpUrl": "http://127.0.0.1:3100/_pwdev/broker/instances/bkr_checkout-tax",
+  "cdpUrl": "http://127.0.0.1:9696/_pwdev/broker/instances/bkr_checkout-tax",
   "activeTask": {
     "id": "smoke-login-20260629",
     "label": "Smoke login flow",
@@ -180,7 +180,7 @@ Attach from Playwright:
 ```js
 import { chromium } from 'playwright';
 
-const manifest = await fetch('http://127.0.0.1:3100/_pwdev/apps/checkout-tax/manifest')
+const manifest = await fetch('http://127.0.0.1:9696/_pwdev/apps/checkout-tax/manifest')
   .then((response) => response.json());
 
 const browser = await chromium.connectOverCDP(manifest.cdpUrl);
@@ -193,13 +193,13 @@ await page.goto(manifest.appUrl);
 Check browser/broker status:
 
 ```bash
-curl http://127.0.0.1:3100/_pwdev/apps/checkout-tax/browser/status
+curl http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/status
 ```
 
 Stop the app browser:
 
 ```bash
-curl -X POST http://127.0.0.1:3100/_pwdev/apps/checkout-tax/browser/stop
+curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/stop
 ```
 
 Stopping removes `cdpUrl`, `browserInstanceId`, and `browserStartedAt` from the
@@ -249,7 +249,7 @@ To verify multiple fixes on the same branch in parallel, register multiple app
 ids that point at the same `appUrl` but use distinct profiles:
 
 ```bash
-curl -X POST http://127.0.0.1:3100/_pwdev/apps \
+curl -X POST http://127.0.0.1:9696/_pwdev/apps \
   -H 'content-type: application/json' \
   -d '{
     "id": "main-fix-a",
@@ -258,7 +258,7 @@ curl -X POST http://127.0.0.1:3100/_pwdev/apps \
     "profile": "main-fix-a"
   }'
 
-curl -X POST http://127.0.0.1:3100/_pwdev/apps \
+curl -X POST http://127.0.0.1:9696/_pwdev/apps \
   -H 'content-type: application/json' \
   -d '{
     "id": "main-fix-b",

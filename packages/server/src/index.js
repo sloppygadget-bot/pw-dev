@@ -35,7 +35,7 @@ const MIME_TYPES = new Map([
  *
  * @typedef {object} PwDevServerOptions
  * @property {string=} host HTTP listen host. Defaults to `127.0.0.1`.
- * @property {number=} port HTTP listen port. Defaults to `3100`; use `0` for an ephemeral port.
+ * @property {number=} port HTTP listen port. Defaults to `9696`; use `0` for an ephemeral port.
  * @property {string=} root Static file root. Defaults to the current working directory.
  * @property {string=} id App id for the seeded manifest. Defaults to the worktree basename.
  * @property {string=} name Human-readable app name. Defaults to `id`.
@@ -217,7 +217,7 @@ const MIME_TYPES = new Map([
  */
 export async function startPwDevServer(options = {}) {
   const host = options.host ?? '127.0.0.1';
-  const port = options.port ?? 3100;
+  const port = options.port ?? 9696;
   const root = path.resolve(options.root ?? process.cwd());
   const worktree = options.worktree ? path.resolve(options.worktree) : root;
   const metadata = validateMetadata({

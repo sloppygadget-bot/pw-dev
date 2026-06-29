@@ -104,7 +104,7 @@ Usage:
 
 Options:
   --host <host>   Listen host. Default: 127.0.0.1
-  --port <port>   Listen port. Default: 3100
+  --port <port>   Listen port. Default: 9696
   --root <dir>    Static root. Default: current directory
   --id <id>        App id for /_pwdev/manifest
   --name <name>    App display name for /_pwdev/manifest
