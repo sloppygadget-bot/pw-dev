@@ -3,13 +3,15 @@
 `@pw-dev/server` is the agent-facing control plane. It keeps a central app
 registry, pairs with one default `@pw-dev/cdp-broker`, starts/stops browser
 sessions through that broker, and proxies broker HTTP/WebSocket traffic so
-agents can stay on the pw-dev server origin.
+agents can stay on the pw-dev server origin. It can also proxy the optional
+`@pw-dev/w2mgr` API for app devserver and Whistle process management.
 
 ## Process Roles
 
 ```text
 agent/user -> pw-dev server       registry, status, lifecycle, proxied CDP
 pw-dev server -> cdp-broker       start/stop/status Chrome sessions
+pw-dev server -> w2mgr            proxied app/proxy process lifecycle
 cdp-broker -> Chrome              persistent profile + CDP endpoint
 Chrome -> app devserver           loads the registered appUrl
 ```
@@ -34,6 +36,18 @@ npm start -- server --port 9696
 Use `--broker-url` only when the broker runs somewhere else. If the default or
 configured broker is not reachable, `GET /_pwdev/status` reports
 `reachable: false` and browser lifecycle routes return `503`.
+
+Start the optional app/proxy process manager:
+
+```bash
+npm start -- w2mgr --auto-start
+```
+
+`w2mgr` keeps its own API on `http://127.0.0.1:18081`, and the server proxies
+it under `/_pwdev/w2mgr/*`. It starts registered app `devserver` commands and
+registered Whistle proxies. Whistle proxy ports come from the default pool
+`8888-8899`; if the registered port is in use or already managed, `w2mgr`
+allocates the next free pool port and updates the proxy registration.
 
 ## Agent Discovery
 
@@ -132,8 +146,8 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
 
 `POST /_pwdev/apps` is an upsert. Re-posting the same `id` updates app
 metadata, which is useful when branch devservers restart on new ports.
-`devserver` and `engine` are metadata-only today; pw-dev records them for
-agents and humans but does not execute the command yet.
+`devserver` and `engine` are registry metadata for agents and humans. The
+optional `pw-dev w2mgr` process can execute registered `devserver` commands.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 
@@ -154,17 +168,63 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/start \
   }'
 ```
 
-The server calls broker `POST /_broker/start`, then stores a server-proxied
-`cdpUrl` on the app:
+The server calls broker `POST /_broker/start`. With `task.id`, it starts a
+task-scoped browser session using session id and profile `<app id>__<task id>`
+by default, then stores the server-proxied `cdpUrl` under
+`browserSessions[sessionId]`:
 
 ```json
 {
-  "id": "checkout-tax",
-  "appUrl": "http://127.0.0.1:5174",
-  "profile": "checkout-tax",
-  "proxyForwardId": "whistle",
-  "browserInstanceId": "bkr_checkout-tax",
-  "cdpUrl": "http://127.0.0.1:9696/_pwdev/broker/instances/bkr_checkout-tax",
+  "ok": true,
+  "session": {
+    "sessionId": "checkout-tax__smoke-login-20260629",
+    "taskId": "smoke-login-20260629",
+    "profile": "checkout-tax__smoke-login-20260629",
+    "browserInstanceId": "bkr_checkout-tax__smoke-login-20260629",
+    "cdpUrl": "http://127.0.0.1:9696/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629",
+    "activeTask": {
+      "id": "smoke-login-20260629",
+      "label": "Smoke login flow",
+      "owner": "codex",
+      "startedAt": "2026-06-29T10:16:05.000Z"
+    }
+  },
+  "app": {
+    "id": "checkout-tax",
+    "appUrl": "http://127.0.0.1:5174",
+    "profile": "checkout-tax",
+    "proxyForwardId": "whistle",
+    "browserSessions": {
+      "checkout-tax__smoke-login-20260629": {
+        "sessionId": "checkout-tax__smoke-login-20260629",
+        "taskId": "smoke-login-20260629",
+        "profile": "checkout-tax__smoke-login-20260629",
+        "cdpUrl": "http://127.0.0.1:9696/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629"
+      }
+    }
+  }
+}
+```
+
+Starting without `task.id` uses the app's default browser slot and stores
+`cdpUrl`, `browserInstanceId`, and `activeTask` directly on the app.
+
+The default task profile can be overridden with an explicit `profile` in the
+browser start body. Profile names must contain only letters, numbers, dot,
+underscore, and dash.
+
+Duplicate starts are rejected per slot. A second start for the same task id
+returns `409 Conflict`:
+
+```json
+{
+  "ok": false,
+  "error": "App already has an active browser session for task",
+  "appId": "checkout-tax",
+  "sessionId": "checkout-tax__smoke-login-20260629",
+  "taskId": "smoke-login-20260629",
+  "profile": "checkout-tax__smoke-login-20260629",
+  "browserInstanceId": "bkr_checkout-tax__smoke-login-20260629",
   "activeTask": {
     "id": "smoke-login-20260629",
     "label": "Smoke login flow",
@@ -179,10 +239,17 @@ Attach from Playwright:
 ```js
 import { chromium } from 'playwright';
 
+const started = await fetch('http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/start', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ task: { id: 'smoke-login-20260629', owner: 'codex' } }),
+}).then((response) => response.json());
+
 const manifest = await fetch('http://127.0.0.1:9696/_pwdev/apps/checkout-tax/manifest')
   .then((response) => response.json());
 
-const browser = await chromium.connectOverCDP(manifest.cdpUrl);
+const cdpUrl = started.session?.cdpUrl ?? manifest.cdpUrl;
+const browser = await chromium.connectOverCDP(cdpUrl);
 const context = browser.contexts()[0];
 const page = context.pages()[0] ?? await context.newPage();
 
@@ -198,30 +265,15 @@ curl http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/status
 Stop the app browser:
 
 ```bash
-curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/stop
+curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/stop \
+  -H 'content-type: application/json' \
+  -d '{"taskId":"smoke-login-20260629"}'
 ```
 
-Stopping removes `cdpUrl`, `browserInstanceId`, and `browserStartedAt` from the
-app record. It also clears `activeTask`. The app registration remains for later
-reuse.
-
-`browser/start` is strict by default. If the app already has `browserInstanceId`
-or `activeTask`, the server returns `409 Conflict` and does not call the broker:
-
-```json
-{
-  "ok": false,
-  "error": "App already has an active browser task",
-  "appId": "checkout-tax",
-  "browserInstanceId": "bkr_checkout-tax",
-  "activeTask": {
-    "id": "smoke-login-20260629",
-    "label": "Smoke login flow",
-    "owner": "codex",
-    "startedAt": "2026-06-29T10:16:05.000Z"
-  }
-}
-```
+Stopping with `taskId` removes that task session from `browserSessions`.
+Stopping the default slot removes `cdpUrl`, `browserInstanceId`,
+`browserStartedAt`, and `activeTask` from the app record. The app registration
+remains for later reuse.
 
 ## Cleanup Policy
 
@@ -229,7 +281,7 @@ Agents should clean up explicitly when a task is complete:
 
 ```text
 1. Detach Playwright with browser.close().
-2. POST /_pwdev/apps/:id/browser/stop.
+2. POST /_pwdev/apps/:id/browser/stop with `taskId` for task sessions.
 3. Keep the app registration for later tasks.
 4. Keep the persistent profile unless a separate reset/clear action is requested.
 ```
@@ -240,42 +292,32 @@ can warn about stale tasks without making browser termination implicit.
 
 ## Parallel Verification
 
-An app id has one active browser task by default. This keeps ownership simple:
-one app id maps to one profile, one broker instance, and one active task. If a
-second task tries to start on the same app id, the server returns `409 Conflict`.
-
-To verify multiple fixes on the same branch in parallel, register multiple app
-ids that point at the same `appUrl` but use distinct profiles:
+An app id has one default browser slot plus task-scoped browser sessions. To
+verify multiple fixes on the same branch in parallel, register one app id for
+the real app:
 
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/apps \
   -H 'content-type: application/json' \
   -d '{
-    "id": "main-fix-a",
-    "name": "main fix A",
+    "id": "main",
+    "name": "main",
     "appUrl": "http://127.0.0.1:5173",
-    "profile": "main-fix-a"
-  }'
-
-curl -X POST http://127.0.0.1:9696/_pwdev/apps \
-  -H 'content-type: application/json' \
-  -d '{
-    "id": "main-fix-b",
-    "name": "main fix B",
-    "appUrl": "http://127.0.0.1:5173",
-    "profile": "main-fix-b"
+    "profile": "main"
   }'
 ```
 
-Each slot can then start its own browser task:
+Then start separate task sessions against that app. Each task gets its own
+profile by default:
 
 ```text
-POST /_pwdev/apps/main-fix-a/browser/start
-POST /_pwdev/apps/main-fix-b/browser/start
+POST /_pwdev/apps/main/browser/start { "task": { "id": "task-a" } }
+POST /_pwdev/apps/main/browser/start { "task": { "id": "task-b" } }
 ```
 
-Use separate profiles for parallel slots. Reusing a profile across concurrent
-browser instances can collide at the broker/profile-directory layer.
+Those requests use profiles `main__task-a` and `main__task-b`. Reusing a profile
+across concurrent browser instances returns `409 Conflict` or can collide at
+the broker/profile-directory layer.
 
 ## Endpoints
 
@@ -301,10 +343,21 @@ POST   /_pwdev/apps/:id/browser/stop
 
 ANY    /_pwdev/broker/*
 WS     /_pwdev/broker/*
+
+GET    /_pwdev/w2mgr/status
+POST   /_pwdev/w2mgr/sync
+POST   /_pwdev/w2mgr/apps/:id/start
+POST   /_pwdev/w2mgr/apps/:id/stop
+POST   /_pwdev/w2mgr/proxies/:id/start
+POST   /_pwdev/w2mgr/proxies/:id/stop
+POST   /_pwdev/w2mgr/start-all
+POST   /_pwdev/w2mgr/stop-all
 ```
 
 `/_pwdev/broker/*` maps to broker `/_broker/*`. It is mainly used for proxied
 CDP URLs, but it also leaves a raw broker API escape hatch for advanced tooling.
+`/_pwdev/w2mgr/*` maps to `w2mgr` `/_w2mgr/*`, so agents can start/stop
+registered app and proxy processes without knowing the manager port.
 
 ## Broker Diagnostics
 

@@ -18,8 +18,13 @@ packages/
     Thin dependency-free dev server wrapper. Static files, health, and
     /_pwdev discovery endpoints without pulling Playwright into the base.
 
+  w2mgr/
+    Optional app devserver and in-house Whistle process manager driven by the
+    pw-dev registry.
+
   cli/
-    Root command dispatcher for `pw-dev broker` and `pw-dev server`.
+    Root command dispatcher for `pw-dev broker`, `pw-dev server`, and
+    `pw-dev w2mgr`.
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the component diagrams,
@@ -73,6 +78,17 @@ npm start -- server \
 
 By default the server probes the broker at `http://127.0.0.1:18080`. Use
 `--broker-url` only when the broker runs somewhere else.
+
+Start the optional app/proxy process manager:
+
+```bash
+npm start -- w2mgr --auto-start
+```
+
+`w2mgr` reads registered apps and proxies from `pw-dev/server`, starts app
+`devserver` commands, and starts Whistle proxies. Whistle uses a managed port
+pool from `8888` through `8899`; if a registered proxy port is already in use,
+`w2mgr` picks the next free pool port and updates the proxy registration.
 
 Discovery endpoints:
 
@@ -148,6 +164,14 @@ GET    /_pwdev/apps/:id/browser/status
 POST   /_pwdev/apps/:id/browser/start
 POST   /_pwdev/apps/:id/browser/stop
 ANY    /_pwdev/broker/*
+GET    /_pwdev/w2mgr/status
+POST   /_pwdev/w2mgr/sync
+POST   /_pwdev/w2mgr/apps/:id/start
+POST   /_pwdev/w2mgr/apps/:id/stop
+POST   /_pwdev/w2mgr/proxies/:id/start
+POST   /_pwdev/w2mgr/proxies/:id/stop
+POST   /_pwdev/w2mgr/start-all
+POST   /_pwdev/w2mgr/stop-all
 ```
 
 Agents attach through the app manifest's `cdpUrl`. They only need the app
@@ -161,7 +185,9 @@ update a proxy port by re-posting the same proxy `id` with a new `proxyUrl`.
 production accounts, personal credentials, or sensitive tokens.
 
 Browser start accepts task metadata so agents and humans can see why a browser
-session exists:
+session exists. With `task.id`, the server creates a task-scoped browser session
+under the same app and uses profile `<app id>__<task id>` unless `profile` is
+explicitly supplied:
 
 ```json
 {
@@ -173,10 +199,13 @@ session exists:
 }
 ```
 
-If an app already has an active browser task, another `browser/start` returns
-`409 Conflict`. Agents should end completed tasks explicitly with
-`POST /_pwdev/apps/:id/browser/stop`; app registrations and persistent profiles
-remain available for later tasks.
+The start response includes `session.cdpUrl` for task-scoped starts. Agents
+should attach to that URL, or to `app.cdpUrl` for a default no-task browser.
+
+Duplicate starts for the same default slot or same `task.id` return
+`409 Conflict`. Agents should end completed task sessions explicitly with
+`POST /_pwdev/apps/:id/browser/stop` and a `taskId` body; app registrations and
+persistent profiles remain available for later tasks.
 
 ## Tests
 

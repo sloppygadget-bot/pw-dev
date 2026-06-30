@@ -27,6 +27,7 @@ const MIME_TYPES = new Map([
 ]);
 
 const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
+const DEFAULT_W2MGR_URL = 'http://127.0.0.1:18081';
 
 /**
  * Options for `startPwDevServer`.
@@ -45,6 +46,7 @@ const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
  * @property {string=} branch Source branch name for display/discovery.
  * @property {string=} appUrl URL of the actual app devserver. Defaults to this server's origin.
  * @property {string=} brokerUrl Broker base URL paired with this server for browser lifecycle endpoints. Defaults to `http://127.0.0.1:18080`.
+ * @property {string=} w2mgrUrl Optional w2mgr base URL proxied under `/_pwdev/w2mgr/*`. Defaults to `http://127.0.0.1:18081`.
  * @property {string=} cdpUrl Optional Playwright CDP URL for direct browser attachment.
  * @property {string=} profile Optional broker profile name for the app.
  * @property {string=} proxyId Optional proxy registry id for the app.
@@ -56,8 +58,10 @@ const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
  * App manifest returned from `/_pwdev/manifest` and
  * `/_pwdev/apps/:id/manifest`.
  *
- * Agents should treat `appUrl` and `cdpUrl` as the primary attach contract:
- * load the app at `appUrl`, and connect Playwright over `cdpUrl` when present.
+ * Agents should treat `appUrl` and a browser CDP URL as the primary attach
+ * contract: load the app at `appUrl`, and connect Playwright over app `cdpUrl`
+ * for the default browser slot or `browserSessions[sessionId].cdpUrl` for a
+ * task-scoped browser session.
  *
  * @typedef {object} PwDevAppManifest
  * @property {true} ok
@@ -79,6 +83,7 @@ const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
  * @property {string=} browserInstanceId Broker instance id for a managed browser session.
  * @property {string=} browserStartedAt ISO timestamp returned by the broker for the managed browser session.
  * @property {PwDevActiveTask=} activeTask Agent/user task that currently owns the browser session.
+ * @property {Record<string, PwDevBrowserSession>=} browserSessions Task-scoped browser sessions for parallel app work.
  * @property {string=} serverUrl pw-dev server URL that registered or serves this app.
  * @property {string=} createdAt Registry creation timestamp.
  * @property {string=} updatedAt Registry update timestamp.
@@ -169,6 +174,22 @@ const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
  */
 
 /**
+ * Task-scoped browser session metadata stored on an app.
+ *
+ * @typedef {object} PwDevBrowserSession
+ * @property {string} sessionId Stable session id, composed as `<app id>__<task id>`.
+ * @property {string} taskId Task id that owns the session.
+ * @property {string} profile Broker profile used by the session.
+ * @property {string} cdpUrl Server-proxied CDP URL.
+ * @property {string} browserInstanceId Broker instance id for the Chrome process.
+ * @property {string=} browserStartedAt ISO timestamp returned by the broker.
+ * @property {string=} proxyId Reusable proxy registry id associated with the session.
+ * @property {string=} proxyForwardId Broker proxy-forward id associated with the session.
+ * @property {string=} proxyServer Explicit Chrome proxy server URL associated with the session.
+ * @property {PwDevActiveTask} activeTask Task metadata that owns the session.
+ */
+
+/**
  * Task metadata accepted by `/_pwdev/apps/:id/browser/start`.
  *
  * @typedef {object} PwDevTaskInput
@@ -235,6 +256,7 @@ export async function startPwDevServer(options = {}) {
   });
   const startedAt = new Date().toISOString();
   const broker = createBrokerPairing({ brokerUrl: options.brokerUrl });
+  const w2mgrUrl = normalizeHttpUrl(options.w2mgrUrl ?? DEFAULT_W2MGR_URL, 'w2mgrUrl');
   const apps = createAppRegistry();
   const proxies = createProxyRegistry();
   apps.upsert(buildManifest({ root, worktree, origin: undefined, metadata }));
@@ -243,7 +265,7 @@ export async function startPwDevServer(options = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker, w2mgrUrl });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -299,6 +321,7 @@ export async function startPwDevServer(options = {}) {
  * - `GET /_pwdev/instructions`
  * - `GET /_pwdev/client.js`
  * - `ANY /_pwdev/broker/*`
+ * - `ANY /_pwdev/w2mgr/*`
  * - `GET|POST /_pwdev/apps`
  * - `GET|DELETE /_pwdev/apps/:id`
  * - `GET /_pwdev/apps/:id/manifest`
@@ -319,10 +342,11 @@ export async function startPwDevServer(options = {}) {
  *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
  *   broker: PwDevBrokerPairing,
+ *   w2mgrUrl: string,
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker, w2mgrUrl }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -330,6 +354,11 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
 
   if (requestUrl.pathname.startsWith('/_pwdev/broker')) {
     await proxyBrokerHttpRequest({ req, res, requestUrl, broker });
+    return;
+  }
+
+  if (requestUrl.pathname.startsWith('/_pwdev/w2mgr')) {
+    await proxyW2MgrHttpRequest({ req, res, requestUrl, w2mgrUrl });
     return;
   }
 
@@ -362,6 +391,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
       root,
       worktree,
       broker: await broker.status(),
+      w2mgr: { url: w2mgrUrl },
       proxies: proxies.list(),
       manifest,
     }, writeBody);
@@ -437,11 +467,11 @@ export function createAppRegistry(initialApps = []) {
     list() {
       return Array.from(apps.values())
         .sort((a, b) => a.id.localeCompare(b.id))
-        .map((app) => ({ ...app }));
+        .map((app) => cloneApp(app));
     },
     get(id) {
       const app = apps.get(id);
-      return app ? { ...app } : undefined;
+      return app ? cloneApp(app) : undefined;
     },
     upsert(rawApp) {
       const app = validateAppRegistration(rawApp);
@@ -454,7 +484,7 @@ export function createAppRegistry(initialApps = []) {
       if (!saved.name) saved.name = saved.id;
       if (!existing?.createdAt) saved.createdAt = saved.updatedAt;
       apps.set(saved.id, saved);
-      return { ...saved };
+      return cloneApp(saved);
     },
     update(id, patch) {
       const existing = apps.get(id);
@@ -469,7 +499,7 @@ export function createAppRegistry(initialApps = []) {
       }
       saved.updatedAt = new Date().toISOString();
       apps.set(id, saved);
-      return { ...saved };
+      return cloneApp(saved);
     },
     delete(id) {
       return apps.delete(id);
@@ -478,6 +508,24 @@ export function createAppRegistry(initialApps = []) {
 
   for (const app of initialApps) registry.upsert(app);
   return registry;
+}
+
+function cloneApp(app) {
+  return {
+    ...app,
+    ...(app.activeTask ? { activeTask: { ...app.activeTask } } : {}),
+    ...(app.browserSessions ? { browserSessions: cloneBrowserSessions(app.browserSessions) } : {}),
+  };
+}
+
+function cloneBrowserSessions(sessions) {
+  return Object.fromEntries(Object.entries(sessions).map(([id, session]) => [
+    id,
+    {
+      ...session,
+      ...(session.activeTask ? { activeTask: { ...session.activeTask } } : {}),
+    },
+  ]));
 }
 
 /**
@@ -794,6 +842,44 @@ async function proxyBrokerHttpRequest({ req, res, requestUrl, broker }) {
 }
 
 /**
+ * Proxy w2mgr HTTP APIs through the pw-dev server.
+ *
+ * `/_pwdev/w2mgr/*` maps to the manager's `/_w2mgr/*` namespace.
+ *
+ * @param {{
+ *   req: http.IncomingMessage,
+ *   res: http.ServerResponse,
+ *   requestUrl: URL,
+ *   w2mgrUrl: string,
+ * }} options
+ * @returns {Promise<void>}
+ */
+async function proxyW2MgrHttpRequest({ req, res, requestUrl, w2mgrUrl }) {
+  const upstreamUrl = new URL(proxyW2MgrPath(requestUrl), ensureTrailingSlash(w2mgrUrl));
+  const headers = { ...req.headers, host: upstreamUrl.host };
+
+  const upstream = http.request(upstreamUrl, {
+    method: req.method,
+    headers,
+  }, (response) => {
+    res.writeHead(response.statusCode ?? 502, response.headers);
+    response.pipe(res);
+  });
+
+  upstream.once('error', (error) => {
+    if (res.headersSent) {
+      res.destroy(error);
+      return;
+    }
+    writeJson(res, 502, {
+      ok: false,
+      error: `w2mgr is unreachable at ${w2mgrUrl}: ${error.message}`,
+    });
+  });
+  req.pipe(upstream);
+}
+
+/**
  * Proxy broker WebSocket upgrades through the pw-dev server.
  *
  * Playwright CDP connects over WebSocket after HTTP JSON discovery. Rewriting
@@ -866,13 +952,19 @@ function proxyBrokerPath(requestUrl) {
   return `/_broker${suffix || ''}${requestUrl.search}`;
 }
 
+function proxyW2MgrPath(requestUrl) {
+  const suffix = requestUrl.pathname.slice('/_pwdev/w2mgr'.length);
+  return `/_w2mgr${suffix || ''}${requestUrl.search}`;
+}
+
 /**
  * Bridge app-scoped browser lifecycle routes to the broker.
  *
  * The app registry remains the agent-facing source of truth. On start, this
  * helper calls `POST /_broker/start`, saves the returned `cdpUrl` and
- * `instanceId` onto the app, and returns both app and broker payloads. On stop,
- * it calls `POST /_broker/stop` and removes the app's managed session fields.
+ * `instanceId` onto the app's default browser slot or a task-scoped
+ * `browserSessions` entry, and returns app, session, and broker payloads. On
+ * stop, it calls `POST /_broker/stop` and removes the matching session fields.
  *
  * @param {{
  *   req: http.IncomingMessage,
@@ -912,19 +1004,15 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
       res.end('Method Not Allowed');
       return;
     }
-    if (app.browserInstanceId || app.activeTask) {
-      writeJson(res, 409, {
-        ok: false,
-        error: 'App already has an active browser task',
-        appId: app.id,
-        browserInstanceId: app.browserInstanceId,
-        activeTask: app.activeTask,
-      });
-      return;
-    }
     const payload = await readJsonBody(req);
     const brokerUrl = broker.resolve(payload.brokerUrl ?? app.brokerUrl);
     const task = payload.task === undefined ? undefined : validateTaskInput(payload.task);
+    const slot = resolveBrowserSessionSlot({ app, payload, task });
+    const conflict = findBrowserSessionConflict({ app, slot });
+    if (conflict) {
+      writeJson(res, 409, conflict);
+      return;
+    }
     const proxy = resolveProxyForBrowserStart({
       proxies,
       proxyId: payload.proxyId ?? app.proxyId,
@@ -934,7 +1022,7 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
     const start = await brokerJson(brokerUrl, '/_broker/start', {
       method: 'POST',
       body: omitUndefined({
-        profile: payload.profile ?? app.profile ?? app.id,
+        profile: slot.profile,
         proxyForwardId: proxy.proxyForwardId,
         proxyServer: proxy.proxyServer,
         proxyBypassList: payload.proxyBypassList,
@@ -944,20 +1032,41 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
       }),
     });
     const proxiedCdpUrl = rewriteBrokerUrlToServerProxy(start.cdpUrl, serverUrl);
-    const updated = apps.update(id, {
-      cdpUrl: proxiedCdpUrl,
-      profile: start.profile,
-      proxyId: proxy.proxyId ?? app.proxyId,
-      browserInstanceId: start.instanceId,
-      proxyForwardId: start.proxyForwardId,
-      proxyServer: start.proxyServer,
-      browserStartedAt: start.startedAt,
-      ...(task ? { activeTask: {
-        ...task,
-        startedAt: new Date().toISOString(),
-      } } : {}),
-    });
-    writeJson(res, 200, { ok: true, app: updated, browser: { ...start, cdpUrl: proxiedCdpUrl } });
+    const activeTask = task ? {
+      ...task,
+      startedAt: new Date().toISOString(),
+    } : undefined;
+    const browser = { ...start, cdpUrl: proxiedCdpUrl };
+    let updated;
+    let session;
+    if (slot.taskId) {
+      session = makeBrowserSession({
+        sessionId: slot.sessionId,
+        task,
+        activeTask,
+        start,
+        profile: slot.profile,
+        cdpUrl: proxiedCdpUrl,
+        proxy,
+      });
+      updated = apps.update(id, {
+        browserSessions: {
+          ...(app.browserSessions ?? {}),
+          [slot.sessionId]: session,
+        },
+      });
+    } else {
+      updated = apps.update(id, {
+        cdpUrl: proxiedCdpUrl,
+        profile: start.profile,
+        proxyId: proxy.proxyId ?? app.proxyId,
+        browserInstanceId: start.instanceId,
+        proxyForwardId: start.proxyForwardId,
+        proxyServer: start.proxyServer,
+        browserStartedAt: start.startedAt,
+      });
+    }
+    writeJson(res, 200, omitUndefined({ ok: true, app: updated, session, browser }));
     return;
   }
 
@@ -969,7 +1078,8 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
     }
     const payload = await readJsonBody(req);
     const brokerUrl = broker.resolve(payload.brokerUrl ?? app.brokerUrl);
-    const instanceId = payload.instanceId ?? app.browserInstanceId;
+    const stopTarget = resolveBrowserStopTarget({ app, payload });
+    const instanceId = stopTarget?.browserInstanceId;
     if (!instanceId) {
       writeJson(res, 400, { ok: false, error: `App has no browser instance: ${id}` });
       return;
@@ -978,17 +1088,163 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
       method: 'POST',
       body: { instanceId },
     });
-    const updated = apps.update(id, {
-      cdpUrl: undefined,
-      browserInstanceId: undefined,
-      browserStartedAt: undefined,
-      activeTask: undefined,
-    });
-    writeJson(res, 200, { ok: true, app: updated, browser: stop });
+    let updated;
+    if (stopTarget.taskId) {
+      const browserSessions = { ...(app.browserSessions ?? {}) };
+      delete browserSessions[stopTarget.sessionId];
+      updated = apps.update(id, {
+        browserSessions: Object.keys(browserSessions).length ? browserSessions : undefined,
+      });
+    } else {
+      updated = apps.update(id, {
+        cdpUrl: undefined,
+        browserInstanceId: undefined,
+        browserStartedAt: undefined,
+        activeTask: undefined,
+      });
+    }
+    writeJson(res, 200, { ok: true, app: updated, session: stopTarget.session, browser: stop });
     return;
   }
 
   writeJson(res, 404, { ok: false, error: 'Unknown app browser endpoint' }, writeBody);
+}
+
+function resolveBrowserSessionSlot({ app, payload, task }) {
+  const sessionId = task ? composeBrowserSessionId(app.id, task.id) : undefined;
+  const profile = payload.profile !== undefined
+    ? requiredString(payload.profile, 'profile')
+    : task
+      ? sessionId
+      : app.profile ?? app.id;
+  validateBrowserProfileName(profile, 'profile');
+  return {
+    taskId: task?.id,
+    sessionId,
+    profile,
+  };
+}
+
+function findBrowserSessionConflict({ app, slot }) {
+  if (slot.sessionId) {
+    const existing = app.browserSessions?.[slot.sessionId];
+    if (existing) {
+      return {
+        ok: false,
+        error: 'App already has an active browser session for task',
+        appId: app.id,
+        sessionId: slot.sessionId,
+        taskId: slot.taskId,
+        profile: existing.profile,
+        browserInstanceId: existing.browserInstanceId,
+        activeTask: existing.activeTask,
+        session: existing,
+      };
+    }
+  } else if (app.browserInstanceId || app.activeTask) {
+    return {
+      ok: false,
+      error: 'App already has an active browser task',
+      appId: app.id,
+      browserInstanceId: app.browserInstanceId,
+      activeTask: app.activeTask,
+    };
+  }
+
+  const profileConflict = findActiveBrowserProfile(app, slot.profile);
+  if (!profileConflict) return undefined;
+  return omitUndefined({
+    ok: false,
+    error: 'Browser profile already has an active session',
+    appId: app.id,
+    taskId: profileConflict.taskId,
+    profile: slot.profile,
+    browserInstanceId: profileConflict.browserInstanceId,
+    activeTask: profileConflict.activeTask,
+    session: profileConflict.session,
+  });
+}
+
+function findActiveBrowserProfile(app, profile) {
+  if (app.browserInstanceId && app.profile === profile) {
+    return {
+      browserInstanceId: app.browserInstanceId,
+      activeTask: app.activeTask,
+    };
+  }
+  for (const session of Object.values(app.browserSessions ?? {})) {
+    if (session.profile === profile) {
+      return {
+        taskId: session.taskId,
+        sessionId: session.sessionId,
+        browserInstanceId: session.browserInstanceId,
+        activeTask: session.activeTask,
+        session,
+      };
+    }
+  }
+  return undefined;
+}
+
+function makeBrowserSession({ sessionId, task, activeTask, start, profile, cdpUrl, proxy }) {
+  return omitUndefined({
+    sessionId,
+    taskId: task.id,
+    profile: start.profile ?? profile,
+    cdpUrl,
+    browserInstanceId: start.instanceId,
+    browserStartedAt: start.startedAt,
+    proxyId: proxy.proxyId,
+    proxyForwardId: start.proxyForwardId,
+    proxyServer: start.proxyServer,
+    activeTask,
+  });
+}
+
+function resolveBrowserStopTarget({ app, payload }) {
+  const sessionId = optionalString(payload.sessionId, 'sessionId');
+  if (sessionId) {
+    const session = app.browserSessions?.[sessionId];
+    return session ? { sessionId, taskId: session.taskId, session, browserInstanceId: session.browserInstanceId } : undefined;
+  }
+
+  const taskId = payload.taskId !== undefined
+    ? requiredString(payload.taskId, 'taskId')
+    : payload.task === undefined
+      ? undefined
+      : validateTaskInput(payload.task).id;
+  if (taskId) {
+    const session = Object.values(app.browserSessions ?? {}).find((candidate) => candidate.taskId === taskId);
+    return session ? { sessionId: session.sessionId, taskId, session, browserInstanceId: session.browserInstanceId } : undefined;
+  }
+
+  const instanceId = optionalString(payload.instanceId, 'instanceId');
+  if (instanceId) {
+    if (app.browserInstanceId === instanceId) {
+      return { browserInstanceId: app.browserInstanceId };
+    }
+    for (const session of Object.values(app.browserSessions ?? {})) {
+      if (session.browserInstanceId === instanceId) {
+        return { sessionId: session.sessionId, taskId: session.taskId, session, browserInstanceId: session.browserInstanceId };
+      }
+    }
+    return undefined;
+  }
+
+  return app.browserInstanceId ? { browserInstanceId: app.browserInstanceId } : undefined;
+}
+
+function composeBrowserSessionId(appId, taskId) {
+  return `${appId}__${taskId}`;
+}
+
+function validateBrowserProfileName(profile, name) {
+  if (!/^[A-Za-z0-9._-]+$/.test(profile)) {
+    throwValidationError(`${name} must contain only letters, numbers, dot, underscore, and dash`);
+  }
+  if (profile === '.' || profile === '..') {
+    throwValidationError(`${name} cannot be "." or ".."`);
+  }
 }
 
 /**
@@ -1074,9 +1330,13 @@ function createBrokerPairing({ brokerUrl } = {}) {
 }
 
 function normalizeBrokerUrl(value) {
+  return normalizeHttpUrl(value, 'brokerUrl');
+}
+
+function normalizeHttpUrl(value, name) {
   const url = new URL(value);
   if (url.protocol !== 'http:') {
-    throw new Error('brokerUrl must use http://');
+    throw new Error(`${name} must use http://`);
   }
   return url.toString().replace(/\/$/, '');
 }
@@ -1213,6 +1473,7 @@ function validateAppRegistration(rawApp) {
     browserInstanceId: optionalString(rawApp.browserInstanceId, 'browserInstanceId'),
     browserStartedAt: optionalString(rawApp.browserStartedAt, 'browserStartedAt'),
     activeTask: rawApp.activeTask === undefined ? undefined : validateActiveTask(rawApp.activeTask),
+    browserSessions: rawApp.browserSessions === undefined ? undefined : validateBrowserSessions(rawApp.browserSessions),
     serverUrl: optionalString(rawApp.serverUrl, 'serverUrl'),
     createdAt: optionalString(rawApp.createdAt, 'createdAt'),
     updatedAt: optionalString(rawApp.updatedAt, 'updatedAt'),
@@ -1371,6 +1632,34 @@ function validateActiveTask(rawTask) {
   };
 }
 
+function validateBrowserSessions(rawSessions) {
+  if (!rawSessions || typeof rawSessions !== 'object' || Array.isArray(rawSessions)) {
+    throwValidationError('browserSessions must be an object');
+  }
+  return Object.fromEntries(Object.entries(rawSessions).map(([id, rawSession]) => [
+    id,
+    validateBrowserSession(rawSession, `browserSessions.${id}`),
+  ]));
+}
+
+function validateBrowserSession(rawSession, name) {
+  if (!rawSession || typeof rawSession !== 'object' || Array.isArray(rawSession)) {
+    throwValidationError(`${name} must be an object`);
+  }
+  return omitUndefined({
+    sessionId: requiredString(rawSession.sessionId, `${name}.sessionId`),
+    taskId: requiredString(rawSession.taskId, `${name}.taskId`),
+    profile: requiredString(rawSession.profile, `${name}.profile`),
+    cdpUrl: requiredString(rawSession.cdpUrl, `${name}.cdpUrl`),
+    browserInstanceId: requiredString(rawSession.browserInstanceId, `${name}.browserInstanceId`),
+    browserStartedAt: optionalString(rawSession.browserStartedAt, `${name}.browserStartedAt`),
+    proxyId: optionalString(rawSession.proxyId, `${name}.proxyId`),
+    proxyForwardId: optionalString(rawSession.proxyForwardId, `${name}.proxyForwardId`),
+    proxyServer: optionalString(rawSession.proxyServer, `${name}.proxyServer`),
+    activeTask: validateActiveTask(rawSession.activeTask),
+  });
+}
+
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.trim() === '') {
     throwValidationError(`${name} must be a non-empty string`);
@@ -1515,7 +1804,7 @@ production accounts, personal credentials, or sensitive tokens in app metadata.
 ## Start browser and attach Playwright
 
 \`\`\`js
-await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
+const started = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
@@ -1526,26 +1815,51 @@ await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
       owner: 'codex',
     },
   }),
-});
+}).then((response) => response.json());
 
 const manifest = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/manifest')
   .then((response) => response.json());
 
-const browser = await chromium.connectOverCDP(manifest.cdpUrl);
+const cdpUrl = started.session?.cdpUrl ?? manifest.cdpUrl;
+const browser = await chromium.connectOverCDP(cdpUrl);
 const context = browser.contexts()[0];
 const page = context.pages()[0] ?? await context.newPage();
 await page.goto(manifest.appUrl);
 \`\`\`
 
-The manifest \`cdpUrl\` points at \`/_pwdev/broker/*\`, which proxies broker
-HTTP and WebSocket traffic through this server.
+The default manifest \`cdpUrl\` and task session \`cdpUrl\` values point at
+\`/_pwdev/broker/*\`, which proxies broker HTTP and WebSocket traffic through
+this server.
 
 ## Stop browser
 
 \`\`\`js
 await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/stop', {
   method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ taskId: 'smoke-login-20260629' }),
 });
+\`\`\`
+
+## Start registered app/proxy processes with w2mgr
+
+If \`pw-dev w2mgr\` is running, use the server-proxied API. Agents do not need
+the w2mgr port directly.
+Whistle proxy ports are allocated from \`8888-8899\`; if a registered proxy
+port conflicts, w2mgr chooses the next free pool port and updates the proxy
+registration.
+
+\`\`\`js
+await fetch('${serverUrl}/_pwdev/w2mgr/proxies/whistle-main/start', {
+  method: 'POST',
+});
+
+await fetch('${serverUrl}/_pwdev/w2mgr/apps/fortisase-dev/start', {
+  method: 'POST',
+});
+
+const w2mgrStatus = await fetch('${serverUrl}/_pwdev/w2mgr/status')
+  .then((response) => response.json());
 \`\`\`
 
 ## Endpoints
@@ -1567,6 +1881,14 @@ GET    /_pwdev/apps/:id/browser/status
 POST   /_pwdev/apps/:id/browser/start
 POST   /_pwdev/apps/:id/browser/stop
 ANY    /_pwdev/broker/*
+GET    /_pwdev/w2mgr/status
+POST   /_pwdev/w2mgr/sync
+POST   /_pwdev/w2mgr/apps/:id/start
+POST   /_pwdev/w2mgr/apps/:id/stop
+POST   /_pwdev/w2mgr/proxies/:id/start
+POST   /_pwdev/w2mgr/proxies/:id/stop
+POST   /_pwdev/w2mgr/start-all
+POST   /_pwdev/w2mgr/stop-all
 \`\`\`
 
 Helper source is available from:
@@ -1637,6 +1959,54 @@ export async function registerPwDevApp(app, { serverUrl = '${serverUrl}' } = {})
   return response.json();
 }
 
+export async function loadPwDevW2MgrStatus({ serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/status\`);
+  if (!response.ok) {
+    throw new Error(\`pw-dev w2mgr status failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function startPwDevW2MgrApp(appId, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/apps/\${encodeURIComponent(appId)}/start\`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw new Error(\`pw-dev w2mgr app start failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function stopPwDevW2MgrApp(appId, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/apps/\${encodeURIComponent(appId)}/stop\`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw new Error(\`pw-dev w2mgr app stop failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function startPwDevW2MgrProxy(proxyId, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/proxies/\${encodeURIComponent(proxyId)}/start\`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw new Error(\`pw-dev w2mgr proxy start failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function stopPwDevW2MgrProxy(proxyId, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/proxies/\${encodeURIComponent(proxyId)}/stop\`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw new Error(\`pw-dev w2mgr proxy stop failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
 export async function loadPwDevManifest({ serverUrl = '${serverUrl}', appId } = {}) {
   const path = appId
     ? \`/_pwdev/apps/\${encodeURIComponent(appId)}/manifest\`
@@ -1683,12 +2053,12 @@ export async function startPwDevBrowser({
   return response.json();
 }
 
-export async function stopPwDevBrowser({ serverUrl = '${serverUrl}', appId, instanceId } = {}) {
+export async function stopPwDevBrowser({ serverUrl = '${serverUrl}', appId, instanceId, taskId, task } = {}) {
   if (!appId) throw new Error('stopPwDevBrowser requires appId');
   const response = await fetch(\`\${serverUrl}/_pwdev/apps/\${encodeURIComponent(appId)}/browser/stop\`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ instanceId }),
+    body: JSON.stringify({ instanceId, taskId, task }),
   });
   if (!response.ok) {
     throw new Error(\`pw-dev browser stop failed: \${response.status} \${await response.text()}\`);

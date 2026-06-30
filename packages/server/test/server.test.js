@@ -20,6 +20,7 @@ test('parseArgs reads server options', () => {
     '--branch', 'main',
     '--app-url', 'http://127.0.0.1:5173',
     '--broker-url', 'http://127.0.0.1:18080',
+    '--w2mgr-url', 'http://127.0.0.1:18081',
     '--cdp-url', 'http://127.0.0.1:18080/_broker/instances/checkout-main',
     '--profile', 'checkout-main',
     '--proxy-forward-id', 'whistle',
@@ -34,6 +35,7 @@ test('parseArgs reads server options', () => {
   assert.equal(options.branch, 'main');
   assert.equal(options.appUrl, 'http://127.0.0.1:5173');
   assert.equal(options.brokerUrl, 'http://127.0.0.1:18080');
+  assert.equal(options.w2mgrUrl, 'http://127.0.0.1:18081');
   assert.equal(options.cdpUrl, 'http://127.0.0.1:18080/_broker/instances/checkout-main');
   assert.equal(options.profile, 'checkout-main');
   assert.equal(options.proxyForwardId, 'whistle');
@@ -368,24 +370,31 @@ test('server manages app browser sessions through broker', async () => {
       },
     });
     assert.equal(started.statusCode, 200);
-    assert.equal(started.body.app.browserInstanceId, 'bkr_checkout-tax');
-    assert.equal(started.body.app.cdpUrl, `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax`);
-    assert.equal(started.body.browser.cdpUrl, `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax`);
-    assert.equal(started.body.app.proxyForwardId, 'whistle');
+    assert.equal(started.body.session.sessionId, 'checkout-tax__smoke-login-20260629');
+    assert.equal(started.body.session.browserInstanceId, 'bkr_checkout-tax__smoke-login-20260629');
+    assert.equal(started.body.session.profile, 'checkout-tax__smoke-login-20260629');
+    assert.equal(started.body.session.cdpUrl, `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629`);
+    assert.equal(started.body.browser.cdpUrl, `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629`);
+    assert.equal(started.body.session.proxyForwardId, 'whistle');
     assert.deepEqual(
-      omitStartedAt(started.body.app.activeTask),
+      omitStartedAt(started.body.session.activeTask),
       {
         id: 'smoke-login-20260629',
         label: 'Smoke login flow',
         owner: 'codex',
       }
     );
-    assert.match(started.body.app.activeTask.startedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.match(started.body.session.activeTask.startedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(
+      started.body.app.browserSessions['checkout-tax__smoke-login-20260629'].cdpUrl,
+      `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629`
+    );
+    assert.equal(started.body.app.cdpUrl, undefined);
     assert.deepEqual(broker.requests[0], {
       method: 'POST',
       path: '/_broker/start',
       body: {
-        profile: 'checkout-tax',
+        profile: 'checkout-tax__smoke-login-20260629',
         proxyForwardId: 'whistle',
         ignoreSslErrors: true,
       },
@@ -393,19 +402,22 @@ test('server manages app browser sessions through broker', async () => {
 
     const manifest = await getJson(`${server.origin}/_pwdev/apps/checkout-tax/manifest`);
     assert.equal(manifest.statusCode, 200);
-    assert.equal(manifest.body.activeTask.id, 'smoke-login-20260629');
+    assert.equal(manifest.body.browserSessions['checkout-tax__smoke-login-20260629'].activeTask.id, 'smoke-login-20260629');
 
     const status = await getJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/status`);
     assert.equal(status.statusCode, 200);
     assert.equal(status.body.broker.running, true);
-    assert.equal(status.body.app.activeTask.owner, 'codex');
+    assert.equal(status.body.app.browserSessions['checkout-tax__smoke-login-20260629'].activeTask.owner, 'codex');
 
-    const stopped = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/stop`, {});
+    const stopped = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/stop`, {
+      taskId: 'smoke-login-20260629',
+    });
     assert.equal(stopped.statusCode, 200);
-    assert.equal(stopped.body.browser.stopped, 'bkr_checkout-tax');
+    assert.equal(stopped.body.browser.stopped, 'bkr_checkout-tax__smoke-login-20260629');
     assert.equal(stopped.body.app.cdpUrl, undefined);
     assert.equal(stopped.body.app.browserInstanceId, undefined);
     assert.equal(stopped.body.app.activeTask, undefined);
+    assert.equal(stopped.body.app.browserSessions, undefined);
   } finally {
     await server.close();
     await broker.close();
@@ -637,11 +649,67 @@ test('server rejects duplicate browser start while task is active', async () => 
       },
     });
     assert.equal(duplicate.statusCode, 409);
-    assert.equal(duplicate.body.error, 'App already has an active browser task');
+    assert.equal(duplicate.body.error, 'App already has an active browser session for task');
     assert.equal(duplicate.body.appId, 'checkout-tax');
-    assert.equal(duplicate.body.browserInstanceId, 'bkr_checkout-tax');
+    assert.equal(duplicate.body.sessionId, 'checkout-tax__smoke-login-20260629');
+    assert.equal(duplicate.body.taskId, 'smoke-login-20260629');
+    assert.equal(duplicate.body.profile, 'checkout-tax__smoke-login-20260629');
+    assert.equal(duplicate.body.browserInstanceId, 'bkr_checkout-tax__smoke-login-20260629');
     assert.equal(duplicate.body.activeTask.id, 'smoke-login-20260629');
     assert.equal(broker.requests.filter((request) => request.path === '/_broker/start').length, 1);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server starts parallel task browser sessions for one app', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    id: 'checkout-main',
+    brokerUrl: broker.origin,
+  });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'main',
+      appUrl: 'http://127.0.0.1:5173',
+      profile: 'main',
+    });
+
+    const first = await postJson(`${server.origin}/_pwdev/apps/main/browser/start`, {
+      task: {
+        id: 'task-a',
+        owner: 'codex',
+      },
+    });
+    assert.equal(first.statusCode, 200);
+    assert.equal(first.body.session.sessionId, 'main__task-a');
+    assert.equal(first.body.session.profile, 'main__task-a');
+    assert.equal(first.body.session.browserInstanceId, 'bkr_main__task-a');
+
+    const second = await postJson(`${server.origin}/_pwdev/apps/main/browser/start`, {
+      task: {
+        id: 'task-b',
+        owner: 'codex',
+      },
+    });
+    assert.equal(second.statusCode, 200);
+    assert.equal(second.body.session.sessionId, 'main__task-b');
+    assert.equal(second.body.session.profile, 'main__task-b');
+    assert.equal(second.body.session.browserInstanceId, 'bkr_main__task-b');
+    assert.equal(second.body.app.browserSessions['main__task-a'].profile, 'main__task-a');
+    assert.equal(second.body.app.browserSessions['main__task-b'].profile, 'main__task-b');
+    assert.equal(second.body.app.browserInstanceId, undefined);
+    assert.deepEqual(
+      broker.requests
+        .filter((request) => request.path === '/_broker/start')
+        .map((request) => request.body.profile),
+      ['main__task-a', 'main__task-b']
+    );
   } finally {
     await server.close();
     await broker.close();
@@ -670,6 +738,31 @@ test('server proxies broker HTTP APIs', async () => {
   } finally {
     await server.close();
     await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server proxies w2mgr HTTP APIs', async () => {
+  const manager = await startMockW2Mgr();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    id: 'checkout-main',
+    w2mgrUrl: manager.origin,
+  });
+  try {
+    const status = await getJson(`${server.origin}/_pwdev/w2mgr/status`);
+    assert.equal(status.statusCode, 200);
+    assert.equal(status.body.manager, true);
+    assert.deepEqual(manager.requests[0], {
+      method: 'GET',
+      path: '/_w2mgr/status',
+      body: {},
+    });
+  } finally {
+    await server.close();
+    await manager.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -809,6 +902,38 @@ function startMockBroker() {
         origin,
         requests,
         upgrades,
+        close: () => new Promise((closeResolve, closeReject) => {
+          server.close((error) => error ? closeReject(error) : closeResolve());
+        }),
+      });
+    });
+  });
+}
+
+function startMockW2Mgr() {
+  const requests = [];
+  let origin;
+  const server = http.createServer(async (req, res) => {
+    const body = await readRequestJson(req);
+    requests.push({ method: req.method, path: req.url, body });
+
+    if (req.url === '/_w2mgr/status' && req.method === 'GET') {
+      writeTestJson(res, 200, { ok: true, manager: true });
+      return;
+    }
+
+    writeTestJson(res, 404, { ok: false, error: 'not found' });
+  });
+
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      const address = server.address();
+      origin = `http://127.0.0.1:${address.port}`;
+      resolve({
+        origin,
+        requests,
         close: () => new Promise((closeResolve, closeReject) => {
           server.close((error) => error ? closeReject(error) : closeResolve());
         }),

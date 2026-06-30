@@ -5,6 +5,8 @@
 - The app is the actual development target.
 - `@pw-dev/server` is the central app registry, paired with a broker, and gives tools stable URLs.
 - `@pw-dev/cdp-broker` owns local Chrome, persistent profiles, and CDP access.
+- `@pw-dev/w2mgr` is optional. It starts/stops registered app devservers and
+  in-house Whistle proxies, while the server proxies its API.
 - A human, or the agent/CLI they run, operates Chrome through the
   broker-backed session.
 
@@ -15,15 +17,21 @@ flowchart LR
   Human["Human developer<br/>or agent/CLI they run"]
   App["App devserver<br/>http://127.0.0.1:5173"]
   Server["pw-dev/server<br/>app registry + broker proxy"]
+  W2Mgr["pw-dev/w2mgr<br/>app + Whistle process manager"]
+  Whistle["Whistle proxy<br/>port pool 8888-8899"]
   Broker["pw-dev/broker<br/>profile + CDP endpoint"]
   Chrome["Chrome<br/>persistent profile"]
 
   Human -->|starts app| App
   Human -->|starts central registry| Server
+  Human -->|optional auto-start| W2Mgr
   Human -->|starts with profile| Broker
 
   Server -->|registers appUrl| App
   Server -->|starts/proxies/stores cdpUrl/profile| Broker
+  Server -->|proxies /_pwdev/w2mgr/*| W2Mgr
+  W2Mgr -->|starts/stops| App
+  W2Mgr -->|starts/stops| Whistle
 
   Broker -->|launches / keeps alive| Chrome
   Chrome -->|loads appUrl| App
@@ -130,6 +138,14 @@ GET /_pwdev/apps/:id/browser/status
 POST /_pwdev/apps/:id/browser/start
 POST /_pwdev/apps/:id/browser/stop
 ANY /_pwdev/broker/*
+GET /_pwdev/w2mgr/status
+POST /_pwdev/w2mgr/sync
+POST /_pwdev/w2mgr/apps/:id/start
+POST /_pwdev/w2mgr/apps/:id/stop
+POST /_pwdev/w2mgr/proxies/:id/start
+POST /_pwdev/w2mgr/proxies/:id/stop
+POST /_pwdev/w2mgr/start-all
+POST /_pwdev/w2mgr/stop-all
 ```
 
 The manifest is the main agent contract:
@@ -179,6 +195,9 @@ await page.goto(manifest.appUrl);
 - The server records app, proxy, devserver, engine, and account metadata; it is
   not an app runner or proxy runner. Account metadata is for non-production
   test accounts only.
+- `w2mgr` is the optional runner for app devservers and Whistle proxies. It
+  allocates Whistle ports from `8888-8899` and updates the registry if it has
+  to move a proxy to avoid a conflict.
 - The broker owns Chrome and persistent profile state.
 - The agent attaches to the broker and does not close the browser unless asked.
 - One broker process can own multiple Chrome instances/profiles.
