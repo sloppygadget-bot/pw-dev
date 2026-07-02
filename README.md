@@ -41,6 +41,18 @@ start managed proxy instances without a global `w2`. System requirements are
 Node 18+, a Chromium-family browser for broker mode, and OpenSSH only when
 using SSH tunnel features.
 
+Playwright is intentionally optional. If the local environment should include a
+ready Playwright client and Chromium browser, run:
+
+```bash
+npm run install:playwright
+```
+
+Agent-generated Playwright task code should run inside this workspace so it
+uses the project-local Playwright package. Keep generated task files under
+`.agent/tasks/<task-id>/run.mjs` and artifacts under
+`.agent/tasks/<task-id>/artifacts/`. Task outputs are ignored by git.
+
 ## Run The Broker
 
 ```bash

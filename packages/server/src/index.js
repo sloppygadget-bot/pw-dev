@@ -1833,6 +1833,28 @@ await fetch('${serverUrl}/_pwdev/apps', {
 Only register non-production test accounts in \`accounts\`. Do not put
 production accounts, personal credentials, or sensitive tokens in app metadata.
 
+## Project-local Playwright convention
+
+Generated Playwright task code should live inside the pw-dev workspace so it can
+use the project-local Playwright package. If Playwright is not installed, run
+\`npm run install:playwright\` from the pw-dev root.
+
+Use this layout for generated task code and artifacts:
+
+\`\`\`text
+.agent/tasks/<task-id>/run.mjs
+.agent/tasks/<task-id>/artifacts/
+\`\`\`
+
+In generated task code, import Playwright normally and connect to pw-dev's CDP
+URL. Do not launch a separate browser:
+
+\`\`\`js
+import { chromium } from 'playwright';
+
+const browser = await chromium.connectOverCDP(cdpUrl);
+\`\`\`
+
 ## Start browser and attach Playwright
 
 \`\`\`js
@@ -2027,6 +2049,22 @@ export async function deletePwDevManagedProxy(proxyId, { serverUrl = '${serverUr
     throw new Error(\`pw-dev managed proxy delete failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
+}
+
+export function pwDevAgentTaskPaths(taskId, { root = '.agent/tasks' } = {}) {
+  if (!taskId) throw new Error('pwDevAgentTaskPaths requires taskId');
+  const safeTaskId = String(taskId).replace(/[^A-Za-z0-9._-]/g, '_');
+  const dir = \`\${root}/\${safeTaskId}\`;
+  return {
+    taskId: safeTaskId,
+    dir,
+    script: \`\${dir}/run.mjs\`,
+    artifactsDir: \`\${dir}/artifacts\`,
+  };
+}
+
+export function pwDevPlaywrightImportHint() {
+  return "Run generated task scripts inside the pw-dev workspace and import { chromium } from 'playwright'. If missing, run: npm run install:playwright";
 }
 
 export async function loadPwDevManifest({ serverUrl = '${serverUrl}', appId } = {}) {

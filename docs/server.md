@@ -68,6 +68,18 @@ is configured/reachable. Use `/_pwdev/instructions` as the live usage guide for
 the current server. Use `/_pwdev/client.js` when an agent wants a small helper
 module instead of hand-writing manifest fetch and CDP attach logic.
 
+Generated Playwright task code should live inside the pw-dev workspace so it
+uses the project-local Playwright package installed by
+`npm run install:playwright`. Use:
+
+```text
+.agent/tasks/<task-id>/run.mjs
+.agent/tasks/<task-id>/artifacts/
+```
+
+Generated scripts should import `chromium` from `playwright` and connect to the
+`cdpUrl` returned by pw-dev. They should not launch a separate browser.
+
 Minimal agent bootstrap:
 
 ```js
