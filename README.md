@@ -18,13 +18,12 @@ packages/
     Thin dependency-free dev server wrapper. Static files, health, and
     /_pwdev discovery endpoints without pulling Playwright into the base.
 
-  w2mgr/
-    Optional app devserver and in-house Whistle process manager driven by the
-    pw-dev registry.
+  proxy/
+    Optional Whistle process manager for external-agent supplied rulesets.
 
   cli/
     Root command dispatcher for `pw-dev broker`, `pw-dev server`, and
-    `pw-dev w2mgr`.
+    `pw-dev proxy`.
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the component diagrams,
@@ -37,9 +36,10 @@ runtime flow, multi-app registry flow, and agent/server/broker contracts. See
 npm install
 ```
 
-There are currently no npm runtime dependencies. System requirements are Node
-18+, a Chromium-family browser for broker mode, and OpenSSH only when using SSH
-tunnel features.
+Runtime dependencies are kept narrow; `@pw-dev/proxy` carries Whistle so it can
+start managed proxy instances without a global `w2`. System requirements are
+Node 18+, a Chromium-family browser for broker mode, and OpenSSH only when
+using SSH tunnel features.
 
 ## Run The Broker
 
@@ -79,16 +79,16 @@ npm start -- server \
 By default the server probes the broker at `http://127.0.0.1:18080`. Use
 `--broker-url` only when the broker runs somewhere else.
 
-Start the optional app/proxy process manager:
+Start the optional proxy manager:
 
 ```bash
-npm start -- w2mgr --auto-start
+npm start -- proxy
 ```
 
-`w2mgr` reads registered apps and proxies from `pw-dev/server`, starts app
-`devserver` commands, and starts Whistle proxies. Whistle uses a managed port
-pool from `8888` through `8899`; if a registered proxy port is already in use,
-`w2mgr` picks the next free pool port and updates the proxy registration.
+`proxy` creates managed Whistle instances from rulesets supplied by an external
+agent. Each instance gets separate proxy and GUI ports, isolated `-S` storage
+under `packages/proxy/.runtime/whistle`, a proxy registry entry, and optionally
+an app `proxyId` attachment.
 
 Discovery endpoints:
 
@@ -164,14 +164,13 @@ GET    /_pwdev/apps/:id/browser/status
 POST   /_pwdev/apps/:id/browser/start
 POST   /_pwdev/apps/:id/browser/stop
 ANY    /_pwdev/broker/*
-GET    /_pwdev/w2mgr/status
-POST   /_pwdev/w2mgr/sync
-POST   /_pwdev/w2mgr/apps/:id/start
-POST   /_pwdev/w2mgr/apps/:id/stop
-POST   /_pwdev/w2mgr/proxies/:id/start
-POST   /_pwdev/w2mgr/proxies/:id/stop
-POST   /_pwdev/w2mgr/start-all
-POST   /_pwdev/w2mgr/stop-all
+GET    /_pwdev/proxy/status
+GET    /_pwdev/proxy/proxies
+POST   /_pwdev/proxy/proxies
+GET    /_pwdev/proxy/proxies/:id
+DELETE /_pwdev/proxy/proxies/:id
+POST   /_pwdev/proxy/proxies/:id/stop
+POST   /_pwdev/proxy/stop-all
 ```
 
 Agents attach through the app manifest's `cdpUrl`. They only need the app

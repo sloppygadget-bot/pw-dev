@@ -20,7 +20,7 @@ test('parseArgs reads server options', () => {
     '--branch', 'main',
     '--app-url', 'http://127.0.0.1:5173',
     '--broker-url', 'http://127.0.0.1:18080',
-    '--w2mgr-url', 'http://127.0.0.1:18081',
+    '--proxy-manager-url', 'http://127.0.0.1:18081',
     '--cdp-url', 'http://127.0.0.1:18080/_broker/instances/checkout-main',
     '--profile', 'checkout-main',
     '--proxy-forward-id', 'whistle',
@@ -35,7 +35,7 @@ test('parseArgs reads server options', () => {
   assert.equal(options.branch, 'main');
   assert.equal(options.appUrl, 'http://127.0.0.1:5173');
   assert.equal(options.brokerUrl, 'http://127.0.0.1:18080');
-  assert.equal(options.w2mgrUrl, 'http://127.0.0.1:18081');
+  assert.equal(options.proxyManagerUrl, 'http://127.0.0.1:18081');
   assert.equal(options.cdpUrl, 'http://127.0.0.1:18080/_broker/instances/checkout-main');
   assert.equal(options.profile, 'checkout-main');
   assert.equal(options.proxyForwardId, 'whistle');
@@ -278,11 +278,19 @@ test('server manages reusable proxy registrations', async () => {
       id: 'whistle-main',
       kind: 'whistle',
       name: 'Shared Whistle',
+      appId: 'checkout-main',
       proxyUrl: 'http://127.0.0.1:8899',
+      guiUrl: 'http://127.0.0.1:9801',
+      rulesetFile: '/tmp/ruleset.txt',
+      managed: true,
     });
     assert.equal(created.statusCode, 200);
     assert.equal(created.body.proxy.id, 'whistle-main');
     assert.equal(created.body.proxy.proxyUrl, 'http://127.0.0.1:8899');
+    assert.equal(created.body.proxy.guiUrl, 'http://127.0.0.1:9801');
+    assert.equal(created.body.proxy.appId, 'checkout-main');
+    assert.equal(created.body.proxy.rulesetFile, '/tmp/ruleset.txt');
+    assert.equal(created.body.proxy.managed, true);
 
     const updated = await postJson(`${server.origin}/_pwdev/proxies`, {
       id: 'whistle-main',
@@ -306,6 +314,34 @@ test('server manages reusable proxy registrations', async () => {
 
     const missing = await getJson(`${server.origin}/_pwdev/proxies/whistle-main`);
     assert.equal(missing.statusCode, 404);
+  } finally {
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server patches app registrations', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    id: 'checkout-main',
+  });
+  try {
+    const patched = await patchJson(`${server.origin}/_pwdev/apps/checkout-main`, {
+      proxyId: 'whistle-main',
+    });
+    assert.equal(patched.statusCode, 200);
+    assert.equal(patched.body.app.proxyId, 'whistle-main');
+
+    const app = await getJson(`${server.origin}/_pwdev/apps/checkout-main`);
+    assert.equal(app.body.app.proxyId, 'whistle-main');
+
+    const rejected = await patchJson(`${server.origin}/_pwdev/apps/checkout-main`, {
+      appUrl: 'http://127.0.0.1:9999',
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.match(rejected.body.error, /Unsupported app patch field: appUrl/);
   } finally {
     await server.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -742,22 +778,22 @@ test('server proxies broker HTTP APIs', async () => {
   }
 });
 
-test('server proxies w2mgr HTTP APIs', async () => {
-  const manager = await startMockW2Mgr();
+test('server proxies proxy HTTP APIs', async () => {
+  const manager = await startMockProxyManager();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
     root,
     port: 0,
     id: 'checkout-main',
-    w2mgrUrl: manager.origin,
+    proxyManagerUrl: manager.origin,
   });
   try {
-    const status = await getJson(`${server.origin}/_pwdev/w2mgr/status`);
+    const status = await getJson(`${server.origin}/_pwdev/proxy/status`);
     assert.equal(status.statusCode, 200);
     assert.equal(status.body.manager, true);
     assert.deepEqual(manager.requests[0], {
       method: 'GET',
-      path: '/_w2mgr/status',
+      path: '/_proxy/status',
       body: {},
     });
   } finally {
@@ -813,6 +849,10 @@ async function getJson(url) {
 
 function postJson(url, payload) {
   return requestJson(url, 'POST', payload);
+}
+
+function patchJson(url, payload) {
+  return requestJson(url, 'PATCH', payload);
 }
 
 function deleteJson(url) {
@@ -910,14 +950,14 @@ function startMockBroker() {
   });
 }
 
-function startMockW2Mgr() {
+function startMockProxyManager() {
   const requests = [];
   let origin;
   const server = http.createServer(async (req, res) => {
     const body = await readRequestJson(req);
     requests.push({ method: req.method, path: req.url, body });
 
-    if (req.url === '/_w2mgr/status' && req.method === 'GET') {
+    if (req.url === '/_proxy/status' && req.method === 'GET') {
       writeTestJson(res, 200, { ok: true, manager: true });
       return;
     }

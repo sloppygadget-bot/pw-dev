@@ -68,8 +68,8 @@ export function parseArgs(argv) {
       options.appUrl = readValue(argv, ++i, arg);
     } else if (arg === '--broker-url') {
       options.brokerUrl = readValue(argv, ++i, arg);
-    } else if (arg === '--w2mgr-url') {
-      options.w2mgrUrl = readValue(argv, ++i, arg);
+    } else if (arg === '--proxy-manager-url') {
+      options.proxyManagerUrl = readValue(argv, ++i, arg);
     } else if (arg === '--cdp-url') {
       options.cdpUrl = readValue(argv, ++i, arg);
     } else if (arg === '--profile') {
@@ -115,8 +115,8 @@ Options:
   --app-url <url>  App URL. Default: this server origin
   --broker-url <url>
                   Broker URL. Default: http://127.0.0.1:18080
-  --w2mgr-url <url>
-                  w2mgr URL. Default: http://127.0.0.1:18081
+  --proxy-manager-url <url>
+                  Proxy manager URL. Default: http://127.0.0.1:18081
   --cdp-url <url>  CDP URL for browser automation
   --profile <name> Broker profile for browser automation
   --proxy-forward-id <id>

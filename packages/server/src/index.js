@@ -27,7 +27,7 @@ const MIME_TYPES = new Map([
 ]);
 
 const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
-const DEFAULT_W2MGR_URL = 'http://127.0.0.1:18081';
+const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
 
 /**
  * Options for `startPwDevServer`.
@@ -46,7 +46,7 @@ const DEFAULT_W2MGR_URL = 'http://127.0.0.1:18081';
  * @property {string=} branch Source branch name for display/discovery.
  * @property {string=} appUrl URL of the actual app devserver. Defaults to this server's origin.
  * @property {string=} brokerUrl Broker base URL paired with this server for browser lifecycle endpoints. Defaults to `http://127.0.0.1:18080`.
- * @property {string=} w2mgrUrl Optional w2mgr base URL proxied under `/_pwdev/w2mgr/*`. Defaults to `http://127.0.0.1:18081`.
+ * @property {string=} proxyManagerUrl Optional proxy manager base URL proxied under `/_pwdev/proxy/*`. Defaults to `http://127.0.0.1:18081`.
  * @property {string=} cdpUrl Optional Playwright CDP URL for direct browser attachment.
  * @property {string=} profile Optional broker profile name for the app.
  * @property {string=} proxyId Optional proxy registry id for the app.
@@ -123,8 +123,12 @@ const DEFAULT_W2MGR_URL = 'http://127.0.0.1:18081';
  * @property {string} id Stable proxy id.
  * @property {string=} kind Proxy kind, for example `whistle` or `http`.
  * @property {string=} name Human-readable proxy name.
+ * @property {string=} appId App id this managed proxy is attached to.
  * @property {string=} proxyUrl Direct Chrome proxy server URL, for example `http://127.0.0.1:8899`.
+ * @property {string=} guiUrl Whistle GUI URL, for example `http://127.0.0.1:9800`.
  * @property {string=} brokerProxyForwardId Broker-managed proxy forward id.
+ * @property {string=} rulesetFile Local ruleset handoff file used to create this proxy.
+ * @property {boolean=} managed True when created by `pw-dev proxy`.
  * @property {string=} createdAt Registry creation timestamp.
  * @property {string=} updatedAt Registry update timestamp.
  */
@@ -256,7 +260,7 @@ export async function startPwDevServer(options = {}) {
   });
   const startedAt = new Date().toISOString();
   const broker = createBrokerPairing({ brokerUrl: options.brokerUrl });
-  const w2mgrUrl = normalizeHttpUrl(options.w2mgrUrl ?? DEFAULT_W2MGR_URL, 'w2mgrUrl');
+  const proxyManagerUrl = normalizeHttpUrl(options.proxyManagerUrl ?? DEFAULT_PROXY_MANAGER_URL, 'proxyManagerUrl');
   const apps = createAppRegistry();
   const proxies = createProxyRegistry();
   apps.upsert(buildManifest({ root, worktree, origin: undefined, metadata }));
@@ -265,7 +269,7 @@ export async function startPwDevServer(options = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker, w2mgrUrl });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker, proxyManagerUrl });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -321,7 +325,7 @@ export async function startPwDevServer(options = {}) {
  * - `GET /_pwdev/instructions`
  * - `GET /_pwdev/client.js`
  * - `ANY /_pwdev/broker/*`
- * - `ANY /_pwdev/w2mgr/*`
+ * - `ANY /_pwdev/proxy/*`
  * - `GET|POST /_pwdev/apps`
  * - `GET|DELETE /_pwdev/apps/:id`
  * - `GET /_pwdev/apps/:id/manifest`
@@ -342,11 +346,11 @@ export async function startPwDevServer(options = {}) {
  *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
  *   broker: PwDevBrokerPairing,
- *   w2mgrUrl: string,
+ *   proxyManagerUrl: string,
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker, w2mgrUrl }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker, proxyManagerUrl }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -357,8 +361,8 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
     return;
   }
 
-  if (requestUrl.pathname.startsWith('/_pwdev/w2mgr')) {
-    await proxyW2MgrHttpRequest({ req, res, requestUrl, w2mgrUrl });
+  if (requestUrl.pathname.startsWith('/_pwdev/proxy')) {
+    await proxyProxyManagerHttpRequest({ req, res, requestUrl, proxyManagerUrl });
     return;
   }
 
@@ -391,7 +395,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
       root,
       worktree,
       broker: await broker.status(),
-      w2mgr: { url: w2mgrUrl },
+      proxy: { url: proxyManagerUrl },
       proxies: proxies.list(),
       manifest,
     }, writeBody);
@@ -491,7 +495,7 @@ export function createAppRegistry(initialApps = []) {
       if (!existing) return undefined;
       const saved = { ...existing };
       for (const [key, value] of Object.entries(patch)) {
-        if (value === undefined) {
+        if (value === undefined || value === null) {
           delete saved[key];
         } else {
           saved[key] = value;
@@ -690,6 +694,14 @@ async function handleAppsRequest({ req, res, requestUrl, apps, proxies, broker, 
       return;
     }
 
+    if (req.method === 'PATCH') {
+      const app = apps.update(id, validateAppPatch(await readJsonBody(req)));
+      writeJson(res, app ? 200 : 404, app
+        ? { ok: true, app }
+        : { ok: false, error: `Unknown app: ${id}` });
+      return;
+    }
+
     if (req.method === 'DELETE') {
       const deleted = apps.delete(id);
       writeJson(res, deleted ? 200 : 404, deleted
@@ -698,7 +710,7 @@ async function handleAppsRequest({ req, res, requestUrl, apps, proxies, broker, 
       return;
     }
 
-    res.writeHead(405, { allow: 'GET, HEAD, DELETE' });
+    res.writeHead(405, { allow: 'GET, HEAD, PATCH, DELETE' });
     res.end('Method Not Allowed');
     return;
   }
@@ -842,20 +854,20 @@ async function proxyBrokerHttpRequest({ req, res, requestUrl, broker }) {
 }
 
 /**
- * Proxy w2mgr HTTP APIs through the pw-dev server.
+ * Proxy proxy HTTP APIs through the pw-dev server.
  *
- * `/_pwdev/w2mgr/*` maps to the manager's `/_w2mgr/*` namespace.
+ * `/_pwdev/proxy/*` maps to the manager's `/_proxy/*` namespace.
  *
  * @param {{
  *   req: http.IncomingMessage,
  *   res: http.ServerResponse,
  *   requestUrl: URL,
- *   w2mgrUrl: string,
+ *   proxyManagerUrl: string,
  * }} options
  * @returns {Promise<void>}
  */
-async function proxyW2MgrHttpRequest({ req, res, requestUrl, w2mgrUrl }) {
-  const upstreamUrl = new URL(proxyW2MgrPath(requestUrl), ensureTrailingSlash(w2mgrUrl));
+async function proxyProxyManagerHttpRequest({ req, res, requestUrl, proxyManagerUrl }) {
+  const upstreamUrl = new URL(proxyProxyManagerPath(requestUrl), ensureTrailingSlash(proxyManagerUrl));
   const headers = { ...req.headers, host: upstreamUrl.host };
 
   const upstream = http.request(upstreamUrl, {
@@ -873,7 +885,7 @@ async function proxyW2MgrHttpRequest({ req, res, requestUrl, w2mgrUrl }) {
     }
     writeJson(res, 502, {
       ok: false,
-      error: `w2mgr is unreachable at ${w2mgrUrl}: ${error.message}`,
+      error: `proxy is unreachable at ${proxyManagerUrl}: ${error.message}`,
     });
   });
   req.pipe(upstream);
@@ -952,9 +964,9 @@ function proxyBrokerPath(requestUrl) {
   return `/_broker${suffix || ''}${requestUrl.search}`;
 }
 
-function proxyW2MgrPath(requestUrl) {
-  const suffix = requestUrl.pathname.slice('/_pwdev/w2mgr'.length);
-  return `/_w2mgr${suffix || ''}${requestUrl.search}`;
+function proxyProxyManagerPath(requestUrl) {
+  const suffix = requestUrl.pathname.slice('/_pwdev/proxy'.length);
+  return `/_proxy${suffix || ''}${requestUrl.search}`;
 }
 
 /**
@@ -1481,6 +1493,21 @@ function validateAppRegistration(rawApp) {
   return omitUndefined(app);
 }
 
+function validateAppPatch(rawPatch) {
+  if (!rawPatch || typeof rawPatch !== 'object' || Array.isArray(rawPatch)) {
+    throwValidationError('app patch must be an object');
+  }
+  const allowed = new Set(['proxyId']);
+  for (const key of Object.keys(rawPatch)) {
+    if (!allowed.has(key)) throwValidationError(`Unsupported app patch field: ${key}`);
+  }
+  const patch = {};
+  if (Object.hasOwn(rawPatch, 'proxyId')) {
+    patch.proxyId = rawPatch.proxyId === null ? null : optionalString(rawPatch.proxyId, 'proxyId');
+  }
+  return patch;
+}
+
 /**
  * Validate and normalize a reusable proxy registration payload.
  *
@@ -1496,8 +1523,12 @@ function validateProxyRegistration(rawProxy) {
     id: requiredString(rawProxy.id, 'id'),
     kind: optionalString(rawProxy.kind, 'kind'),
     name: optionalString(rawProxy.name, 'name'),
+    appId: optionalString(rawProxy.appId, 'appId'),
     proxyUrl: optionalString(rawProxy.proxyUrl, 'proxyUrl'),
+    guiUrl: optionalString(rawProxy.guiUrl, 'guiUrl'),
     brokerProxyForwardId: optionalString(rawProxy.brokerProxyForwardId, 'brokerProxyForwardId'),
+    rulesetFile: optionalString(rawProxy.rulesetFile, 'rulesetFile'),
+    managed: rawProxy.managed === undefined ? undefined : Boolean(rawProxy.managed),
     createdAt: optionalString(rawProxy.createdAt, 'createdAt'),
     updatedAt: optionalString(rawProxy.updatedAt, 'updatedAt'),
   };
@@ -1509,6 +1540,7 @@ function validateProxyRegistration(rawProxy) {
     throwValidationError('proxyUrl and brokerProxyForwardId are mutually exclusive');
   }
   if (proxy.proxyUrl) validateHttpUrl(proxy.proxyUrl, 'proxyUrl');
+  if (proxy.guiUrl) validateHttpUrl(proxy.guiUrl, 'guiUrl');
 
   return omitUndefined(proxy);
 }
@@ -1841,24 +1873,25 @@ await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/stop', {
 });
 \`\`\`
 
-## Start registered app/proxy processes with w2mgr
+## Create a managed Whistle proxy
 
-If \`pw-dev w2mgr\` is running, use the server-proxied API. Agents do not need
-the w2mgr port directly.
-Whistle proxy ports are allocated from \`8888-8899\`; if a registered proxy
-port conflicts, w2mgr chooses the next free pool port and updates the proxy
-registration.
+If \`pw-dev proxy\` is running, use the server-proxied API. Agents do not need
+the proxy manager port directly. Send a ready-to-apply \`ruleset\`; pw-dev
+creates a Whistle instance with separate proxy and GUI ports, registers it
+under \`/_pwdev/proxies\`, and attaches it to \`appId\` when provided.
 
 \`\`\`js
-await fetch('${serverUrl}/_pwdev/w2mgr/proxies/whistle-main/start', {
+const managedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies', {
   method: 'POST',
-});
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    id: 'fortisase-dev-whistle',
+    appId: 'fortisase-dev',
+    ruleset: 'example.com 127.0.0.1:3000',
+  }),
+}).then((response) => response.json());
 
-await fetch('${serverUrl}/_pwdev/w2mgr/apps/fortisase-dev/start', {
-  method: 'POST',
-});
-
-const w2mgrStatus = await fetch('${serverUrl}/_pwdev/w2mgr/status')
+const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
   .then((response) => response.json());
 \`\`\`
 
@@ -1881,14 +1914,13 @@ GET    /_pwdev/apps/:id/browser/status
 POST   /_pwdev/apps/:id/browser/start
 POST   /_pwdev/apps/:id/browser/stop
 ANY    /_pwdev/broker/*
-GET    /_pwdev/w2mgr/status
-POST   /_pwdev/w2mgr/sync
-POST   /_pwdev/w2mgr/apps/:id/start
-POST   /_pwdev/w2mgr/apps/:id/stop
-POST   /_pwdev/w2mgr/proxies/:id/start
-POST   /_pwdev/w2mgr/proxies/:id/stop
-POST   /_pwdev/w2mgr/start-all
-POST   /_pwdev/w2mgr/stop-all
+GET    /_pwdev/proxy/status
+GET    /_pwdev/proxy/proxies
+POST   /_pwdev/proxy/proxies
+GET    /_pwdev/proxy/proxies/:id
+DELETE /_pwdev/proxy/proxies/:id
+POST   /_pwdev/proxy/proxies/:id/stop
+POST   /_pwdev/proxy/stop-all
 \`\`\`
 
 Helper source is available from:
@@ -1959,50 +1991,40 @@ export async function registerPwDevApp(app, { serverUrl = '${serverUrl}' } = {})
   return response.json();
 }
 
-export async function loadPwDevW2MgrStatus({ serverUrl = '${serverUrl}' } = {}) {
-  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/status\`);
+export async function loadPwDevProxyManagerStatus({ serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/proxy/status\`);
   if (!response.ok) {
-    throw new Error(\`pw-dev w2mgr status failed: \${response.status} \${await response.text()}\`);
+    throw new Error(\`pw-dev proxy status failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
 }
 
-export async function startPwDevW2MgrApp(appId, { serverUrl = '${serverUrl}' } = {}) {
-  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/apps/\${encodeURIComponent(appId)}/start\`, {
+export async function createPwDevManagedProxy(proxy, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/proxy/proxies\`, {
     method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(proxy),
   });
   if (!response.ok) {
-    throw new Error(\`pw-dev w2mgr app start failed: \${response.status} \${await response.text()}\`);
+    throw new Error(\`pw-dev managed proxy create failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
 }
 
-export async function stopPwDevW2MgrApp(appId, { serverUrl = '${serverUrl}' } = {}) {
-  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/apps/\${encodeURIComponent(appId)}/stop\`, {
-    method: 'POST',
-  });
+export async function loadPwDevManagedProxy(proxyId, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/proxy/proxies/\${encodeURIComponent(proxyId)}\`);
   if (!response.ok) {
-    throw new Error(\`pw-dev w2mgr app stop failed: \${response.status} \${await response.text()}\`);
+    throw new Error(\`pw-dev managed proxy load failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
 }
 
-export async function startPwDevW2MgrProxy(proxyId, { serverUrl = '${serverUrl}' } = {}) {
-  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/proxies/\${encodeURIComponent(proxyId)}/start\`, {
-    method: 'POST',
+export async function deletePwDevManagedProxy(proxyId, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/proxy/proxies/\${encodeURIComponent(proxyId)}\`, {
+    method: 'DELETE',
   });
   if (!response.ok) {
-    throw new Error(\`pw-dev w2mgr proxy start failed: \${response.status} \${await response.text()}\`);
-  }
-  return response.json();
-}
-
-export async function stopPwDevW2MgrProxy(proxyId, { serverUrl = '${serverUrl}' } = {}) {
-  const response = await fetch(\`\${serverUrl}/_pwdev/w2mgr/proxies/\${encodeURIComponent(proxyId)}/stop\`, {
-    method: 'POST',
-  });
-  if (!response.ok) {
-    throw new Error(\`pw-dev w2mgr proxy stop failed: \${response.status} \${await response.text()}\`);
+    throw new Error(\`pw-dev managed proxy delete failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
 }

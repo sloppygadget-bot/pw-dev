@@ -1,11 +1,12 @@
 // @ts-check
 
-import { createW2Mgr, startW2MgrServer } from './index.js';
+import { createProxyManager, startProxyManagerServer } from './index.js';
 
 const DEFAULT_PORT = 18081;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:9696';
 const DEFAULT_PROXY_PORT_RANGE = '8888-8899';
+const DEFAULT_UI_PORT_RANGE = '9800-9899';
 
 export async function main(argv) {
   const options = parseArgs(argv);
@@ -14,25 +15,23 @@ export async function main(argv) {
     return;
   }
 
-  const manager = createW2Mgr({
+  const manager = createProxyManager({
     serverUrl: options.serverUrl,
     w2Command: options.w2Command,
+    w2StorageRoot: options.w2StorageRoot,
     proxyPortRange: options.proxyPortRange,
+    uiPortRange: options.uiPortRange,
     quiet: options.quiet,
   });
-  const server = await startW2MgrServer({
+  const server = await startProxyManagerServer({
     manager,
     host: options.host,
     port: options.port,
   });
 
   if (!options.quiet) {
-    console.log(`pw-dev w2mgr listening: ${server.origin}`);
+    console.log(`pw-dev proxy listening: ${server.origin}`);
     console.log(`pw-dev server registry: ${manager.serverUrl}`);
-  }
-
-  if (options.autoStart) {
-    await manager.startAll();
   }
 
   const shutdown = async (signal) => {
@@ -50,6 +49,7 @@ export function parseArgs(argv) {
     port: DEFAULT_PORT,
     serverUrl: DEFAULT_SERVER_URL,
     proxyPortRange: DEFAULT_PROXY_PORT_RANGE,
+    uiPortRange: DEFAULT_UI_PORT_RANGE,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -58,8 +58,6 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--quiet') {
       options.quiet = true;
-    } else if (arg === '--auto-start') {
-      options.autoStart = true;
     } else if (arg === '--host') {
       options.host = readValue(argv, ++i, arg);
     } else if (arg === '--port') {
@@ -68,8 +66,12 @@ export function parseArgs(argv) {
       options.serverUrl = readValue(argv, ++i, arg);
     } else if (arg === '--w2-command') {
       options.w2Command = readValue(argv, ++i, arg);
+    } else if (arg === '--w2-storage-root') {
+      options.w2StorageRoot = readValue(argv, ++i, arg);
     } else if (arg === '--proxy-port-range') {
       options.proxyPortRange = readValue(argv, ++i, arg);
+    } else if (arg === '--ui-port-range') {
+      options.uiPortRange = readValue(argv, ++i, arg);
     } else {
       throw new Error(`Unknown option: ${arg}`);
     }
@@ -92,19 +94,23 @@ function parsePort(value, flag) {
 }
 
 export function helpText() {
-  return `pw-dev w2mgr
+  return `pw-dev proxy
 
 Usage:
-  pw-dev w2mgr [options]
+  pw-dev proxy [options]
 
 Options:
   --host <host>       Listen host. Default: 127.0.0.1
   --port <port>       Listen port. Default: 18081
   --server-url <url>  pw-dev server URL. Default: http://127.0.0.1:9696
-  --w2-command <cmd>  Whistle command. Default: w2
+  --w2-command <cmd>  Whistle command override. Default: bundled whistle
+  --w2-storage-root <path>
+                      Root for per-proxy Whistle -S storage.
+                      Default: packages/proxy/.runtime/whistle
   --proxy-port-range <start-end>
                       Whistle port pool. Default: 8888-8899
-  --auto-start        Start registered app devservers and Whistle proxies on boot
+  --ui-port-range <start-end>
+                      Whistle GUI port pool. Default: 9800-9899
   --quiet             Reduce process logging
   --help              Show this help`;
 }

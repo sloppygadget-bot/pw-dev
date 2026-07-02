@@ -4,14 +4,14 @@
 registry, pairs with one default `@pw-dev/cdp-broker`, starts/stops browser
 sessions through that broker, and proxies broker HTTP/WebSocket traffic so
 agents can stay on the pw-dev server origin. It can also proxy the optional
-`@pw-dev/w2mgr` API for app devserver and Whistle process management.
+`@pw-dev/proxy` API for managed Whistle process creation.
 
 ## Process Roles
 
 ```text
 agent/user -> pw-dev server       registry, status, lifecycle, proxied CDP
 pw-dev server -> cdp-broker       start/stop/status Chrome sessions
-pw-dev server -> w2mgr            proxied app/proxy process lifecycle
+pw-dev server -> proxy            proxied Whistle process lifecycle
 cdp-broker -> Chrome              persistent profile + CDP endpoint
 Chrome -> app devserver           loads the registered appUrl
 ```
@@ -37,17 +37,19 @@ Use `--broker-url` only when the broker runs somewhere else. If the default or
 configured broker is not reachable, `GET /_pwdev/status` reports
 `reachable: false` and browser lifecycle routes return `503`.
 
-Start the optional app/proxy process manager:
+Start the optional proxy manager:
 
 ```bash
-npm start -- w2mgr --auto-start
+npm start -- proxy
 ```
 
-`w2mgr` keeps its own API on `http://127.0.0.1:18081`, and the server proxies
-it under `/_pwdev/w2mgr/*`. It starts registered app `devserver` commands and
-registered Whistle proxies. Whistle proxy ports come from the default pool
-`8888-8899`; if the registered port is in use or already managed, `w2mgr`
-allocates the next free pool port and updates the proxy registration.
+`proxy` keeps its own API on `http://127.0.0.1:18081`, and the server proxies
+it under `/_pwdev/proxy/*`. It creates Whistle instances from external-agent
+rulesets, allocates separate proxy and GUI ports, registers the resulting
+proxy metadata, and can attach that proxy to an app by patching the app
+`proxyId`. Each managed Whistle proxy is started with isolated `-S` storage
+under `packages/proxy/.runtime/whistle`; the proxy manager removes that
+directory when the proxy exits or is stopped.
 
 ## Agent Discovery
 
@@ -146,8 +148,7 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
 
 `POST /_pwdev/apps` is an upsert. Re-posting the same `id` updates app
 metadata, which is useful when branch devservers restart on new ports.
-`devserver` and `engine` are registry metadata for agents and humans. The
-optional `pw-dev w2mgr` process can execute registered `devserver` commands.
+`devserver` and `engine` are registry metadata for agents and humans.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 
@@ -344,20 +345,19 @@ POST   /_pwdev/apps/:id/browser/stop
 ANY    /_pwdev/broker/*
 WS     /_pwdev/broker/*
 
-GET    /_pwdev/w2mgr/status
-POST   /_pwdev/w2mgr/sync
-POST   /_pwdev/w2mgr/apps/:id/start
-POST   /_pwdev/w2mgr/apps/:id/stop
-POST   /_pwdev/w2mgr/proxies/:id/start
-POST   /_pwdev/w2mgr/proxies/:id/stop
-POST   /_pwdev/w2mgr/start-all
-POST   /_pwdev/w2mgr/stop-all
+GET    /_pwdev/proxy/status
+GET    /_pwdev/proxy/proxies
+POST   /_pwdev/proxy/proxies
+GET    /_pwdev/proxy/proxies/:id
+DELETE /_pwdev/proxy/proxies/:id
+POST   /_pwdev/proxy/proxies/:id/stop
+POST   /_pwdev/proxy/stop-all
 ```
 
 `/_pwdev/broker/*` maps to broker `/_broker/*`. It is mainly used for proxied
 CDP URLs, but it also leaves a raw broker API escape hatch for advanced tooling.
-`/_pwdev/w2mgr/*` maps to `w2mgr` `/_w2mgr/*`, so agents can start/stop
-registered app and proxy processes without knowing the manager port.
+`/_pwdev/proxy/*` maps to `proxy` `/_proxy/*`, so agents can create/delete
+managed Whistle instances without knowing the manager port.
 
 ## Broker Diagnostics
 

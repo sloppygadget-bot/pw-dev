@@ -2,7 +2,7 @@
 
 import { main as brokerMain } from '../../cdp-broker/src/cli.js';
 import { main as serverMain } from '../../server/src/cli.js';
-import { main as w2mgrMain } from '../../w2mgr/src/cli.js';
+import { main as proxyMain } from '../../proxy/src/cli.js';
 
 export async function main(argv) {
   const [command, ...rest] = argv;
@@ -21,8 +21,8 @@ export async function main(argv) {
     return;
   }
 
-  if (command === 'w2mgr' || command === 'w2') {
-    await w2mgrMain(rest);
+  if (command === 'proxy' || command === 'w2') {
+    await proxyMain(rest);
     return;
   }
 
@@ -38,10 +38,10 @@ Usage:
 Commands:
   broker      Run the local/remote Chrome session broker
   server      Run the dependency-free static dev server
-  w2mgr       Run the optional app and Whistle process manager
+  proxy       Run the optional managed Whistle proxy manager
 
 Examples:
   pw-dev broker --profile work-okta
   pw-dev server --root examples/static-site --port 9696
-  pw-dev w2mgr --auto-start`;
+  pw-dev proxy`;
 }

@@ -14,12 +14,12 @@
     "start": "node bin/pw-dev.js",
     "broker": "node packages/cdp-broker/bin/pw-cdp-broker.js",
     "server": "node packages/server/bin/pw-dev-server.js",
-    "w2mgr": "node packages/w2mgr/bin/pw-dev-w2mgr.js",
+    "proxy": "node packages/proxy/bin/pw-dev-proxy.js",
     "test": "node --test packages/*/test/*.test.js",
     "test:broker": "node --test packages/cdp-broker/test/*.test.js",
     "test:server": "node --test packages/server/test/*.test.js",
     "test:cli": "node --test packages/cli/test/*.test.js",
-    "test:w2mgr": "node --test packages/w2mgr/test/*.test.js"
+    "test:proxy": "node --test packages/proxy/test/*.test.js"
   },
   "engines": {
     "node": ">=18"
