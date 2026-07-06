@@ -57,6 +57,13 @@ For a named persistent browser profile:
 npm start -- broker --profile work-okta
 ```
 
+The broker has no npm dependencies. For a minimal remote setup, clone and run
+the broker directly without `npm install`:
+
+```bash
+git clone https://github.com/sloppygadget-bot/pw-dev.git && cd pw-dev && node packages/cdp-broker/bin/pw-cdp-broker.js --standby --ssh user@target-server
+```
+
 Direct CDP attach example:
 
 ```js
@@ -75,6 +82,12 @@ Start the agent-facing server:
 
 ```bash
 npm start -- server --port 9696
+```
+
+The server also has no npm dependencies. To run it directly after cloning:
+
+```bash
+git clone https://github.com/sloppygadget-bot/pw-dev.git && cd pw-dev && node packages/server/bin/pw-dev-server.js --port 9696
 ```
 
 Default server URL:
@@ -150,6 +163,17 @@ http://127.0.0.1:18081
 ```
 
 The server proxies proxy-manager APIs under `/_pwdev/proxy/*`.
+
+Most managed proxies should be task-scoped: create one for a specific
+test/verification, start the browser with that `proxyId`, then delete the proxy
+when the task ends. To create a live managed proxy, send
+`POST /_pwdev/proxy/proxies` with `ruleset` and either `id` or `appId`. If only
+`appId` is supplied, the proxy id defaults to `<appId>-whistle`.
+
+Shared managed proxies do not need an `appId`; pass the returned proxy id as
+`proxyId` in each browser start request or app registration that should use it.
+Agents can tag proxies with optional tracking fields: `taskId`, `owner`,
+`purpose`, and `labels`.
 
 ## References
 

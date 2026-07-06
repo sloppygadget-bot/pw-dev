@@ -51,6 +51,29 @@ proxy metadata, and can attach that proxy to an app by patching the app
 under `packages/proxy/.runtime/whistle`; the proxy manager removes that
 directory when the proxy exits or is stopped.
 
+Most managed proxies should be scoped to one task/test/verification. Agents can
+tag them with `taskId`, `owner`, `purpose`, and `labels`, then start a browser
+session with the returned `proxy.id` and delete the proxy when the task ends:
+
+```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/proxy/proxies \
+  -H 'content-type: application/json' \
+  -d '{
+    "id": "smoke-login-proxy",
+    "taskId": "smoke-login-20260703",
+    "owner": "codex",
+    "purpose": "Smoke login API rewrite",
+    "labels": ["smoke", "verification"],
+    "ruleset": "example.com 127.0.0.1:3000"
+  }'
+```
+
+Shared managed proxies do not need an `appId`. To use one, pass its id as
+`proxyId` in each browser start request or store that `proxyId` on each app
+registration that should use it. Supplying `appId` during managed proxy
+creation is only a convenience: the proxy manager patches that app's `proxyId`
+for you.
+
 ## Agent Discovery
 
 Agents should not need hardcoded pw-dev knowledge beyond the base server URL.
@@ -255,7 +278,10 @@ import { chromium } from 'playwright';
 const started = await fetch('http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/start', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ task: { id: 'smoke-login-20260629', owner: 'codex' } }),
+  body: JSON.stringify({
+    proxyId: 'smoke-login-proxy',
+    task: { id: 'smoke-login-20260629', owner: 'codex' },
+  }),
 }).then((response) => response.json());
 
 const manifest = await fetch('http://127.0.0.1:9696/_pwdev/apps/checkout-tax/manifest')
@@ -295,8 +321,9 @@ Agents should clean up explicitly when a task is complete:
 ```text
 1. Detach Playwright with browser.close().
 2. POST /_pwdev/apps/:id/browser/stop with `taskId` for task sessions.
-3. Keep the app registration for later tasks.
-4. Keep the persistent profile unless a separate reset/clear action is requested.
+3. DELETE /_pwdev/proxy/proxies/:id for task-scoped managed proxies.
+4. Keep the app registration for later tasks.
+5. Keep the persistent profile unless a separate reset/clear action is requested.
 ```
 
 The server does not automatically stop active browser tasks. Automatic cleanup

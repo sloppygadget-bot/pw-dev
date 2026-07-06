@@ -62,6 +62,10 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
       id: 'react-login-capture',
       appId: 'react-login',
       name: 'React login capture',
+      taskId: 'smoke-login-20260703',
+      owner: 'codex',
+      purpose: 'Capture login traffic',
+      labels: ['smoke', 'login'],
       ruleset: 'www.example.com 127.0.0.1:3000',
     });
 
@@ -70,6 +74,10 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
     assert.equal(created.proxy.uiPort, 9801);
     assert.equal(created.proxy.proxyUrl, 'http://127.0.0.1:8899');
     assert.equal(created.proxy.guiUrl, 'http://127.0.0.1:9801');
+    assert.equal(created.proxy.taskId, 'smoke-login-20260703');
+    assert.equal(created.proxy.owner, 'codex');
+    assert.equal(created.proxy.purpose, 'Capture login traffic');
+    assert.deepEqual(created.proxy.labels, ['smoke', 'login']);
     assert.equal(created.app.proxyId, 'react-login-capture');
     assert.equal(fs.readFileSync(created.proxy.rulesetFile, 'utf8'), 'www.example.com 127.0.0.1:3000');
     assert.equal(spawned[0].command, process.execPath);
@@ -90,6 +98,10 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
       kind: 'whistle',
       name: 'React login capture',
       appId: 'react-login',
+      taskId: 'smoke-login-20260703',
+      owner: 'codex',
+      purpose: 'Capture login traffic',
+      labels: ['smoke', 'login'],
       proxyUrl: 'http://127.0.0.1:8899',
       guiUrl: 'http://127.0.0.1:9801',
       rulesetFile: created.proxy.rulesetFile,

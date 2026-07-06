@@ -124,6 +124,10 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @property {string=} kind Proxy kind, for example `whistle` or `http`.
  * @property {string=} name Human-readable proxy name.
  * @property {string=} appId App id this managed proxy is attached to.
+ * @property {string=} taskId Agent task/test/verification id associated with this proxy.
+ * @property {string=} owner Agent/user/tool that owns this proxy.
+ * @property {string=} purpose Short reason this proxy exists.
+ * @property {string[]=} labels Agent-defined labels for filtering and cleanup.
  * @property {string=} proxyUrl Direct Chrome proxy server URL, for example `http://127.0.0.1:8899`.
  * @property {string=} guiUrl Whistle GUI URL, for example `http://127.0.0.1:9800`.
  * @property {string=} brokerProxyForwardId Broker-managed proxy forward id.
@@ -1524,6 +1528,10 @@ function validateProxyRegistration(rawProxy) {
     kind: optionalString(rawProxy.kind, 'kind'),
     name: optionalString(rawProxy.name, 'name'),
     appId: optionalString(rawProxy.appId, 'appId'),
+    taskId: optionalString(rawProxy.taskId, 'taskId'),
+    owner: optionalString(rawProxy.owner, 'owner'),
+    purpose: optionalString(rawProxy.purpose, 'purpose'),
+    labels: rawProxy.labels === undefined ? undefined : validateStringArray(rawProxy.labels, 'labels'),
     proxyUrl: optionalString(rawProxy.proxyUrl, 'proxyUrl'),
     guiUrl: optionalString(rawProxy.guiUrl, 'guiUrl'),
     brokerProxyForwardId: optionalString(rawProxy.brokerProxyForwardId, 'brokerProxyForwardId'),
@@ -1902,19 +1910,50 @@ the proxy manager port directly. Send a ready-to-apply \`ruleset\`; pw-dev
 creates a Whistle instance with separate proxy and GUI ports, registers it
 under \`/_pwdev/proxies\`, and attaches it to \`appId\` when provided.
 
+Create requires \`ruleset\` and either \`id\` or \`appId\`. If only \`appId\`
+is supplied, the proxy id defaults to \`<appId>-whistle\`.
+
+Most managed proxies should be task-scoped: create one for a specific
+test/verification, start the browser with that \`proxyId\`, and delete the proxy
+when the task ends. Use \`taskId\`, \`owner\`, \`purpose\`, and \`labels\` to
+track why the proxy exists.
+
 \`\`\`js
 const managedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
-    id: 'fortisase-dev-whistle',
-    appId: 'fortisase-dev',
+    id: 'checkout-tax-whistle',
+    taskId: 'smoke-login-20260629',
+    owner: 'codex',
+    purpose: 'Smoke login API rewrite',
+    labels: ['smoke', 'verification'],
     ruleset: 'example.com 127.0.0.1:3000',
+  }),
+}).then((response) => response.json());
+
+// Shared proxies do not need appId. Pass the returned id into each browser
+// start that should use this proxy. Supplying appId during create is only a
+// convenience that patches that app's proxyId for you.
+const proxiedStart = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    proxyId: managedProxy.proxy.id,
+    task: { id: 'smoke-login-20260629', owner: 'codex' },
   }),
 }).then((response) => response.json());
 
 const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
   .then((response) => response.json());
+\`\`\`
+
+Delete task-scoped managed proxies when the task ends:
+
+\`\`\`js
+await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle', {
+  method: 'DELETE',
+});
 \`\`\`
 
 ## Endpoints

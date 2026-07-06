@@ -279,6 +279,10 @@ test('server manages reusable proxy registrations', async () => {
       kind: 'whistle',
       name: 'Shared Whistle',
       appId: 'checkout-main',
+      taskId: 'smoke-login-20260703',
+      owner: 'codex',
+      purpose: 'Smoke login verification',
+      labels: ['smoke', 'login'],
       proxyUrl: 'http://127.0.0.1:8899',
       guiUrl: 'http://127.0.0.1:9801',
       rulesetFile: '/tmp/ruleset.txt',
@@ -289,6 +293,10 @@ test('server manages reusable proxy registrations', async () => {
     assert.equal(created.body.proxy.proxyUrl, 'http://127.0.0.1:8899');
     assert.equal(created.body.proxy.guiUrl, 'http://127.0.0.1:9801');
     assert.equal(created.body.proxy.appId, 'checkout-main');
+    assert.equal(created.body.proxy.taskId, 'smoke-login-20260703');
+    assert.equal(created.body.proxy.owner, 'codex');
+    assert.equal(created.body.proxy.purpose, 'Smoke login verification');
+    assert.deepEqual(created.body.proxy.labels, ['smoke', 'login']);
     assert.equal(created.body.proxy.rulesetFile, '/tmp/ruleset.txt');
     assert.equal(created.body.proxy.managed, true);
 

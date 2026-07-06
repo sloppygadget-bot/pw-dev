@@ -111,6 +111,10 @@ export function createProxyManager(options = {}) {
         kind: 'whistle',
         name: request.name,
         appId: request.appId,
+        taskId: request.taskId,
+        owner: request.owner,
+        purpose: request.purpose,
+        labels: request.labels,
         command,
         args,
         proxyPort,
@@ -136,16 +140,20 @@ export function createProxyManager(options = {}) {
 
       let app;
       try {
-        await registryClient.updateProxy({
+        await registryClient.updateProxy(omitUndefined({
           id: request.id,
           kind: 'whistle',
           name: request.name,
           appId: request.appId,
+          taskId: request.taskId,
+          owner: request.owner,
+          purpose: request.purpose,
+          labels: request.labels,
           proxyUrl,
           guiUrl,
           rulesetFile,
           managed: true,
-        });
+        }));
         if (request.appId) {
           app = await registryClient.updateApp(request.appId, { proxyId: request.id });
         }
@@ -352,12 +360,16 @@ function listProcessRecords(records) {
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function makeProcessRecord({ id, kind, name, appId, command, args, proxyPort, uiPort, proxyUrl, guiUrl, storageDir, rulesetFile, pid }) {
+function makeProcessRecord({ id, kind, name, appId, taskId, owner, purpose, labels, command, args, proxyPort, uiPort, proxyUrl, guiUrl, storageDir, rulesetFile, pid }) {
   return {
     id,
     kind,
     name,
     appId,
+    taskId,
+    owner,
+    purpose,
+    labels,
     command,
     args,
     proxyPort,
@@ -389,6 +401,10 @@ function validateCreateProxyRequest(input) {
     id,
     appId,
     name: optionalString(input.name, 'name'),
+    taskId: optionalString(input.taskId, 'taskId'),
+    owner: optionalString(input.owner, 'owner'),
+    purpose: optionalString(input.purpose, 'purpose'),
+    labels: input.labels === undefined ? undefined : validateStringArray(input.labels, 'labels'),
     ruleset: input.ruleset,
     proxyPort: input.proxyPort === undefined ? undefined : parsePort(input.proxyPort, 'proxyPort'),
     uiPort: input.uiPort === undefined ? undefined : parsePort(input.uiPort, 'uiPort'),
@@ -402,6 +418,22 @@ function optionalString(value, name) {
     throw httpError(400, `${name} must be a non-empty string`);
   }
   return value;
+}
+
+function validateStringArray(value, name) {
+  if (!Array.isArray(value)) {
+    throw httpError(400, `${name} must be an array of non-empty strings`);
+  }
+  return value.map((item, index) => {
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw httpError(400, `${name}[${index}] must be a non-empty string`);
+    }
+    return item;
+  });
+}
+
+function omitUndefined(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined));
 }
 
 async function createProxyStorageDir({ root, id }) {
