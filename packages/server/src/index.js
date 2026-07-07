@@ -1908,7 +1908,9 @@ await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/stop', {
 If \`pw-dev proxy\` is running, use the server-proxied API. Agents do not need
 the proxy manager port directly. Send a ready-to-apply \`ruleset\`; pw-dev
 creates a Whistle instance with separate proxy and GUI ports, registers it
-under \`/_pwdev/proxies\`, and attaches it to \`appId\` when provided.
+under \`/_pwdev/proxies\`, starts it with HTTPS capture enabled
+(\`Enable HTTPS / Capture Tunnel Traffic\`), and attaches it to \`appId\` when
+provided.
 
 Create requires \`ruleset\` and either \`id\` or \`appId\`. If only \`appId\`
 is supplied, the proxy id defaults to \`<appId>-whistle\`.

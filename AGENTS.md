@@ -64,6 +64,12 @@ the broker directly without `npm install`:
 git clone https://github.com/sloppygadget-bot/pw-dev.git && cd pw-dev && node packages/cdp-broker/bin/pw-cdp-broker.js --standby --ssh user@target-server
 ```
 
+For an existing checkout, the same SSH broker command is:
+
+```bash
+node packages/cdp-broker/bin/pw-cdp-broker.js --standby --ssh user@target-server
+```
+
 Direct CDP attach example:
 
 ```js
@@ -163,6 +169,9 @@ http://127.0.0.1:18081
 ```
 
 The server proxies proxy-manager APIs under `/_pwdev/proxy/*`.
+
+Managed Whistle proxies start with HTTPS capture enabled (`Enable HTTPS /
+Capture Tunnel Traffic`).
 
 Most managed proxies should be task-scoped: create one for a specific
 test/verification, start the browser with that `proxyId`, then delete the proxy

@@ -27,6 +27,12 @@ Start the broker:
 npm start -- broker --standby
 ```
 
+For an SSH-backed broker, use the dependency-light direct broker entrypoint:
+
+```bash
+node packages/cdp-broker/bin/pw-cdp-broker.js --standby --ssh user@target-server
+```
+
 Start the server. It probes the default broker URL `http://127.0.0.1:18080`:
 
 ```bash
@@ -48,7 +54,8 @@ it under `/_pwdev/proxy/*`. It creates Whistle instances from external-agent
 rulesets, allocates separate proxy and GUI ports, registers the resulting
 proxy metadata, and can attach that proxy to an app by patching the app
 `proxyId`. Each managed Whistle proxy is started with isolated `-S` storage
-under `packages/proxy/.runtime/whistle`; the proxy manager removes that
+under `packages/proxy/.runtime/whistle` and HTTPS capture enabled
+(`Enable HTTPS / Capture Tunnel Traffic`); the proxy manager removes that
 directory when the proxy exits or is stopped.
 
 Most managed proxies should be scoped to one task/test/verification. Agents can

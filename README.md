@@ -65,6 +65,12 @@ Or through the root CLI:
 npm start -- broker --profile work-okta
 ```
 
+For an SSH-backed broker, run the broker entrypoint directly:
+
+```bash
+node packages/cdp-broker/bin/pw-cdp-broker.js --standby --ssh user@target-server
+```
+
 Connect from Playwright:
 
 ```js
@@ -99,9 +105,10 @@ npm start -- proxy
 
 `proxy` creates managed Whistle instances from rulesets supplied by an external
 agent. Each instance gets separate proxy and GUI ports, isolated `-S` storage
-under `packages/proxy/.runtime/whistle`, a proxy registry entry, and optionally
-an app `proxyId` attachment. Task-scoped managed proxies can carry `taskId`,
-`owner`, `purpose`, and `labels` metadata for client-side cleanup and filtering.
+under `packages/proxy/.runtime/whistle`, HTTPS capture enabled, a proxy
+registry entry, and optionally an app `proxyId` attachment. Task-scoped managed
+proxies can carry `taskId`, `owner`, `purpose`, and `labels` metadata for
+client-side cleanup and filtering.
 Shared proxies can be created without `appId`; pass the returned proxy id as
 `proxyId` when starting each browser session that should use it.
 

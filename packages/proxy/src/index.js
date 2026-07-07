@@ -102,6 +102,8 @@ export function createProxyManager(options = {}) {
         String(uiPort),
         '-S',
         storageDir,
+        '-M',
+        'enableHttps',
         '-r',
         shadowRules,
       ];

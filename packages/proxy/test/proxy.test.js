@@ -90,6 +90,8 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
       '9801',
       '-S',
       created.proxy.storageDir,
+      '-M',
+      'enableHttps',
       '-r',
       'www.example.com 127.0.0.1:3000',
     ]);
