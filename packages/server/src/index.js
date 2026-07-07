@@ -1841,6 +1841,24 @@ await fetch('${serverUrl}/_pwdev/apps', {
 Only register non-production test accounts in \`accounts\`. Do not put
 production accounts, personal credentials, or sensitive tokens in app metadata.
 
+## Branch/app lifecycle guidelines
+
+- Treat each development branch or app registration as its own lifecycle
+  boundary. Register an app whose \`devserver.cwd\` points at that branch's
+  worktree, and use that app id for all tasks against that branch.
+- Before starting a browser for an existing broker session identity, check for
+  and stop the previous broker instance for the same default profile or
+  \`appId + taskId\` session. Do this before calling
+  \`POST /_pwdev/apps/:id/browser/start\` so new work never attaches to a stale
+  browser.
+- Create a dedicated managed proxy for the branch/app when proxying is needed.
+  Wire that proxy to the branch app by storing its \`proxyId\` on the app or by
+  passing the \`proxyId\` in browser start requests.
+- When all tasks for a branch/app are finished, stop every browser session for
+  that app and delete the app's task-scoped or branch-dedicated managed
+  proxies. Keep persistent broker profiles only when their login/session state
+  is intentionally reusable.
+
 ## Project-local Playwright convention
 
 Generated Playwright task code should live inside the pw-dev workspace so it can
@@ -1948,6 +1966,60 @@ const proxiedStart = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/
 
 const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
   .then((response) => response.json());
+\`\`\`
+
+## Create and remove a broker proxy forward
+
+When the browser runs on the broker host but Whistle runs on the SSH target,
+create a broker proxy forward before starting the browser. The broker must have
+been started with \`--ssh\`.
+
+\`\`\`js
+const forward = await fetch('${serverUrl}/_pwdev/broker/proxy-forwards', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    name: 'checkout-tax-whistle',
+    remotePort: 8899,
+    localPort: 18899,
+  }),
+}).then((response) => response.json());
+
+await fetch('${serverUrl}/_pwdev/proxies', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    id: 'checkout-tax-broker-whistle',
+    kind: 'whistle',
+    name: 'Checkout tax Whistle via broker SSH forward',
+    brokerProxyForwardId: forward.forwardId,
+  }),
+});
+
+const startedWithForward = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    proxyId: 'checkout-tax-broker-whistle',
+    ignoreSslErrors: true,
+    task: { id: 'smoke-login-20260629', owner: 'codex' },
+  }),
+}).then((response) => response.json());
+\`\`\`
+
+Remove the forward after stopping every browser session that uses it. The broker
+returns \`409 Conflict\` if the forward is still in use.
+
+\`\`\`js
+await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/stop', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ taskId: 'smoke-login-20260629' }),
+});
+
+await fetch(\`${serverUrl}/_pwdev/broker/proxy-forwards/\${encodeURIComponent(forward.forwardId)}\`, {
+  method: 'DELETE',
+});
 \`\`\`
 
 Delete task-scoped managed proxies when the task ends:

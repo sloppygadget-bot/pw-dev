@@ -137,6 +137,10 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /\/_pwdev\/status/);
     assert.match(instructions.body, /\/_pwdev\/apps\/checkout-tax\/manifest/);
     assert.match(instructions.body, /\/_pwdev\/broker\/\*/);
+    assert.match(instructions.body, /Branch\/app lifecycle guidelines/);
+    assert.match(instructions.body, /stop the previous broker instance/);
+    assert.match(instructions.body, /\/_pwdev\/broker\/proxy-forwards/);
+    assert.match(instructions.body, /brokerProxyForwardId/);
 
     const client = await get(`${server.origin}/_pwdev/client.js`);
     assert.equal(client.statusCode, 200);
