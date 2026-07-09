@@ -207,40 +207,52 @@ const browser = await chromium.connectOverCDP('http://127.0.0.1:18080');
 
 For advanced Chrome proxy syntax, pass raw flags with `--chrome-arg`.
 
-When the proxy is on the remote SSH host and multiple broker-controlled
-instances need to use it, create a managed proxy forward through the broker API:
+When multiple broker-controlled instances need the same browser routing, create
+a broker network and start instances with `networkId`:
 
 ```http
-POST /_broker/proxy-forwards
+POST /_broker/networks
 Content-Type: application/json
 
 {
-  "name": "whistle",
-  "remotePort": 8899,
-  "localPort": 18899
+  "id": "agent-whistle",
+  "kind": "whistle",
+  "proxy": { "mode": "ssh-peer", "remotePort": 8899 },
+  "browser": { "ignoreSslErrors": true }
 }
 ```
 
-The broker returns a reusable `proxyForwardId` and `proxyServer`:
+The broker resolves the network to browser launch options:
 
 ```json
 {
   "ok": true,
-  "forwardId": "pf_...",
-  "proxyServer": "http://127.0.0.1:18899"
+  "network": {
+    "id": "agent-whistle",
+    "resolved": {
+      "proxyForwardId": "pf_...",
+      "proxyServer": "http://127.0.0.1:18899",
+      "ignoreSslErrors": true
+    }
+  }
 }
 ```
 
-Use `proxyForwardId` when starting instances. Multiple instances may share one
-proxy forward:
+Use `networkId` when starting instances. Multiple instances may share one
+network:
 
 ```json
 {
   "profile": "work-okta",
-  "proxyForwardId": "pf_...",
-  "ignoreSslErrors": true
+  "networkId": "agent-whistle"
 }
 ```
+
+`proxy.mode: "ssh-peer"` uses the broker's configured `--ssh` target and owns
+the underlying SSH proxy forward. Use `proxy.mode: "direct"` or
+`"broker-local"` when the proxy URL is already reachable from the broker/Chrome
+host. The lower-level `/_broker/proxy-forwards` API remains available for
+debugging and compatibility.
 
 ## Remote Playwright Lifecycle
 
@@ -256,7 +268,7 @@ Content-Type: application/json
 
 {
   "profile": "work-okta",
-  "proxyForwardId": "pf_...",
+  "networkId": "agent-whistle",
   "proxyBypassList": "<-loopback>",
   "ignoreSslErrors": true,
   "headless": false

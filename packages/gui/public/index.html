@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>pw-dev Monitor</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>pw-dev Monitor</h1>
+        <div id="target" class="muted">Loading</div>
+      </div>
+      <div class="toolbar">
+        <label class="inline-field">
+          <span>Refresh</span>
+          <select id="interval">
+            <option value="2000">2s</option>
+            <option value="5000" selected>5s</option>
+            <option value="10000">10s</option>
+            <option value="0">Paused</option>
+          </select>
+        </label>
+        <button id="refresh" type="button" title="Refresh now">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="status-grid" aria-label="Status summary">
+        <div class="metric">
+          <span class="metric-label">Server</span>
+          <strong id="server-state">Unknown</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Broker</span>
+          <strong id="broker-state">Unknown</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Updated</span>
+          <strong id="updated-at">Never</strong>
+        </div>
+      </section>
+
+      <section class="layout">
+        <aside class="nav" aria-label="Entity counts">
+          <button class="nav-item active" data-view="overview" type="button">
+            <span>Overview</span><b id="count-overview">0</b>
+          </button>
+          <button class="nav-item" data-view="apps" type="button">
+            <span>Apps</span><b id="count-apps">0</b>
+          </button>
+          <button class="nav-item" data-view="sessions" type="button">
+            <span>Sessions</span><b id="count-sessions">0</b>
+          </button>
+          <button class="nav-item" data-view="networks" type="button">
+            <span>Networks</span><b id="count-networks">0</b>
+          </button>
+          <button class="nav-item" data-view="proxies" type="button">
+            <span>Proxies</span><b id="count-proxies">0</b>
+          </button>
+        </aside>
+
+        <div class="content">
+          <section class="view active" id="view-overview">
+            <div class="section-title">
+              <h2>Overview</h2>
+              <span id="read-only" class="badge neutral">Read-only</span>
+            </div>
+            <div id="overview-grid" class="cards"></div>
+          </section>
+
+          <section class="view" id="view-apps">
+            <div class="section-title"><h2>Apps</h2></div>
+            <div id="apps-list" class="cards"></div>
+          </section>
+
+          <section class="view" id="view-sessions">
+            <div class="section-title"><h2>Sessions</h2></div>
+            <div id="sessions-list" class="cards"></div>
+          </section>
+
+          <section class="view" id="view-networks">
+            <div class="section-title"><h2>Networks</h2></div>
+            <div id="networks-list" class="cards"></div>
+          </section>
+
+          <section class="view" id="view-proxies">
+            <div class="section-title"><h2>Proxies</h2></div>
+            <div id="proxies-list" class="cards"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <template id="empty-template">
+      <div class="empty">No records</div>
+    </template>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

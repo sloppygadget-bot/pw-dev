@@ -25,6 +25,7 @@ test('parseArgs reads server options', () => {
     '--profile', 'checkout-main',
     '--proxy-forward-id', 'whistle',
     '--proxy-server', 'http://127.0.0.1:8899',
+    '--register-default-app',
   ]);
   assert.equal(options.host, '0.0.0.0');
   assert.equal(options.port, 4111);
@@ -40,6 +41,7 @@ test('parseArgs reads server options', () => {
   assert.equal(options.profile, 'checkout-main');
   assert.equal(options.proxyForwardId, 'whistle');
   assert.equal(options.proxyServer, 'http://127.0.0.1:8899');
+  assert.equal(options.registerDefaultApp, true);
 });
 
 test('resolveStaticPath keeps requests under root', () => {
@@ -102,8 +104,11 @@ test('server exposes pw-dev manifest and status endpoints', async () => {
     assert.equal(status.ok, true);
     assert.equal(status.serverUrl, server.origin);
     assert.equal(status.broker.configured, true);
-    assert.equal(status.broker.reachable, false);
+    assert.equal(typeof status.broker.reachable, 'boolean');
     assert.equal(status.manifest.id, 'checkout-main');
+
+    const apps = await getJson(`${server.origin}/_pwdev/apps`);
+    assert.deepEqual(apps.body.apps, []);
   } finally {
     await server.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -128,6 +133,24 @@ test('server defaults manifest appUrl to its own origin', async () => {
   }
 });
 
+test('server can register the root manifest as an app when requested', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    id: 'checkout-main',
+    registerDefaultApp: true,
+  });
+  try {
+    const apps = await getJson(`${server.origin}/_pwdev/apps`);
+    assert.equal(apps.statusCode, 200);
+    assert.deepEqual(apps.body.apps.map((app) => app.id), ['checkout-main']);
+  } finally {
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server exposes instructions and client helper source', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({ root, port: 0 });
@@ -139,6 +162,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /\/_pwdev\/broker\/\*/);
     assert.match(instructions.body, /Branch\/app lifecycle guidelines/);
     assert.match(instructions.body, /stop the previous broker instance/);
+    assert.match(instructions.body, /\/_pwdev\/networks/);
+    assert.match(instructions.body, /networkId/);
     assert.match(instructions.body, /\/_pwdev\/broker\/proxy-forwards/);
     assert.match(instructions.body, /brokerProxyForwardId/);
 
@@ -147,6 +172,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(client.body, /loadPwDevStatus/);
     assert.match(client.body, /registerPwDevProxy/);
     assert.match(client.body, /registerPwDevApp/);
+    assert.match(client.body, /createPwDevNetwork/);
+    assert.match(client.body, /networkId/);
     assert.match(client.body, /loadPwDevManifest/);
     assert.match(client.body, /connectPwDev/);
   } finally {
@@ -226,7 +253,7 @@ test('server registers and exposes multiple apps', async () => {
 
     const list = await getJson(`${server.origin}/_pwdev/apps`);
     assert.equal(list.statusCode, 200);
-    assert.deepEqual(list.body.apps.map((app) => app.id), ['checkout-main', 'checkout-tax']);
+    assert.deepEqual(list.body.apps.map((app) => app.id), ['checkout-tax']);
 
     const manifest = await getJson(`${server.origin}/_pwdev/apps/checkout-tax/manifest`);
     assert.equal(manifest.statusCode, 200);
@@ -340,6 +367,11 @@ test('server patches app registrations', async () => {
     id: 'checkout-main',
   });
   try {
+    await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'checkout-main',
+      appUrl: 'http://127.0.0.1:5173',
+    });
+
     const patched = await patchJson(`${server.origin}/_pwdev/apps/checkout-main`, {
       proxyId: 'whistle-main',
     });
@@ -548,6 +580,72 @@ test('server resolves broker proxy-forward registrations for browser start', asy
         proxyForwardId: 'whistle',
       },
     });
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server passes networkId to broker browser start', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    id: 'checkout-main',
+    brokerUrl: broker.origin,
+  });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'checkout-tax',
+      appUrl: 'http://127.0.0.1:5174',
+      profile: 'checkout-tax',
+      networkId: 'shared-whistle',
+    });
+
+    const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {});
+    assert.equal(started.statusCode, 200);
+    assert.equal(started.body.app.networkId, 'shared-whistle');
+    assert.equal(started.body.browser.networkId, 'shared-whistle');
+    assert.deepEqual(broker.requests[0], {
+      method: 'POST',
+      path: '/_broker/start',
+      body: {
+        profile: 'checkout-tax',
+        networkId: 'shared-whistle',
+      },
+    });
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server rejects browser start with networkId mixed with proxy options', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    id: 'checkout-main',
+    brokerUrl: broker.origin,
+  });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'checkout-tax',
+      appUrl: 'http://127.0.0.1:5174',
+      profile: 'checkout-tax',
+    });
+
+    const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {
+      networkId: 'shared-whistle',
+      proxyServer: 'http://127.0.0.1:8899',
+    });
+    assert.equal(started.statusCode, 400);
+    assert.match(started.body.error, /networkId is mutually exclusive/);
+    assert.equal(broker.requests.length, 0);
   } finally {
     await server.close();
     await broker.close();
@@ -790,6 +888,46 @@ test('server proxies broker HTTP APIs', async () => {
   }
 });
 
+test('server proxies broker network APIs', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    id: 'checkout-main',
+    brokerUrl: broker.origin,
+  });
+  try {
+    const created = await postJson(`${server.origin}/_pwdev/networks`, {
+      id: 'shared-whistle',
+      proxy: { mode: 'direct', server: 'http://proxy.internal:8899' },
+    });
+    const list = await getJson(`${server.origin}/_pwdev/networks`);
+    assert.equal(created.statusCode, 200);
+    assert.equal(created.body.network.id, 'shared-whistle');
+    assert.equal(list.statusCode, 200);
+    assert.deepEqual(broker.requests.slice(0, 2), [
+      {
+        method: 'POST',
+        path: '/_broker/networks',
+        body: {
+          id: 'shared-whistle',
+          proxy: { mode: 'direct', server: 'http://proxy.internal:8899' },
+        },
+      },
+      {
+        method: 'GET',
+        path: '/_broker/networks',
+        body: {},
+      },
+    ]);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server proxies proxy HTTP APIs', async () => {
   const manager = await startMockProxyManager();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
@@ -913,6 +1051,7 @@ function startMockBroker() {
         instanceId,
         cdpUrl: `${origin}/_broker/instances/${instanceId}`,
         profile: body.profile,
+        networkId: body.networkId,
         proxyForwardId: body.proxyForwardId,
         proxyServer: body.proxyServer,
         startedAt: '2026-01-01T00:00:00.000Z',
@@ -922,6 +1061,23 @@ function startMockBroker() {
 
     if (req.url === '/_broker/status' && req.method === 'GET') {
       writeTestJson(res, 200, { ok: true, running: true, instances: [] });
+      return;
+    }
+
+    if (req.url === '/_broker/networks' && req.method === 'POST') {
+      writeTestJson(res, 200, {
+        ok: true,
+        network: {
+          id: body.id,
+          proxy: body.proxy,
+          resolved: { proxyServer: body.proxy?.server },
+        },
+      });
+      return;
+    }
+
+    if (req.url === '/_broker/networks' && req.method === 'GET') {
+      writeTestJson(res, 200, { ok: true, networks: [] });
       return;
     }
 

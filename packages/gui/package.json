@@ -1,0 +1,22 @@
+{
+  "name": "@pw-dev/gui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only browser dashboard for pw-dev entities and status.",
+  "type": "module",
+  "bin": {
+    "pw-dev-gui": "./bin/pw-dev-gui.js"
+  },
+  "exports": {
+    ".": "./src/server.js",
+    "./cli": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node bin/pw-dev-gui.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}

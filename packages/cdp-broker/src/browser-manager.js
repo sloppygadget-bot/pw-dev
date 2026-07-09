@@ -101,6 +101,7 @@ class BrowserManager {
       headless: launch.headless,
       proxyServer: launch.proxyServer,
       proxyForwardId: launch.proxyForwardId,
+      networkId: launch.networkId,
       pid: child.pid,
       startedAt: new Date().toISOString(),
       child,
@@ -212,6 +213,7 @@ class BrowserManager {
       headless: booleanOption(options.headless, this.headless),
       proxyServer: optionOrDefault(options, 'proxyServer', this.proxyServer),
       proxyForwardId: options.proxyForwardId,
+      networkId: options.networkId,
       proxyBypassList: optionOrDefault(options, 'proxyBypassList', this.proxyBypassList),
       ignoreSslErrors: booleanOption(options.ignoreSslErrors, this.ignoreSslErrors),
       resetProfile: Boolean(options.resetProfile),
@@ -245,6 +247,7 @@ function describeInstance(instance) {
     headless: instance.headless,
     proxyServer: instance.proxyServer,
     proxyForwardId: instance.proxyForwardId,
+    networkId: instance.networkId,
     pid: instance.pid,
     startedAt: instance.startedAt,
   };

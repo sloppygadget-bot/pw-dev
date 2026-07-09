@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createBrowserManager } from './browser-manager.js';
+import { createNetworkManager } from './networks.js';
 import { createProxyForwardManager } from './proxy-forwards.js';
 import { createBrokerServer } from './server.js';
 import { findChromeExecutable } from './chrome.js';
@@ -27,6 +28,8 @@ export async function main(argv) {
 
   const brokerPort = Number(options.port ?? DEFAULT_BROKER_PORT);
   assertPort(brokerPort, '--port');
+  const brokerRemotePort = Number(options.sshRemotePort ?? brokerPort);
+  if (options.sshRemotePort !== undefined) assertPort(brokerRemotePort, '--ssh-remote-port');
 
   const chromeDebugPort = options.chromePort ? Number(options.chromePort) : undefined;
   if (chromeDebugPort !== undefined) assertPort(chromeDebugPort, '--chrome-port');
@@ -84,6 +87,7 @@ export async function main(argv) {
     controlPath: sshControlPath,
     quiet: Boolean(options.quiet),
   });
+  const networkManager = createNetworkManager({ proxyForwardManager });
 
   const shutdown = async (signal) => {
     if (shuttingDown) return;
@@ -113,6 +117,16 @@ export async function main(argv) {
   server = createBrokerServer({
     browserManager,
     proxyForwardManager,
+    networkManager,
+    topology: options.ssh ? {
+      mode: 'ssh',
+      remote: true,
+      ssh: {
+        target: options.ssh,
+        remotePort: brokerRemotePort,
+        controlPersist: sshControlPersist,
+      },
+    } : undefined,
   });
 
   await new Promise((resolve, reject) => {
@@ -146,7 +160,7 @@ export async function main(argv) {
     const ssh = startSshTunnel({
       target: options.ssh,
       localPort: brokerPort,
-      remotePort: Number(options.sshRemotePort ?? brokerPort),
+      remotePort: brokerRemotePort,
       controlPersist: sshControlPersist,
       controlPath: sshControlPath,
       proxyForward: sshProxyForward,

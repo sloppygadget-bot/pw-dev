@@ -7,6 +7,7 @@ test('help text lists supported commands', () => {
   assert.match(helpText(), /broker/);
   assert.match(helpText(), /server/);
   assert.match(helpText(), /proxy/);
+  assert.match(helpText(), /gui/);
 });
 
 test('main rejects unknown commands', async () => {

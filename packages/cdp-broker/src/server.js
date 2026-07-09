@@ -2,11 +2,12 @@ import http from 'node:http';
 import net from 'node:net';
 import { URL } from 'node:url';
 
-export function createBrokerServer({ browserManager, proxyForwardManager } = {}) {
+export function createBrokerServer({ browserManager, proxyForwardManager, networkManager, topology } = {}) {
+  const brokerTopology = normalizeBrokerTopology(topology);
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_broker/') && !req.url.startsWith('/_broker/instances/')) {
-        await handleControlRequest({ req, res, browserManager, proxyForwardManager });
+        await handleControlRequest({ req, res, browserManager, proxyForwardManager, networkManager, brokerTopology });
         return;
       }
 
@@ -24,6 +25,7 @@ export function createBrokerServer({ browserManager, proxyForwardManager } = {})
           JSON.stringify({
             ok: true,
             running: instances.length > 0,
+            topology: brokerTopology,
             chrome: instance ? `${instance.chromeHost}:${instance.chromePort}` : null,
             instances,
           })
@@ -75,7 +77,7 @@ export function rewriteDebuggerUrls(value, brokerBaseUrl) {
   return rewritten;
 }
 
-async function handleControlRequest({ req, res, browserManager, proxyForwardManager }) {
+async function handleControlRequest({ req, res, browserManager, proxyForwardManager, networkManager, brokerTopology }) {
   if (
     (req.url === '/_broker/help' || req.url === '/_broker/instructions') &&
     req.method === 'GET'
@@ -109,6 +111,54 @@ async function handleControlRequest({ req, res, browserManager, proxyForwardMana
     return;
   }
 
+  if (req.url === '/_broker/networks' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const instances = browserManager?.listInstances?.() ?? [];
+    writeJson(res, 200, {
+      ok: true,
+      networks: networkManager?.list?.(instances) ?? [],
+    });
+    return;
+  }
+
+  if (req.url === '/_broker/networks' && req.method === 'POST') {
+    if (!networkManager?.upsert) {
+      writeJson(res, 404, { ok: false, error: 'Network lifecycle is not enabled' });
+      return;
+    }
+    const instances = browserManager?.listInstances?.() ?? [];
+    const network = await networkManager.upsert(await readJsonBody(req), instances);
+    writeJson(res, 200, { ok: true, network });
+    return;
+  }
+
+  const networkMatch = /^\/_broker\/networks\/([^/]+)(?:\/(check))?$/.exec(req.url || '');
+  if (networkMatch) {
+    if (!networkManager) {
+      writeJson(res, 404, { ok: false, error: 'Network lifecycle is not enabled' });
+      return;
+    }
+    const instances = browserManager?.listInstances?.() ?? [];
+    const networkId = decodeURIComponent(networkMatch[1]);
+    const action = networkMatch[2];
+    if (!action && (req.method === 'GET' || req.method === 'HEAD')) {
+      const network = networkManager.get(networkId, instances);
+      writeJson(res, network ? 200 : 404, network
+        ? { ok: true, network }
+        : { ok: false, error: `Unknown network: ${networkId}` });
+      return;
+    }
+    if (!action && req.method === 'DELETE') {
+      const result = networkManager.delete(networkId, instances);
+      writeJson(res, 200, { ok: true, ...result });
+      return;
+    }
+    if (action === 'check' && req.method === 'POST') {
+      const result = networkManager.check(networkId, instances);
+      writeJson(res, 200, { ok: true, ...result });
+      return;
+    }
+  }
+
   const proxyForwardDelete = /^\/_broker\/proxy-forwards\/([^/]+)$/.exec(req.url || '');
   if (proxyForwardDelete && req.method === 'DELETE') {
     if (!proxyForwardManager?.delete) {
@@ -126,7 +176,9 @@ async function handleControlRequest({ req, res, browserManager, proxyForwardMana
     writeJson(res, 200, {
       ok: true,
       running: instances.length > 0,
+      topology: brokerTopology,
       instances,
+      networks: networkManager?.list?.(instances) ?? [],
       proxyForwards: proxyForwardManager?.list?.(instances) ?? [],
     });
     return;
@@ -152,6 +204,7 @@ async function handleControlRequest({ req, res, browserManager, proxyForwardMana
     const instance = await browserManager.start(resolveStartOptions({
       options,
       proxyForwardManager,
+      networkManager,
       instances: browserManager?.listInstances?.() ?? [],
     }));
     writeJson(res, 200, {
@@ -159,6 +212,7 @@ async function handleControlRequest({ req, res, browserManager, proxyForwardMana
       instanceId: instance.id,
       cdpUrl: instanceBaseUrl(req, instance.id),
       profile: instance.profile,
+      networkId: instance.networkId,
       proxyForwardId: instance.proxyForwardId,
       proxyServer: instance.proxyServer,
       headless: instance.headless,
@@ -182,11 +236,40 @@ async function handleControlRequest({ req, res, browserManager, proxyForwardMana
   writeJson(res, 404, { ok: false, error: 'Unknown broker endpoint' });
 }
 
-function resolveStartOptions({ options, proxyForwardManager, instances }) {
+function normalizeBrokerTopology(topology) {
+  if (!topology) return { mode: 'local', remote: false };
+  return {
+    mode: topology.mode ?? (topology.remote ? 'ssh' : 'local'),
+    remote: Boolean(topology.remote),
+    ...(topology.ssh ? { ssh: { ...topology.ssh } } : {}),
+  };
+}
+
+function resolveStartOptions({ options, proxyForwardManager, networkManager, instances }) {
+  if (options.networkId && (options.proxyServer || options.proxyForwardId)) {
+    const error = new Error('networkId is mutually exclusive with proxyServer and proxyForwardId');
+    error.statusCode = 400;
+    throw error;
+  }
   if (options.proxyServer && options.proxyForwardId) {
     const error = new Error('proxyServer and proxyForwardId are mutually exclusive');
     error.statusCode = 400;
     throw error;
+  }
+  if (options.networkId) {
+    const network = networkManager?.resolve?.(options.networkId, instances);
+    if (!network) {
+      const error = new Error(`Unknown network: ${options.networkId}`);
+      error.statusCode = 404;
+      throw error;
+    }
+    return omitUndefined({
+      ...options,
+      proxyServer: network.proxyServer,
+      proxyForwardId: network.proxyForwardId,
+      proxyBypassList: options.proxyBypassList ?? network.proxyBypassList,
+      ignoreSslErrors: options.ignoreSslErrors ?? network.ignoreSslErrors,
+    });
   }
   if (!options.proxyForwardId) return options;
   const forward = proxyForwardManager?.get?.(options.proxyForwardId, instances);
@@ -199,6 +282,10 @@ function resolveStartOptions({ options, proxyForwardManager, instances }) {
     ...options,
     proxyServer: forward.proxyServer,
   };
+}
+
+function omitUndefined(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined));
 }
 
 function rewriteWebSocketUrl(rawUrl, brokerBaseUrl) {
@@ -473,13 +560,18 @@ await fetch('${brokerUrl}/_broker/profiles/clear', {
 
 The broker rejects clearing a profile while a running instance is using it.
 
-## Managed remote proxy forward
+## Browser networks
 
 \`\`\`js
-const forward = await fetch('${brokerUrl}/_broker/proxy-forwards', {
+const network = await fetch('${brokerUrl}/_broker/networks', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ name: 'whistle', remotePort: 8899 }),
+  body: JSON.stringify({
+    id: 'agent-whistle',
+    kind: 'whistle',
+    proxy: { mode: 'ssh-peer', remotePort: 8899 },
+    browser: { ignoreSslErrors: true },
+  }),
 }).then((response) => response.json());
 
 const proxied = await fetch('${brokerUrl}/_broker/start', {
@@ -487,16 +579,27 @@ const proxied = await fetch('${brokerUrl}/_broker/start', {
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
     profile: 'work-okta',
-    proxyForwardId: forward.forwardId,
-    ignoreSslErrors: true,
+    networkId: network.network.id,
   }),
 }).then((response) => response.json());
 \`\`\`
+
+Use \`proxy.mode: "ssh-peer"\` when the proxy is on the SSH peer configured by
+broker \`--ssh\`. The broker creates and owns the underlying SSH proxy forward.
+Use \`proxy.mode: "direct"\` or \`"broker-local"\` when the proxy URL is already
+reachable from the broker/Chrome host.
+
+The lower-level \`/_broker/proxy-forwards\` API remains available for debugging
+and compatibility when callers need a raw \`proxyForwardId\`.
 
 ## Status and cleanup
 
 \`\`\`js
 const status = await fetch('${brokerUrl}/_broker/status').then((response) => response.json());
+
+if (status.topology?.remote && status.topology.mode === 'ssh') {
+  // Broker was started with --ssh; the SSH peer is the broker's remote network side.
+}
 
 await fetch('${brokerUrl}/_broker/stop', {
   method: 'POST',
@@ -519,6 +622,7 @@ function brokerClientSource(brokerUrl) {
 export async function connectViaBroker({
   brokerUrl = '${brokerUrl}',
   profile,
+  networkId,
   proxyServer,
   proxyForwardId,
   proxyBypassList,
@@ -530,6 +634,7 @@ export async function connectViaBroker({
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       profile,
+      networkId,
       proxyServer,
       proxyForwardId,
       proxyBypassList,

@@ -15,6 +15,7 @@
     "broker": "node packages/cdp-broker/bin/pw-cdp-broker.js",
     "server": "node packages/server/bin/pw-dev-server.js",
     "proxy": "node packages/proxy/bin/pw-dev-proxy.js",
+    "gui": "node packages/gui/bin/pw-dev-gui.js",
     "install:playwright": "npm install -D playwright @playwright/cli && npx playwright install chromium && npx playwright-cli install --skills",
     "test": "node --test packages/*/test/*.test.js",
     "test:broker": "node --test packages/cdp-broker/test/*.test.js",

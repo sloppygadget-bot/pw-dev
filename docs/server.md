@@ -97,6 +97,14 @@ Use `/_pwdev/status` first to verify that the server is healthy and the broker
 is configured/reachable. Use `/_pwdev/instructions` as the live usage guide for
 the current server. Use `/_pwdev/client.js` when an agent wants a small helper
 module instead of hand-writing manifest fetch and CDP attach logic.
+If the broker was started with `--ssh`, `status.broker.status.topology` reports
+`{ "mode": "ssh", "remote": true }` plus SSH details. Agents should use that as
+the broker topology signal instead of guessing from `localhost` URLs.
+
+`/_pwdev/manifest` describes the server root, but it is not automatically added
+to `/_pwdev/apps`. Register apps explicitly with `POST /_pwdev/apps`; use
+`--register-default-app` only when the root manifest should also appear as an
+app.
 
 Generated Playwright task code should live inside the pw-dev workspace so it
 uses the project-local Playwright package installed by
@@ -157,6 +165,27 @@ Proxy registrations are reusable metadata. They have no runner or status.
 Update a proxy port by re-posting the same `id` with a different `proxyUrl`.
 Use `brokerProxyForwardId` instead of `proxyUrl` when the broker owns the
 forward, but do not set both fields.
+
+For new browser-start workflows, prefer broker networks. A network is a named
+browser routing profile owned by the broker. The server proxies these APIs to
+the broker under `/_pwdev/networks`.
+
+```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/networks \
+  -H 'content-type: application/json' \
+  -d '{
+    "id": "agent-whistle",
+    "kind": "whistle",
+    "proxy": { "mode": "ssh-peer", "remotePort": 8899 },
+    "browser": { "ignoreSslErrors": true }
+  }'
+```
+
+Use `proxy.mode: "ssh-peer"` when the proxy is on the SSH peer configured by
+broker `--ssh`. Use `"direct"` or `"broker-local"` when the proxy URL is already
+reachable from the broker/Chrome host. Start browser sessions with
+`networkId`; do not mix `networkId` with `proxyId`, `proxyForwardId`, or
+`proxyServer` in the same browser-start request.
 
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/apps \
@@ -378,6 +407,12 @@ POST   /_pwdev/proxies
 GET    /_pwdev/proxies/:id
 DELETE /_pwdev/proxies/:id
 
+GET    /_pwdev/networks
+POST   /_pwdev/networks
+GET    /_pwdev/networks/:id
+DELETE /_pwdev/networks/:id
+POST   /_pwdev/networks/:id/check
+
 GET    /_pwdev/apps
 POST   /_pwdev/apps
 GET    /_pwdev/apps/:id
@@ -448,7 +483,7 @@ Reachable broker:
 
 [packages/server/src/index.js](/home/pengxie/work/pw-dev/packages/server/src/index.js)
 
-- `startPwDevServer`: starts the HTTP server, seeds the default app, pairs the broker, and installs the broker WebSocket proxy.
+- `startPwDevServer`: starts the HTTP server, builds the root manifest, pairs the broker, and installs the broker WebSocket proxy.
 - `handlePwDevRequest`: dispatches all `/_pwdev/*` HTTP routes.
 - `createAppRegistry`: process-local app registry with list/get/upsert/update/delete.
 - `createProxyRegistry`: process-local reusable proxy registry with list/get/upsert/delete.

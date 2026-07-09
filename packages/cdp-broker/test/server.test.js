@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
 
+import { createNetworkManager } from '../src/networks.js';
 import { createBrokerServer, rewriteDebuggerUrls } from '../src/server.js';
 
 test('rewrites browser and page websocket debugger urls to broker origin', () => {
@@ -189,6 +190,67 @@ test('start control route rejects proxyServer with proxyForwardId', async () => 
   }
 });
 
+test('status reports local broker topology by default', async () => {
+  const server = createBrokerServer({
+    browserManager: {
+      activeInstance: () => undefined,
+      listInstances: () => [],
+    },
+  });
+
+  const { port, close } = await listen(server);
+  try {
+    const response = await requestJson({
+      port,
+      method: 'GET',
+      path: '/_broker/status',
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.body.topology, { mode: 'local', remote: false });
+  } finally {
+    await close();
+  }
+});
+
+test('status reports SSH remote broker topology', async () => {
+  const server = createBrokerServer({
+    browserManager: {
+      activeInstance: () => undefined,
+      listInstances: () => [],
+    },
+    topology: {
+      mode: 'ssh',
+      remote: true,
+      ssh: {
+        target: 'user@code-server',
+        remotePort: 18080,
+        controlPersist: '24h',
+      },
+    },
+  });
+
+  const { port, close } = await listen(server);
+  try {
+    const response = await requestJson({
+      port,
+      method: 'GET',
+      path: '/_broker/status',
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.topology.mode, 'ssh');
+    assert.equal(response.body.topology.remote, true);
+    assert.deepEqual(response.body.topology.ssh, {
+      target: 'user@code-server',
+      remotePort: 18080,
+      controlPersist: '24h',
+    });
+  } finally {
+    await close();
+  }
+});
+
 test('returns 503 for CDP discovery before Chrome is started', async () => {
   const server = createBrokerServer({
     browserManager: {
@@ -327,6 +389,8 @@ test('serves remote Playwright help over broker endpoints', async () => {
     assert.match(help.body, new RegExp(`http://127\\.0\\.0\\.1:${port}`));
     assert.match(help.body, /POST \/_broker\/start|_broker\/start/);
     assert.match(help.body, /_broker\/profiles\/clear/);
+    assert.match(help.body, /_broker\/networks/);
+    assert.match(help.body, /networkId/);
     assert.match(help.body, /proxyForwardId/);
     assert.match(help.body, /connectOverCDP\(start\.cdpUrl\)/);
     assert.equal(instructions.body, help.body);
@@ -402,6 +466,120 @@ test('serves proxy forward lifecycle endpoints', async () => {
   }
 });
 
+test('serves network lifecycle endpoints', async () => {
+  const networkManager = createNetworkManager();
+  const server = createBrokerServer({
+    browserManager: {
+      activeInstance: () => undefined,
+      listInstances: () => [],
+    },
+    networkManager,
+  });
+
+  const { port, close } = await listen(server);
+  try {
+    const create = await requestJson({
+      port,
+      method: 'POST',
+      path: '/_broker/networks',
+      body: {
+        id: 'shared-whistle',
+        kind: 'whistle',
+        proxy: { mode: 'direct', server: 'http://proxy.internal:8899' },
+        browser: { ignoreSslErrors: true, proxyBypassList: '<-loopback>' },
+      },
+    });
+    const list = await requestJson({
+      port,
+      method: 'GET',
+      path: '/_broker/networks',
+    });
+    const check = await requestJson({
+      port,
+      method: 'POST',
+      path: '/_broker/networks/shared-whistle/check',
+    });
+    const deleted = await requestJson({
+      port,
+      method: 'DELETE',
+      path: '/_broker/networks/shared-whistle',
+    });
+
+    assert.equal(create.statusCode, 200);
+    assert.equal(create.body.network.id, 'shared-whistle');
+    assert.deepEqual(create.body.network.resolved, {
+      proxyServer: 'http://proxy.internal:8899',
+      ignoreSslErrors: true,
+      proxyBypassList: '<-loopback>',
+    });
+    assert.equal(list.body.networks[0].id, 'shared-whistle');
+    assert.equal(check.body.reachable, true);
+    assert.equal(check.body.resolved.proxyServer, 'http://proxy.internal:8899');
+    assert.equal(deleted.statusCode, 200);
+    assert.equal(deleted.body.networkId, 'shared-whistle');
+  } finally {
+    await close();
+  }
+});
+
+test('start control route resolves networkId to launch options', async () => {
+  const starts = [];
+  const networkManager = createNetworkManager();
+  await networkManager.upsert({
+    id: 'shared-whistle',
+    proxy: { mode: 'direct', server: 'http://proxy.internal:8899' },
+    browser: { ignoreSslErrors: true, proxyBypassList: '<-loopback>' },
+  });
+  const server = createBrokerServer({
+    browserManager: {
+      activeInstance: () => undefined,
+      listInstances: () => [],
+      start: async (options) => {
+        starts.push(options);
+        return {
+          id: 'bkr_abc',
+          profile: 'work-okta',
+          networkId: options.networkId,
+          proxyServer: options.proxyServer,
+          chromeHost: '127.0.0.1',
+          chromePort: 9333,
+          pid: 123,
+          startedAt: '2026-06-16T00:00:00.000Z',
+        };
+      },
+    },
+    networkManager,
+  });
+
+  const { port, close } = await listen(server);
+  try {
+    const response = await requestJson({
+      port,
+      method: 'POST',
+      path: '/_broker/start',
+      body: {
+        profile: 'work-okta',
+        networkId: 'shared-whistle',
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(starts, [
+      {
+        profile: 'work-okta',
+        networkId: 'shared-whistle',
+        proxyServer: 'http://proxy.internal:8899',
+        proxyBypassList: '<-loopback>',
+        ignoreSslErrors: true,
+      },
+    ]);
+    assert.equal(response.body.networkId, 'shared-whistle');
+    assert.equal(response.body.proxyServer, 'http://proxy.internal:8899');
+  } finally {
+    await close();
+  }
+});
+
 test('serves persistent profile clear endpoint', async () => {
   const clears = [];
   const server = createBrokerServer({
@@ -459,6 +637,7 @@ test('serves a copyable Playwright broker client helper', async () => {
     assert.match(response.body, new RegExp(`brokerUrl = 'http://127\\.0\\.0\\.1:${port}'`));
     assert.match(response.body, /export async function connectViaBroker/);
     assert.match(response.body, /chromium\.connectOverCDP\(instance\.cdpUrl\)/);
+    assert.match(response.body, /networkId/);
     assert.match(response.body, /proxyForwardId/);
   } finally {
     await close();

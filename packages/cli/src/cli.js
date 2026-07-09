@@ -1,6 +1,7 @@
 // @ts-check
 
 import { main as brokerMain } from '../../cdp-broker/src/cli.js';
+import { main as guiMain } from '../../gui/src/cli.js';
 import { main as serverMain } from '../../server/src/cli.js';
 import { main as proxyMain } from '../../proxy/src/cli.js';
 
@@ -26,6 +27,11 @@ export async function main(argv) {
     return;
   }
 
+  if (command === 'gui' || command === 'monitor') {
+    await guiMain(rest);
+    return;
+  }
+
   throw new Error(`Unknown command: ${command}`);
 }
 
@@ -39,9 +45,11 @@ Commands:
   broker      Run the local/remote Chrome session broker
   server      Run the dependency-free static dev server
   proxy       Run the optional managed Whistle proxy manager
+  gui         Run the read-only local browser dashboard
 
 Examples:
   pw-dev broker --profile work-okta
   pw-dev server --root examples/static-site --port 9696
-  pw-dev proxy`;
+  pw-dev proxy
+  pw-dev gui --port 9797`;
 }

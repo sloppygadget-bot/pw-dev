@@ -4,7 +4,8 @@
  * Command-line entry point for `pw-dev server`.
  *
  * The CLI starts the same HTTP server exported by `src/index.js` and maps
- * scalar flags onto the seeded app manifest/registry entry.
+ * scalar flags onto the root manifest. App registry entries are created
+ * through `POST /_pwdev/apps` unless `--register-default-app` is supplied.
  */
 
 import path from 'node:path';
@@ -38,7 +39,7 @@ export async function main(argv) {
 /**
  * Parse `pw-dev server` flags.
  *
- * These options seed the default app registration. Additional apps should use
+ * These options seed the root manifest. Additional apps should use
  * `POST /_pwdev/apps` at runtime.
  *
  * @param {string[]} argv Command-line arguments after `pw-dev server`.
@@ -78,6 +79,8 @@ export function parseArgs(argv) {
       options.proxyForwardId = readValue(argv, ++i, arg);
     } else if (arg === '--proxy-server') {
       options.proxyServer = readValue(argv, ++i, arg);
+    } else if (arg === '--register-default-app') {
+      options.registerDefaultApp = true;
     } else {
       throw new Error(`Unknown option: ${arg}`);
     }
@@ -123,5 +126,7 @@ Options:
                   Broker proxy-forward id for proxied app sessions
   --proxy-server <url>
                   Explicit Chrome proxy server for app browser sessions
+  --register-default-app
+                  Also register /_pwdev/manifest in /_pwdev/apps
   --help          Show this help`;
 }

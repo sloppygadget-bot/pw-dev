@@ -173,6 +173,12 @@ The server proxies proxy-manager APIs under `/_pwdev/proxy/*`.
 Managed Whistle proxies start with HTTPS capture enabled (`Enable HTTPS /
 Capture Tunnel Traffic`).
 
+For browser routing, prefer broker networks over direct proxy-forward wiring.
+Create or register a broker-owned network through `POST /_pwdev/networks`, then
+start browser sessions with `networkId`. Use `proxy.mode: "ssh-peer"` when the
+proxy lives on the SSH peer configured by broker `--ssh`; the broker owns the
+underlying proxy forward.
+
 Most managed proxies should be task-scoped: create one for a specific
 test/verification, start the browser with that `proxyId`, then delete the proxy
 when the task ends. To create a live managed proxy, send

@@ -32,9 +32,9 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
 /**
  * Options for `startPwDevServer`.
  *
- * The scalar app fields seed the server's own default manifest and app
- * registry entry. Additional apps can be registered later through
- * `POST /_pwdev/apps`.
+ * The scalar app fields seed the server's own root manifest. App registry
+ * entries are registered through `POST /_pwdev/apps`, unless
+ * `registerDefaultApp` is explicitly enabled.
  *
  * @typedef {object} PwDevServerOptions
  * @property {string=} host HTTP listen host. Defaults to `127.0.0.1`.
@@ -49,9 +49,11 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @property {string=} proxyManagerUrl Optional proxy manager base URL proxied under `/_pwdev/proxy/*`. Defaults to `http://127.0.0.1:18081`.
  * @property {string=} cdpUrl Optional Playwright CDP URL for direct browser attachment.
  * @property {string=} profile Optional broker profile name for the app.
+ * @property {string=} networkId Optional broker network id for browser sessions.
  * @property {string=} proxyId Optional proxy registry id for the app.
  * @property {string=} proxyForwardId Optional broker-managed proxy forward id, for example a Whistle tunnel.
  * @property {string=} proxyServer Optional Chrome proxy server URL.
+ * @property {boolean=} registerDefaultApp Register the root manifest in `/_pwdev/apps`. Defaults to false.
  */
 
 /**
@@ -77,6 +79,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @property {string=} brokerUrl Advanced per-app broker override. Normal app registration should not set this.
  * @property {string=} cdpUrl Playwright CDP URL for direct browser attachment.
  * @property {string=} profile Broker profile name associated with this app.
+ * @property {string=} networkId Broker network id associated with this app.
  * @property {string=} proxyId Reusable proxy registry id associated with this app.
  * @property {string=} proxyForwardId Broker proxy-forward id associated with this app.
  * @property {string=} proxyServer Explicit Chrome proxy server URL associated with this app.
@@ -191,6 +194,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @property {string} cdpUrl Server-proxied CDP URL.
  * @property {string} browserInstanceId Broker instance id for the Chrome process.
  * @property {string=} browserStartedAt ISO timestamp returned by the broker.
+ * @property {string=} networkId Broker network id associated with the session.
  * @property {string=} proxyId Reusable proxy registry id associated with the session.
  * @property {string=} proxyForwardId Broker proxy-forward id associated with the session.
  * @property {string=} proxyServer Explicit Chrome proxy server URL associated with the session.
@@ -225,6 +229,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @typedef {object} PwDevBrowserStartOptions
  * @property {string=} brokerUrl Advanced broker base URL override. Defaults to server-level broker pairing.
  * @property {string=} profile Broker profile override. Defaults to the app profile, then app id.
+ * @property {string=} networkId Broker network id. Mutually exclusive with proxy options.
  * @property {string=} proxyId Reusable proxy registry id. Defaults to app `proxyId`.
  * @property {string=} proxyForwardId Broker proxy-forward id for proxied apps.
  * @property {string=} proxyServer Explicit Chrome proxy server URL.
@@ -258,6 +263,7 @@ export async function startPwDevServer(options = {}) {
     appUrl: options.appUrl,
     cdpUrl: options.cdpUrl,
     profile: options.profile,
+    networkId: options.networkId,
     proxyId: options.proxyId,
     proxyForwardId: options.proxyForwardId,
     proxyServer: options.proxyServer,
@@ -267,7 +273,6 @@ export async function startPwDevServer(options = {}) {
   const proxyManagerUrl = normalizeHttpUrl(options.proxyManagerUrl ?? DEFAULT_PROXY_MANAGER_URL, 'proxyManagerUrl');
   const apps = createAppRegistry();
   const proxies = createProxyRegistry();
-  apps.upsert(buildManifest({ root, worktree, origin: undefined, metadata }));
   let origin;
 
   const server = http.createServer(async (req, res) => {
@@ -308,7 +313,9 @@ export async function startPwDevServer(options = {}) {
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : port;
   origin = `http://${host}:${actualPort}`;
-  apps.upsert(buildManifest({ root, worktree, origin, metadata }));
+  if (options.registerDefaultApp) {
+    apps.upsert(buildManifest({ root, worktree, origin, metadata }));
+  }
 
   return {
     origin,
@@ -329,6 +336,7 @@ export async function startPwDevServer(options = {}) {
  * - `GET /_pwdev/instructions`
  * - `GET /_pwdev/client.js`
  * - `ANY /_pwdev/broker/*`
+ * - `ANY /_pwdev/networks/*`
  * - `ANY /_pwdev/proxy/*`
  * - `GET|POST /_pwdev/apps`
  * - `GET|DELETE /_pwdev/apps/:id`
@@ -362,6 +370,11 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
 
   if (requestUrl.pathname.startsWith('/_pwdev/broker')) {
     await proxyBrokerHttpRequest({ req, res, requestUrl, broker });
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/networks' || requestUrl.pathname.startsWith('/_pwdev/networks/')) {
+    await proxyBrokerHttpRequest({ req, res, requestUrl, broker, brokerPath: proxyBrokerNetworksPath(requestUrl) });
     return;
   }
 
@@ -452,6 +465,7 @@ export function buildManifest({ root, worktree, origin, metadata }) {
     brokerUrl: metadata.brokerUrl,
     cdpUrl: metadata.cdpUrl,
     profile: metadata.profile,
+    networkId: metadata.networkId,
     proxyId: metadata.proxyId,
     proxyForwardId: metadata.proxyForwardId,
     proxyServer: metadata.proxyServer,
@@ -838,9 +852,9 @@ async function resolveFile(filePath) {
  * }} options
  * @returns {Promise<void>}
  */
-async function proxyBrokerHttpRequest({ req, res, requestUrl, broker }) {
+async function proxyBrokerHttpRequest({ req, res, requestUrl, broker, brokerPath }) {
   const brokerUrl = broker.resolve();
-  const upstreamUrl = new URL(proxyBrokerPath(requestUrl), ensureTrailingSlash(brokerUrl));
+  const upstreamUrl = new URL(brokerPath ?? proxyBrokerPath(requestUrl), ensureTrailingSlash(brokerUrl));
   const headers = { ...req.headers, host: upstreamUrl.host };
 
   const upstream = http.request(upstreamUrl, {
@@ -968,6 +982,11 @@ function proxyBrokerPath(requestUrl) {
   return `/_broker${suffix || ''}${requestUrl.search}`;
 }
 
+function proxyBrokerNetworksPath(requestUrl) {
+  const suffix = requestUrl.pathname.slice('/_pwdev/networks'.length);
+  return `/_broker/networks${suffix || ''}${requestUrl.search}`;
+}
+
 function proxyProxyManagerPath(requestUrl) {
   const suffix = requestUrl.pathname.slice('/_pwdev/proxy'.length);
   return `/_proxy${suffix || ''}${requestUrl.search}`;
@@ -1029,7 +1048,11 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
       writeJson(res, 409, conflict);
       return;
     }
-    const proxy = resolveProxyForBrowserStart({
+    const network = resolveNetworkForBrowserStart({
+      networkId: payload.networkId ?? app.networkId,
+      payload,
+    });
+    const proxy = network.networkId ? {} : resolveProxyForBrowserStart({
       proxies,
       proxyId: payload.proxyId ?? app.proxyId,
       proxyForwardId: payload.proxyForwardId ?? app.proxyForwardId,
@@ -1039,6 +1062,7 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
       method: 'POST',
       body: omitUndefined({
         profile: slot.profile,
+        networkId: network.networkId,
         proxyForwardId: proxy.proxyForwardId,
         proxyServer: proxy.proxyServer,
         proxyBypassList: payload.proxyBypassList,
@@ -1063,6 +1087,7 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
         start,
         profile: slot.profile,
         cdpUrl: proxiedCdpUrl,
+        network,
         proxy,
       });
       updated = apps.update(id, {
@@ -1075,6 +1100,7 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
       updated = apps.update(id, {
         cdpUrl: proxiedCdpUrl,
         profile: start.profile,
+        networkId: start.networkId,
         proxyId: proxy.proxyId ?? app.proxyId,
         browserInstanceId: start.instanceId,
         proxyForwardId: start.proxyForwardId,
@@ -1202,7 +1228,7 @@ function findActiveBrowserProfile(app, profile) {
   return undefined;
 }
 
-function makeBrowserSession({ sessionId, task, activeTask, start, profile, cdpUrl, proxy }) {
+function makeBrowserSession({ sessionId, task, activeTask, start, profile, cdpUrl, network, proxy }) {
   return omitUndefined({
     sessionId,
     taskId: task.id,
@@ -1210,6 +1236,7 @@ function makeBrowserSession({ sessionId, task, activeTask, start, profile, cdpUr
     cdpUrl,
     browserInstanceId: start.instanceId,
     browserStartedAt: start.startedAt,
+    networkId: start.networkId ?? network.networkId,
     proxyId: proxy.proxyId,
     proxyForwardId: start.proxyForwardId,
     proxyServer: start.proxyServer,
@@ -1483,6 +1510,7 @@ function validateAppRegistration(rawApp) {
     brokerUrl: optionalString(rawApp.brokerUrl, 'brokerUrl'),
     cdpUrl: optionalString(rawApp.cdpUrl, 'cdpUrl'),
     profile: optionalString(rawApp.profile, 'profile'),
+    networkId: optionalString(rawApp.networkId, 'networkId'),
     proxyId: optionalString(rawApp.proxyId, 'proxyId'),
     proxyForwardId: optionalString(rawApp.proxyForwardId, 'proxyForwardId'),
     proxyServer: optionalString(rawApp.proxyServer, 'proxyServer'),
@@ -1501,11 +1529,14 @@ function validateAppPatch(rawPatch) {
   if (!rawPatch || typeof rawPatch !== 'object' || Array.isArray(rawPatch)) {
     throwValidationError('app patch must be an object');
   }
-  const allowed = new Set(['proxyId']);
+  const allowed = new Set(['networkId', 'proxyId']);
   for (const key of Object.keys(rawPatch)) {
     if (!allowed.has(key)) throwValidationError(`Unsupported app patch field: ${key}`);
   }
   const patch = {};
+  if (Object.hasOwn(rawPatch, 'networkId')) {
+    patch.networkId = rawPatch.networkId === null ? null : optionalString(rawPatch.networkId, 'networkId');
+  }
   if (Object.hasOwn(rawPatch, 'proxyId')) {
     patch.proxyId = rawPatch.proxyId === null ? null : optionalString(rawPatch.proxyId, 'proxyId');
   }
@@ -1551,6 +1582,15 @@ function validateProxyRegistration(rawProxy) {
   if (proxy.guiUrl) validateHttpUrl(proxy.guiUrl, 'guiUrl');
 
   return omitUndefined(proxy);
+}
+
+function resolveNetworkForBrowserStart({ networkId, payload }) {
+  const normalizedNetworkId = optionalString(networkId, 'networkId');
+  if (!normalizedNetworkId) return {};
+  if (payload.proxyId || payload.proxyForwardId || payload.proxyServer) {
+    throwValidationError('networkId is mutually exclusive with proxyId, proxyForwardId, and proxyServer');
+  }
+  return { networkId: normalizedNetworkId };
 }
 
 function resolveProxyForBrowserStart({ proxies, proxyId, proxyForwardId, proxyServer }) {
@@ -1693,6 +1733,7 @@ function validateBrowserSession(rawSession, name) {
     cdpUrl: requiredString(rawSession.cdpUrl, `${name}.cdpUrl`),
     browserInstanceId: requiredString(rawSession.browserInstanceId, `${name}.browserInstanceId`),
     browserStartedAt: optionalString(rawSession.browserStartedAt, `${name}.browserStartedAt`),
+    networkId: optionalString(rawSession.networkId, `${name}.networkId`),
     proxyId: optionalString(rawSession.proxyId, `${name}.proxyId`),
     proxyForwardId: optionalString(rawSession.proxyForwardId, `${name}.proxyForwardId`),
     proxyServer: optionalString(rawSession.proxyServer, `${name}.proxyServer`),
@@ -1785,9 +1826,17 @@ if (!status.broker?.configured) {
 if (status.broker.reachable === false) {
   throw new Error(\`pw-dev broker is unreachable: \${status.broker.error}\`);
 }
+
+if (status.broker.status?.topology?.remote && status.broker.status.topology.mode === 'ssh') {
+  // Broker was started with --ssh; the SSH peer is the broker's remote network side.
+}
 \`\`\`
 
 ## List and select apps
+
+Only explicitly registered apps appear in \`/_pwdev/apps\`. The server root
+manifest remains available at \`/_pwdev/manifest\`, but it is not registered as
+an app unless the server was started with \`--register-default-app\`.
 
 \`\`\`js
 const { apps } = await fetch('${serverUrl}/_pwdev/apps')
@@ -1968,11 +2017,42 @@ const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
   .then((response) => response.json());
 \`\`\`
 
+## Create and use a broker network
+
+Networks are broker-owned browser routing profiles. Use \`networkId\` in browser
+start requests instead of creating proxy forwards directly.
+
+\`\`\`js
+const network = await fetch('${serverUrl}/_pwdev/networks', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    id: 'agent-whistle',
+    kind: 'whistle',
+    proxy: { mode: 'ssh-peer', remotePort: 8899 },
+    browser: { ignoreSslErrors: true },
+  }),
+}).then((response) => response.json());
+
+const startedWithNetwork = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    networkId: network.network.id,
+    task: { id: 'smoke-login-20260629', owner: 'codex' },
+  }),
+}).then((response) => response.json());
+\`\`\`
+
+Use \`proxy.mode: "ssh-peer"\` when the proxy is on the SSH peer configured by
+broker \`--ssh\`. Use \`"direct"\` or \`"broker-local"\` when the proxy URL is
+already reachable from the broker/Chrome host.
+
 ## Create and remove a broker proxy forward
 
-When the browser runs on the broker host but Whistle runs on the SSH target,
-create a broker proxy forward before starting the browser. The broker must have
-been started with \`--ssh\`.
+This is the lower-level API behind \`proxy.mode: "ssh-peer"\` networks. Prefer
+\`/_pwdev/networks\` for normal agent workflows. The broker must have been
+started with \`--ssh\`.
 
 \`\`\`js
 const forward = await fetch('${serverUrl}/_pwdev/broker/proxy-forwards', {
@@ -2040,6 +2120,11 @@ GET    /_pwdev/proxies
 POST   /_pwdev/proxies
 GET    /_pwdev/proxies/:id
 DELETE /_pwdev/proxies/:id
+GET    /_pwdev/networks
+POST   /_pwdev/networks
+GET    /_pwdev/networks/:id
+DELETE /_pwdev/networks/:id
+POST   /_pwdev/networks/:id/check
 GET    /_pwdev/apps
 POST   /_pwdev/apps
 GET    /_pwdev/apps/:id
@@ -2164,6 +2249,36 @@ export async function deletePwDevManagedProxy(proxyId, { serverUrl = '${serverUr
   return response.json();
 }
 
+export async function createPwDevNetwork(network, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/networks\`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(network),
+  });
+  if (!response.ok) {
+    throw new Error(\`pw-dev network create failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function loadPwDevNetworks({ serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/networks\`);
+  if (!response.ok) {
+    throw new Error(\`pw-dev networks load failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function checkPwDevNetwork(networkId, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/networks/\${encodeURIComponent(networkId)}/check\`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw new Error(\`pw-dev network check failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
 export function pwDevAgentTaskPaths(taskId, { root = '.agent/tasks' } = {}) {
   if (!taskId) throw new Error('pwDevAgentTaskPaths requires taskId');
   const safeTaskId = String(taskId).replace(/[^A-Za-z0-9._-]/g, '_');
@@ -2198,6 +2313,7 @@ export async function startPwDevBrowser({
   headless,
   resetProfile,
   profile,
+  networkId,
   proxyId,
   proxyForwardId,
   proxyServer,
@@ -2213,6 +2329,7 @@ export async function startPwDevBrowser({
       headless,
       resetProfile,
       profile,
+      networkId,
       proxyId,
       proxyForwardId,
       proxyServer,
