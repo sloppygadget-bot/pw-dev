@@ -166,6 +166,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /networkId/);
     assert.match(instructions.body, /\/_pwdev\/broker\/proxy-forwards/);
     assert.match(instructions.body, /brokerProxyForwardId/);
+    assert.match(instructions.body, /Playwright CLI/);
+    assert.match(instructions.body, /bundled skills/);
 
     const client = await get(`${server.origin}/_pwdev/client.js`);
     assert.equal(client.statusCode, 200);

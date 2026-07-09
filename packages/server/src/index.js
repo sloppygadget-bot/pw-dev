@@ -1829,6 +1829,11 @@ if (status.broker.reachable === false) {
 
 if (status.broker.status?.topology?.remote && status.broker.status.topology.mode === 'ssh') {
   // Broker was started with --ssh; the SSH peer is the broker's remote network side.
+  // A mapped proxy is generally needed when the remote browser must reach
+  // agent-local debugging tools. If the browser should use a Whistle proxy on
+  // the agent machine, create a broker network with proxy.mode: "ssh-peer" so
+  // the broker maps the remote port to that local proxy instead of pointing
+  // Chrome at localhost.
 }
 \`\`\`
 
@@ -1908,18 +1913,27 @@ production accounts, personal credentials, or sensitive tokens in app metadata.
   proxies. Keep persistent broker profiles only when their login/session state
   is intentionally reusable.
 
-## Project-local Playwright convention
+## Playwright in pw-dev
 
 Generated Playwright task code should live inside the pw-dev workspace so it can
-use the project-local Playwright package. If Playwright is not installed, run
-\`npm run install:playwright\` from the pw-dev root.
+use the Playwright package shipped with pw-dev. If Playwright is not installed,
+run \`npm run install:playwright\` from the pw-dev root.
 
-Use this layout for generated task code and artifacts:
+That install step also makes the Playwright CLI and its bundled skills available
+inside pw-dev. Use the package, CLI, and bundled skills for probing,
+smoke-check, and browser inspection tasks before falling back to hand-written
+scripts.
+
+Default location for generated Playwright scripts and artifacts:
 
 \`\`\`text
 .agent/tasks/<task-id>/run.mjs
 .agent/tasks/<task-id>/artifacts/
 \`\`\`
+
+The script may be copied elsewhere if you want to run it against another
+Playwright install or keep it outside pw-dev. The artifacts directory is for
+outputs produced by that run.
 
 In generated task code, import Playwright normally and connect to pw-dev's CDP
 URL. Do not launch a separate browser:
@@ -1985,7 +1999,9 @@ is supplied, the proxy id defaults to \`<appId>-whistle\`.
 Most managed proxies should be task-scoped: create one for a specific
 test/verification, start the browser with that \`proxyId\`, and delete the proxy
 when the task ends. Use \`taskId\`, \`owner\`, \`purpose\`, and \`labels\` to
-track why the proxy exists.
+track why the proxy exists, and compose the \`ruleset\` for the debugging job
+at hand: point app traffic at a GUI devserver, mock API responses, inject
+local code, or combine those behaviors in one task-scoped proxy.
 
 \`\`\`js
 const managedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies', {
@@ -2022,6 +2038,17 @@ const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
 Networks are broker-owned browser routing profiles. Use \`networkId\` in browser
 start requests instead of creating proxy forwards directly.
 
+When the broker topology reports \`remote: true\` with \`mode: "ssh"\`, prefer a
+mapped proxy network for agent-local debugging traffic. Typical flow:
+
+1. Create a managed Whistle proxy with a task-specific \`ruleset\`.
+2. Read the returned \`proxyUrl\` and use its port as \`proxy.remotePort\`.
+3. Create \`/_pwdev/networks\` with \`proxy.mode: "ssh-peer"\`.
+4. Start the browser with \`networkId\`.
+
+That lets the remote broker browser reach an agent-local proxy for GUI
+devserver tapping, API mocking, code injection, and similar debugging work.
+
 \`\`\`js
 const network = await fetch('${serverUrl}/_pwdev/networks', {
   method: 'POST',
@@ -2045,8 +2072,10 @@ const startedWithNetwork = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/br
 \`\`\`
 
 Use \`proxy.mode: "ssh-peer"\` when the proxy is on the SSH peer configured by
-broker \`--ssh\`. Use \`"direct"\` or \`"broker-local"\` when the proxy URL is
-already reachable from the broker/Chrome host.
+broker \`--ssh\`. Set \`proxy.remotePort\` to the Whistle port on that SSH peer;
+set \`proxy.localPort\` only if you need a fixed broker-side forwarded port.
+Use \`"direct"\` or \`"broker-local"\` when the proxy URL is already reachable
+from the broker/Chrome host.
 
 ## Create and remove a broker proxy forward
 
@@ -2292,7 +2321,7 @@ export function pwDevAgentTaskPaths(taskId, { root = '.agent/tasks' } = {}) {
 }
 
 export function pwDevPlaywrightImportHint() {
-  return "Run generated task scripts inside the pw-dev workspace and import { chromium } from 'playwright'. If missing, run: npm run install:playwright";
+  return "Run generated task scripts inside the pw-dev workspace and import { chromium } from 'playwright'. If missing, run: npm run install:playwright to enable the Playwright package, CLI, and bundled probing skills inside pw-dev.";
 }
 
 export async function loadPwDevManifest({ serverUrl = '${serverUrl}', appId } = {}) {

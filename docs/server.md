@@ -60,7 +60,10 @@ directory when the proxy exits or is stopped.
 
 Most managed proxies should be scoped to one task/test/verification. Agents can
 tag them with `taskId`, `owner`, `purpose`, and `labels`, then start a browser
-session with the returned `proxy.id` and delete the proxy when the task ends:
+session with the returned `proxy.id` and delete the proxy when the task ends.
+Compose the `ruleset` for the debugging job at hand: point app traffic at a
+GUI devserver, mock API responses, inject local code, or combine those
+behaviors in one task-scoped proxy:
 
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/proxy/proxies \
@@ -100,6 +103,11 @@ module instead of hand-writing manifest fetch and CDP attach logic.
 If the broker was started with `--ssh`, `status.broker.status.topology` reports
 `{ "mode": "ssh", "remote": true }` plus SSH details. Agents should use that as
 the broker topology signal instead of guessing from `localhost` URLs.
+When that remote topology is present, a mapped proxy is generally needed for
+agent-local debugging traffic. If the browser needs to reach a Whistle proxy
+running on the agent machine, prefer `/_pwdev/networks` with
+`proxy.mode: "ssh-peer"` so the broker does the port mapping for the remote
+browser side.
 
 `/_pwdev/manifest` describes the server root, but it is not automatically added
 to `/_pwdev/apps`. Register apps explicitly with `POST /_pwdev/apps`; use
@@ -107,13 +115,21 @@ to `/_pwdev/apps`. Register apps explicitly with `POST /_pwdev/apps`; use
 app.
 
 Generated Playwright task code should live inside the pw-dev workspace so it
-uses the project-local Playwright package installed by
+uses the Playwright package shipped with pw-dev. If Playwright is missing, run
 `npm run install:playwright`. Use:
+
+That install step also makes the Playwright CLI and its bundled probing skills
+available inside pw-dev. Use the package, CLI, and bundled skills for browser
+probing and smoke-check tasks before writing a custom script.
 
 ```text
 .agent/tasks/<task-id>/run.mjs
 .agent/tasks/<task-id>/artifacts/
 ```
+
+This is the default location for generated Playwright scripts and artifacts.
+You can copy the script elsewhere if you want to run it against another
+Playwright install or keep it outside pw-dev.
 
 Generated scripts should import `chromium` from `playwright` and connect to the
 `cdpUrl` returned by pw-dev. They should not launch a separate browser.
@@ -170,6 +186,19 @@ For new browser-start workflows, prefer broker networks. A network is a named
 browser routing profile owned by the broker. The server proxies these APIs to
 the broker under `/_pwdev/networks`.
 
+When the broker topology reports `remote: true` with `mode: "ssh"`, prefer a
+mapped proxy network for agent-local debugging traffic:
+
+```text
+1. Create a managed Whistle proxy with a task-specific ruleset.
+2. Read the returned proxyUrl and use its port as proxy.remotePort.
+3. Create /_pwdev/networks with proxy.mode: "ssh-peer".
+4. Start the browser with networkId.
+```
+
+That lets the remote broker browser reach an agent-local proxy for GUI
+devserver tapping, API mocking, code injection, and similar debugging work.
+
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/networks \
   -H 'content-type: application/json' \
@@ -182,8 +211,10 @@ curl -X POST http://127.0.0.1:9696/_pwdev/networks \
 ```
 
 Use `proxy.mode: "ssh-peer"` when the proxy is on the SSH peer configured by
-broker `--ssh`. Use `"direct"` or `"broker-local"` when the proxy URL is already
-reachable from the broker/Chrome host. Start browser sessions with
+broker `--ssh`. Set `proxy.remotePort` to the Whistle port on that SSH peer;
+set `proxy.localPort` only if you need a fixed broker-side forwarded port. Use
+`"direct"` or `"broker-local"` when the proxy URL is already reachable from the
+broker/Chrome host. Start browser sessions with
 `networkId`; do not mix `networkId` with `proxyId`, `proxyForwardId`, or
 `proxyServer` in the same browser-start request.
 

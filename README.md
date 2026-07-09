@@ -52,9 +52,12 @@ npm run install:playwright
 ```
 
 Agent-generated Playwright task code should run inside this workspace so it
-uses the project-local Playwright package. Keep generated task files under
+uses the Playwright package shipped with pw-dev. Keep generated task files under
 `.agent/tasks/<task-id>/run.mjs` and artifacts under
 `.agent/tasks/<task-id>/artifacts/`. Task outputs are ignored by git.
+
+That is the default location. If you want to run the script against another
+Playwright install, you can copy it elsewhere.
 
 ## Run The Broker
 
