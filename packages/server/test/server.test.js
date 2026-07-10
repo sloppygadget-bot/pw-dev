@@ -168,6 +168,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /brokerProxyForwardId/);
     assert.match(instructions.body, /Playwright CLI/);
     assert.match(instructions.body, /bundled skills/);
+    assert.match(instructions.body, /Do not delete and recreate the proxy just to change rules/);
+    assert.match(instructions.body, /mock API endpoint/);
 
     const client = await get(`${server.origin}/_pwdev/client.js`);
     assert.equal(client.statusCode, 200);
@@ -319,6 +321,13 @@ test('server manages reusable proxy registrations', async () => {
       proxyUrl: 'http://127.0.0.1:8899',
       guiUrl: 'http://127.0.0.1:9801',
       rulesetFile: '/tmp/ruleset.txt',
+      rules: {
+        defaultRuleset: 'example.com 127.0.0.1:3000',
+        overrideRuleset: '',
+        effectiveRuleset: 'example.com 127.0.0.1:3000',
+        version: 1,
+        updatedAt: '2026-07-10T12:00:00.000Z',
+      },
       managed: true,
     });
     assert.equal(created.statusCode, 200);
@@ -331,6 +340,8 @@ test('server manages reusable proxy registrations', async () => {
     assert.equal(created.body.proxy.purpose, 'Smoke login verification');
     assert.deepEqual(created.body.proxy.labels, ['smoke', 'login']);
     assert.equal(created.body.proxy.rulesetFile, '/tmp/ruleset.txt');
+    assert.equal(created.body.proxy.rules.version, 1);
+    assert.equal(created.body.proxy.rules.effectiveRuleset, 'example.com 127.0.0.1:3000');
     assert.equal(created.body.proxy.managed, true);
 
     const updated = await postJson(`${server.origin}/_pwdev/proxies`, {

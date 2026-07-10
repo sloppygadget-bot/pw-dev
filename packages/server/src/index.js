@@ -135,6 +135,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @property {string=} guiUrl Whistle GUI URL, for example `http://127.0.0.1:9800`.
  * @property {string=} brokerProxyForwardId Broker-managed proxy forward id.
  * @property {string=} rulesetFile Local ruleset handoff file used to create this proxy.
+ * @property {{ defaultRuleset: string, overrideRuleset: string, effectiveRuleset: string, version: number, updatedAt: string }=} rules Managed live rules state for proxies created by `pw-dev proxy`.
  * @property {boolean=} managed True when created by `pw-dev proxy`.
  * @property {string=} createdAt Registry creation timestamp.
  * @property {string=} updatedAt Registry update timestamp.
@@ -1567,6 +1568,7 @@ function validateProxyRegistration(rawProxy) {
     guiUrl: optionalString(rawProxy.guiUrl, 'guiUrl'),
     brokerProxyForwardId: optionalString(rawProxy.brokerProxyForwardId, 'brokerProxyForwardId'),
     rulesetFile: optionalString(rawProxy.rulesetFile, 'rulesetFile'),
+    rules: rawProxy.rules === undefined ? undefined : validateManagedProxyRules(rawProxy.rules),
     managed: rawProxy.managed === undefined ? undefined : Boolean(rawProxy.managed),
     createdAt: optionalString(rawProxy.createdAt, 'createdAt'),
     updatedAt: optionalString(rawProxy.updatedAt, 'updatedAt'),
@@ -1582,6 +1584,20 @@ function validateProxyRegistration(rawProxy) {
   if (proxy.guiUrl) validateHttpUrl(proxy.guiUrl, 'guiUrl');
 
   return omitUndefined(proxy);
+}
+
+function validateManagedProxyRules(rawRules) {
+  if (!rawRules || typeof rawRules !== 'object' || Array.isArray(rawRules)) {
+    throwValidationError('rules must be an object');
+  }
+  const rules = {
+    defaultRuleset: requiredStringAllowEmpty(rawRules.defaultRuleset, 'rules.defaultRuleset'),
+    overrideRuleset: requiredStringAllowEmpty(rawRules.overrideRuleset, 'rules.overrideRuleset'),
+    effectiveRuleset: requiredStringAllowEmpty(rawRules.effectiveRuleset, 'rules.effectiveRuleset'),
+    version: requiredPositiveInteger(rawRules.version, 'rules.version'),
+    updatedAt: requiredString(rawRules.updatedAt, 'rules.updatedAt'),
+  };
+  return rules;
 }
 
 function resolveNetworkForBrowserStart({ networkId, payload }) {
@@ -1744,6 +1760,20 @@ function validateBrowserSession(rawSession, name) {
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.trim() === '') {
     throwValidationError(`${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requiredStringAllowEmpty(value, name) {
+  if (typeof value !== 'string') {
+    throwValidationError(`${name} must be a string`);
+  }
+  return value;
+}
+
+function requiredPositiveInteger(value, name) {
+  if (!Number.isInteger(value) || value < 1) {
+    throwValidationError(`${name} must be a positive integer`);
   }
   return value;
 }
@@ -2003,6 +2033,16 @@ track why the proxy exists, and compose the \`ruleset\` for the debugging job
 at hand: point app traffic at a GUI devserver, mock API responses, inject
 local code, or combine those behaviors in one task-scoped proxy.
 
+Managed proxies expose live rules state at \`proxy.rules\`. Treat the create-time
+\`ruleset\` as the default ruleset, then replace \`proxy.rules.overrideRuleset\`
+with \`PATCH /_pwdev/proxy/proxies/:id\` whenever the task needs a new override.
+Do not delete and recreate the proxy just to change rules. Reuse the running
+managed proxy, read its current \`proxy.rules\`, compute the next override, and
+patch it in place. That lets an agent add a mock API endpoint, switch a rewrite
+target, or remove a temporary override without rebuilding the proxy or
+restarting the browser. Use read-modify-write with \`proxy.rules.version\` to
+avoid lost updates.
+
 \`\`\`js
 const managedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies', {
   method: 'POST',
@@ -2031,6 +2071,24 @@ const proxiedStart = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/
 
 const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
   .then((response) => response.json());
+
+const currentProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle')
+  .then((response) => response.json());
+
+// Example: add a temporary mock endpoint on the running proxy.
+const updatedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle', {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    rules: {
+      baseVersion: currentProxy.proxy.rules.version,
+      overrideRuleset: [
+        currentProxy.proxy.rules.overrideRuleset,
+        'example.com/api/orders/preview resBody://{ "ok": true, "source": "mock" }',
+      ].filter(Boolean).join('\\n'),
+    },
+  }),
+}).then((response) => response.json());
 \`\`\`
 
 ## Create and use a broker network
@@ -2167,6 +2225,7 @@ GET    /_pwdev/proxy/status
 GET    /_pwdev/proxy/proxies
 POST   /_pwdev/proxy/proxies
 GET    /_pwdev/proxy/proxies/:id
+PATCH  /_pwdev/proxy/proxies/:id
 DELETE /_pwdev/proxy/proxies/:id
 POST   /_pwdev/proxy/proxies/:id/stop
 POST   /_pwdev/proxy/stop-all
@@ -2264,6 +2323,18 @@ export async function loadPwDevManagedProxy(proxyId, { serverUrl = '${serverUrl}
   const response = await fetch(\`\${serverUrl}/_pwdev/proxy/proxies/\${encodeURIComponent(proxyId)}\`);
   if (!response.ok) {
     throw new Error(\`pw-dev managed proxy load failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function updatePwDevManagedProxy(proxyId, patch, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/proxy/proxies/\${encodeURIComponent(proxyId)}\`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) {
+    throw new Error(\`pw-dev managed proxy update failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
 }

@@ -29,6 +29,7 @@ const DEFAULT_W2_STORAGE_ROOT = path.join(PROXY_MANAGER_PACKAGE_ROOT, '.runtime'
  *   uiPortRange?: string,
  *   portAvailable?: (port: number) => Promise<boolean>,
  *   spawnImpl?: typeof spawn,
+ *   applyRulesImpl?: (options: { guiUrl: string, ruleName: string, rulesText: string }) => Promise<void>,
  *   registryClient?: PwDevRegistryClient,
  *   quiet?: boolean,
  * }} options
@@ -42,6 +43,7 @@ export function createProxyManager(options = {}) {
   const proxyPortRange = parsePortRange(options.proxyPortRange ?? DEFAULT_PROXY_PORT_RANGE, 'proxyPortRange');
   const uiPortRange = parsePortRange(options.uiPortRange ?? DEFAULT_UI_PORT_RANGE, 'uiPortRange');
   const portAvailable = options.portAvailable ?? isPortAvailable;
+  const applyRulesImpl = options.applyRulesImpl ?? applyWhistleProjectRules;
   const quiet = Boolean(options.quiet);
   const proxies = new Map();
 
@@ -89,7 +91,12 @@ export function createProxyManager(options = {}) {
       });
 
       const storageDir = await createProxyStorageDir({ root: w2StorageRoot, id: request.id });
-      const { rulesetFile, shadowRules } = await writeRuleset({ storageDir, ruleset: request.ruleset });
+      const { rulesetFile } = await writeRuleset({ storageDir, ruleset: request.ruleset });
+      const rules = createManagedRuleState({
+        defaultRuleset: normalizeRulesetText(request.ruleset),
+        overrideRuleset: '',
+        previousVersion: 0,
+      });
       const proxyUrl = `http://127.0.0.1:${proxyPort}`;
       const guiUrl = `http://127.0.0.1:${uiPort}`;
       const command = whistle.command;
@@ -104,8 +111,6 @@ export function createProxyManager(options = {}) {
         storageDir,
         '-M',
         'enableHttps',
-        '-r',
-        shadowRules,
       ];
       const child = spawnManagedProcess(spawnImpl, command, args, { quiet });
       const record = makeProcessRecord({
@@ -125,6 +130,8 @@ export function createProxyManager(options = {}) {
         guiUrl,
         storageDir,
         rulesetFile,
+        rules,
+        whistleRuleName: makeWhistleRuleName(request.id),
         pid: child.pid,
       });
       proxies.set(request.id, record);
@@ -142,6 +149,11 @@ export function createProxyManager(options = {}) {
 
       let app;
       try {
+        await applyRulesImpl({
+          guiUrl,
+          ruleName: record.whistleRuleName,
+          rulesText: rules.effectiveRuleset,
+        });
         await registryClient.updateProxy(omitUndefined({
           id: request.id,
           kind: 'whistle',
@@ -154,11 +166,14 @@ export function createProxyManager(options = {}) {
           proxyUrl,
           guiUrl,
           rulesetFile,
+          rules,
           managed: true,
+          updatedAt: rules.updatedAt,
         }));
         if (request.appId) {
           app = await registryClient.updateApp(request.appId, { proxyId: request.id });
         }
+        await writeManagedRuleFiles({ storageDir, rules });
       } catch (error) {
         child.kill?.('SIGTERM');
         proxies.delete(request.id);
@@ -167,6 +182,66 @@ export function createProxyManager(options = {}) {
       }
 
       return { ok: true, proxy: stripChild(record), app };
+    },
+    async patchProxy(id, input) {
+      const proxy = proxies.get(id);
+      if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
+      const patch = validatePatchProxyRequest(input);
+      if (patch.rules.baseVersion !== proxy.rules.version) {
+        throw httpError(409, 'Managed proxy rules changed', {
+          code: 'RULES_VERSION_CONFLICT',
+          proxy: stripChild(proxy),
+        });
+      }
+
+      const nextRules = createManagedRuleState({
+        defaultRuleset: proxy.rules.defaultRuleset,
+        overrideRuleset: patch.rules.overrideRuleset,
+        previousVersion: proxy.rules.version,
+      });
+
+      await applyRulesImpl({
+        guiUrl: proxy.guiUrl,
+        ruleName: proxy.whistleRuleName,
+        rulesText: nextRules.effectiveRuleset,
+      });
+
+      try {
+        await registryClient.updateProxy(omitUndefined({
+          id: proxy.id,
+          kind: proxy.kind,
+          name: proxy.name,
+          appId: proxy.appId,
+          taskId: proxy.taskId,
+          owner: proxy.owner,
+          purpose: proxy.purpose,
+          labels: proxy.labels,
+          proxyUrl: proxy.proxyUrl,
+          guiUrl: proxy.guiUrl,
+          rulesetFile: proxy.rulesetFile,
+          rules: nextRules,
+          managed: true,
+          updatedAt: nextRules.updatedAt,
+        }));
+      } catch (error) {
+        try {
+          await applyRulesImpl({
+            guiUrl: proxy.guiUrl,
+            ruleName: proxy.whistleRuleName,
+            rulesText: proxy.rules.effectiveRuleset,
+          });
+        } catch (restoreError) {
+          if (!quiet) {
+            console.error(`proxy rules rollback failed: ${proxy.id}: ${restoreError.message}`);
+          }
+        }
+        throw error;
+      }
+
+      proxy.rules = nextRules;
+      proxy.updatedAt = nextRules.updatedAt;
+      await writeManagedRuleFiles({ storageDir: proxy.storageDir, rules: nextRules });
+      return { ok: true, proxy: stripChild(proxy) };
     },
     async deleteProxy(id) {
       const proxy = proxies.get(id);
@@ -222,6 +297,7 @@ export function createProxyManagerHttpServer({ manager }) {
       writeJson(res, error?.statusCode || 500, {
         ok: false,
         error: error?.message || 'Internal Server Error',
+        ...(error?.details || {}),
       });
     }
   });
@@ -257,11 +333,15 @@ async function handleProxyManagerRequest({ req, res, manager }) {
       writeJson(res, 200, await manager.getProxy(id));
       return;
     }
+    if (req.method === 'PATCH') {
+      writeJson(res, 200, await manager.patchProxy(id, await readJsonBody(req)));
+      return;
+    }
     if (req.method === 'DELETE') {
       writeJson(res, 200, await manager.deleteProxy(id));
       return;
     }
-    writeMethodNotAllowed(res, 'GET, DELETE');
+    writeMethodNotAllowed(res, 'GET, PATCH, DELETE');
     return;
   }
   if (req.method === 'POST' && parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'stop') {
@@ -362,7 +442,7 @@ function listProcessRecords(records) {
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function makeProcessRecord({ id, kind, name, appId, taskId, owner, purpose, labels, command, args, proxyPort, uiPort, proxyUrl, guiUrl, storageDir, rulesetFile, pid }) {
+function makeProcessRecord({ id, kind, name, appId, taskId, owner, purpose, labels, command, args, proxyPort, uiPort, proxyUrl, guiUrl, storageDir, rulesetFile, rules, whistleRuleName, pid }) {
   return {
     id,
     kind,
@@ -380,14 +460,17 @@ function makeProcessRecord({ id, kind, name, appId, taskId, owner, purpose, labe
     guiUrl,
     storageDir,
     rulesetFile,
+    rules,
+    whistleRuleName,
     pid,
     running: true,
     startedAt: new Date().toISOString(),
+    updatedAt: rules?.updatedAt,
   };
 }
 
 function stripChild(record) {
-  const { child, storageCleanupPromise, ...publicRecord } = record;
+  const { child, managedCleanupPromise, storageCleanupPromise, whistleRuleName, ...publicRecord } = record;
   return publicRecord;
 }
 
@@ -411,6 +494,33 @@ function validateCreateProxyRequest(input) {
     proxyPort: input.proxyPort === undefined ? undefined : parsePort(input.proxyPort, 'proxyPort'),
     uiPort: input.uiPort === undefined ? undefined : parsePort(input.uiPort, 'uiPort'),
     uiPortRange: input.uiPortRange === undefined ? undefined : parsePortRange(input.uiPortRange, 'uiPortRange'),
+  };
+}
+
+function validatePatchProxyRequest(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw httpError(400, 'proxy patch body must be an object');
+  }
+  const allowed = new Set(['rules']);
+  for (const key of Object.keys(input)) {
+    if (!allowed.has(key)) throw httpError(400, `unknown proxy patch field: ${key}`);
+  }
+  if (!input.rules || typeof input.rules !== 'object' || Array.isArray(input.rules)) {
+    throw httpError(400, 'rules patch is required');
+  }
+  const { rules } = input;
+  const baseVersion = Number(rules.baseVersion);
+  if (!Number.isInteger(baseVersion) || baseVersion < 1) {
+    throw httpError(400, 'rules.baseVersion must be a positive integer');
+  }
+  if (typeof rules.overrideRuleset !== 'string') {
+    throw httpError(400, 'rules.overrideRuleset must be a string');
+  }
+  return {
+    rules: {
+      baseVersion,
+      overrideRuleset: rules.overrideRuleset,
+    },
   };
 }
 
@@ -448,7 +558,123 @@ async function writeRuleset({ storageDir, ruleset }) {
   const filename = typeof ruleset === 'string' ? 'ruleset.txt' : 'ruleset.json';
   const rulesetFile = path.join(storageDir, filename);
   await fs.writeFile(rulesetFile, text);
-  return { rulesetFile, shadowRules: text };
+  return { rulesetFile };
+}
+
+async function writeManagedRuleFiles({ storageDir, rules }) {
+  await Promise.all([
+    fs.writeFile(path.join(storageDir, 'default-ruleset.txt'), rules.defaultRuleset),
+    fs.writeFile(path.join(storageDir, 'override-ruleset.txt'), rules.overrideRuleset),
+    fs.writeFile(path.join(storageDir, 'effective-ruleset.txt'), rules.effectiveRuleset),
+  ]);
+}
+
+function createManagedRuleState({ defaultRuleset, overrideRuleset, previousVersion }) {
+  const effectiveRuleset = [defaultRuleset, overrideRuleset].filter(Boolean).join('\n\n');
+  return {
+    defaultRuleset,
+    overrideRuleset,
+    effectiveRuleset,
+    version: previousVersion + 1,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeRulesetText(ruleset) {
+  if (typeof ruleset === 'string') return ruleset;
+  const structured = structuredRulesetToText(ruleset);
+  return structured ?? JSON.stringify(ruleset, null, 2);
+}
+
+function structuredRulesetToText(ruleset) {
+  if (!ruleset || typeof ruleset !== 'object' || Array.isArray(ruleset) || !Array.isArray(ruleset.rules)) {
+    return undefined;
+  }
+  const lines = [];
+  for (const rule of ruleset.rules) {
+    if (!rule || typeof rule !== 'object') return undefined;
+    const pattern = typeof rule.pattern === 'string' ? rule.pattern.trim() : '';
+    const target = typeof rule.target === 'string' ? rule.target.trim() : '';
+    if (!pattern || !target) return undefined;
+    lines.push(`${pattern} ${target}`);
+  }
+  return lines.join('\n');
+}
+
+function makeWhistleRuleName(id) {
+  return `pw-dev:${id}`;
+}
+
+async function applyWhistleProjectRules({ guiUrl, ruleName, rulesText }) {
+  const maxAttempts = 40;
+  let lastError;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      if (rulesText) {
+        const payload = await requestWhistleForm(
+          new URL('/cgi-bin/rules/project', ensureTrailingSlash(guiUrl)),
+          new URLSearchParams({
+            name: ruleName,
+            rules: rulesText,
+          }).toString()
+        );
+        if (payload?.ec !== 0) {
+          throw new Error(payload?.em || payload?.msg || 'Whistle rejected the rule update');
+        }
+      } else {
+        const payload = await requestWhistleForm(
+          new URL('/cgi-bin/rules/remove', ensureTrailingSlash(guiUrl)),
+          new URLSearchParams({ name: ruleName }).toString()
+        );
+        if (payload?.ec !== 0) {
+          throw new Error(payload?.em || payload?.msg || 'Whistle rejected the rule removal');
+        }
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts - 1) break;
+      await delay(100);
+    }
+  }
+  throw httpError(502, `Failed to apply Whistle rules: ${lastError?.message || 'Unknown error'}`);
+}
+
+function requestWhistleForm(url, body) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'content-length': Buffer.byteLength(body),
+      },
+    }, (response) => {
+      let responseText = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        responseText += chunk;
+      });
+      response.on('end', () => {
+        let payload;
+        try {
+          payload = responseText ? JSON.parse(responseText) : {};
+        } catch {
+          payload = { ok: false, error: responseText };
+        }
+        if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
+          reject(new Error(payload.error || `Request failed: ${response.statusCode}`));
+          return;
+        }
+        resolve(payload);
+      });
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function safeStoragePrefix(id) {
@@ -573,9 +799,10 @@ function ensureTrailingSlash(value) {
   return value.endsWith('/') ? value : `${value}/`;
 }
 
-function httpError(statusCode, message) {
+function httpError(statusCode, message, details) {
   const error = new Error(message);
   error.statusCode = statusCode;
+  error.details = details;
   return error;
 }
 

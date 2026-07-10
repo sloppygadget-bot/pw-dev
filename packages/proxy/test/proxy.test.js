@@ -43,11 +43,13 @@ test('manager defaults Whistle storage under proxy runtime root', async () => {
 
 test('manager creates Whistle instance from ruleset and attaches it to app', async () => {
   const spawned = [];
+  const appliedRules = [];
   const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-test-'));
   const registryClient = fakeRegistryClient({
     apps: [{ id: 'react-login', appUrl: 'http://127.0.0.1:5173' }],
   });
   const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules(appliedRules),
     registryClient,
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
@@ -78,6 +80,10 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
     assert.equal(created.proxy.owner, 'codex');
     assert.equal(created.proxy.purpose, 'Capture login traffic');
     assert.deepEqual(created.proxy.labels, ['smoke', 'login']);
+    assert.equal(created.proxy.rules.version, 1);
+    assert.equal(created.proxy.rules.defaultRuleset, 'www.example.com 127.0.0.1:3000');
+    assert.equal(created.proxy.rules.overrideRuleset, '');
+    assert.equal(created.proxy.rules.effectiveRuleset, 'www.example.com 127.0.0.1:3000');
     assert.equal(created.app.proxyId, 'react-login-capture');
     assert.equal(fs.readFileSync(created.proxy.rulesetFile, 'utf8'), 'www.example.com 127.0.0.1:3000');
     assert.equal(spawned[0].command, process.execPath);
@@ -92,9 +98,12 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
       created.proxy.storageDir,
       '-M',
       'enableHttps',
-      '-r',
-      'www.example.com 127.0.0.1:3000',
     ]);
+    assert.deepEqual(appliedRules, [{
+      guiUrl: 'http://127.0.0.1:9801',
+      ruleName: 'pw-dev:react-login-capture',
+      rulesText: 'www.example.com 127.0.0.1:3000',
+    }]);
     assert.deepEqual(registryClient.updates[0], {
       id: 'react-login-capture',
       kind: 'whistle',
@@ -107,7 +116,9 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
       proxyUrl: 'http://127.0.0.1:8899',
       guiUrl: 'http://127.0.0.1:9801',
       rulesetFile: created.proxy.rulesetFile,
+      rules: created.proxy.rules,
       managed: true,
+      updatedAt: created.proxy.rules.updatedAt,
     });
     assert.deepEqual(registryClient.appPatches, [{
       id: 'react-login',
@@ -133,6 +144,7 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
 test('manager accepts explicit Whistle command override', async () => {
   const spawned = [];
   const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
@@ -143,7 +155,7 @@ test('manager accepts explicit Whistle command override', async () => {
   await manager.createProxy({ id: 'override', ruleset: 'a b' });
   assert.equal(spawned[0].command, 'w2');
   assert.deepEqual(spawned[0].args.slice(0, 3), ['run', '-p', '8888']);
-  assert.deepEqual(spawned[0].args.slice(-2), ['-r', 'a b']);
+  assert.deepEqual(spawned[0].args.slice(-2), ['-M', 'enableHttps']);
   await manager.stopAll();
 });
 
@@ -151,6 +163,7 @@ test('manager writes object ruleset as JSON', async () => {
   const spawned = [];
   const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-test-'));
   const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
@@ -164,6 +177,7 @@ test('manager writes object ruleset as JSON', async () => {
       ruleset: { rules: [{ pattern: '/api', target: 'http://127.0.0.1:3000' }] },
     });
     assert.equal(path.basename(created.proxy.rulesetFile), 'ruleset.json');
+    assert.equal(created.proxy.rules.defaultRuleset, '/api http://127.0.0.1:3000');
     assert.deepEqual(JSON.parse(fs.readFileSync(created.proxy.rulesetFile, 'utf8')), {
       rules: [{ pattern: '/api', target: 'http://127.0.0.1:3000' }],
     });
@@ -175,6 +189,7 @@ test('manager writes object ruleset as JSON', async () => {
 
 test('manager rejects duplicate managed proxy ids', async () => {
   const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn([]),
@@ -192,6 +207,7 @@ test('manager rejects duplicate managed proxy ids', async () => {
 test('manager clears proxy records when child spawn fails', async () => {
   const spawned = [];
   const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
@@ -206,9 +222,56 @@ test('manager clears proxy records when child spawn fails', async () => {
   assert.deepEqual(manager.serverUrl, 'http://127.0.0.1:9696');
 });
 
+test('manager patches managed proxy override rules without restarting Whistle', async () => {
+  const spawned = [];
+  const appliedRules = [];
+  const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules(appliedRules),
+    registryClient: fakeRegistryClient(),
+    quiet: true,
+    spawnImpl: fakeSpawn(spawned),
+    portAvailable: async () => true,
+  });
+
+  const created = await manager.createProxy({ id: 'whistle-main', ruleset: 'a b' });
+  const patched = await manager.patchProxy('whistle-main', {
+    rules: {
+      baseVersion: created.proxy.rules.version,
+      overrideRuleset: 'c d',
+    },
+  });
+
+  assert.equal(spawned.length, 1);
+  assert.equal(patched.proxy.rules.version, 2);
+  assert.equal(patched.proxy.rules.defaultRuleset, 'a b');
+  assert.equal(patched.proxy.rules.overrideRuleset, 'c d');
+  assert.equal(patched.proxy.rules.effectiveRuleset, 'a b\n\nc d');
+  assert.deepEqual(appliedRules, [{
+    guiUrl: created.proxy.guiUrl,
+    ruleName: 'pw-dev:whistle-main',
+    rulesText: 'a b',
+  }, {
+    guiUrl: created.proxy.guiUrl,
+    ruleName: 'pw-dev:whistle-main',
+    rulesText: 'a b\n\nc d',
+  }]);
+
+  await assert.rejects(
+    () => manager.patchProxy('whistle-main', {
+      rules: {
+        baseVersion: 1,
+        overrideRuleset: 'stale',
+      },
+    }),
+    /Managed proxy rules changed/
+  );
+  await manager.stopAll();
+});
+
 test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
   const spawned = [];
   const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
@@ -226,6 +289,16 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     const read = await getJson(`${server.origin}/_proxy/proxies/whistle-main`);
     assert.equal(read.statusCode, 200);
     assert.equal(read.body.proxy.proxyUrl, created.body.proxy.proxyUrl);
+
+    const patched = await patchJson(`${server.origin}/_proxy/proxies/whistle-main`, {
+      rules: {
+        baseVersion: created.body.proxy.rules.version,
+        overrideRuleset: 'c d',
+      },
+    });
+    assert.equal(patched.statusCode, 200);
+    assert.equal(patched.body.proxy.rules.version, 2);
+    assert.equal(patched.body.proxy.rules.overrideRuleset, 'c d');
 
     const status = await getJson(`${server.origin}/_proxy/status`);
     assert.equal(status.statusCode, 200);
@@ -301,8 +374,18 @@ function postJson(url, payload) {
   return requestJson(url, 'POST', payload);
 }
 
+function patchJson(url, payload) {
+  return requestJson(url, 'PATCH', payload);
+}
+
 function deleteJson(url) {
   return requestJson(url, 'DELETE');
+}
+
+function fakeApplyRules(appliedRules) {
+  return async ({ guiUrl, ruleName, rulesText }) => {
+    appliedRules.push({ guiUrl, ruleName, rulesText });
+  };
 }
 
 function requestJson(url, method, payload) {
