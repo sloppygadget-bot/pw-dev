@@ -172,6 +172,10 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
     "worktree": "/home/me/work/fortisase",
     "branch": "main",
     "appUrl": "https://dev.fortisase-sovereign.com",
+    "servers": [
+      { "name": "react", "port": 5173 },
+      { "name": "api", "port": 3100 }
+    ],
     "devserver": {
       "command": "npm",
       "args": ["run", "dev"],

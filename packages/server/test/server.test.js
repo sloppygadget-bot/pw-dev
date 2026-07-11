@@ -166,6 +166,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /networkId/);
     assert.match(instructions.body, /\/_pwdev\/broker\/proxy-forwards/);
     assert.match(instructions.body, /brokerProxyForwardId/);
+    assert.match(instructions.body, /\/_pwdev\/sessions/);
     assert.match(instructions.body, /Playwright CLI/);
     assert.match(instructions.body, /bundled skills/);
     assert.match(instructions.body, /Do not delete and recreate the proxy just to change rules/);
@@ -176,6 +177,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(client.body, /loadPwDevStatus/);
     assert.match(client.body, /registerPwDevProxy/);
     assert.match(client.body, /registerPwDevApp/);
+    assert.match(client.body, /listPwDevSessions/);
+    assert.match(client.body, /stopPwDevSession/);
     assert.match(client.body, /createPwDevNetwork/);
     assert.match(client.body, /networkId/);
     assert.match(client.body, /loadPwDevManifest/);
@@ -201,6 +204,10 @@ test('server registers and exposes multiple apps', async () => {
       worktree: root,
       branch: 'feature/tax',
       appUrl: 'http://127.0.0.1:5174',
+      servers: [
+        { name: 'react', port: 5174 },
+        { name: 'api', port: 3100 },
+      ],
       devserver: {
         command: 'npm',
         args: ['run', 'dev'],
@@ -227,6 +234,10 @@ test('server registers and exposes multiple apps', async () => {
     assert.equal(created.statusCode, 200);
     assert.equal(created.body.app.id, 'checkout-tax');
     assert.equal(created.body.app.proxyForwardId, 'whistle');
+    assert.deepEqual(created.body.app.servers, [
+      { name: 'react', port: 5174 },
+      { name: 'api', port: 3100 },
+    ]);
     assert.deepEqual(created.body.app.devserver, {
       command: 'npm',
       args: ['run', 'dev'],
@@ -295,6 +306,13 @@ test('server validates app devserver metadata', async () => {
     });
     assert.equal(created.statusCode, 400);
     assert.match(created.body.error, /devserver\.args\[1\] must be a non-empty string/);
+
+    const invalidServer = await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'checkout-tax',
+      servers: [{ name: 'react', port: 70000 }],
+    });
+    assert.equal(invalidServer.statusCode, 400);
+    assert.match(invalidServer.body.error, /servers\[0\]\.port must be an integer between 1 and 65535/);
   } finally {
     await server.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -307,6 +325,7 @@ test('server manages reusable proxy registrations', async () => {
     root,
     port: 0,
     id: 'checkout-main',
+    proxyManagerUrl: 'http://127.0.0.1:1',
   });
   try {
     const created = await postJson(`${server.origin}/_pwdev/proxies`, {
@@ -401,6 +420,29 @@ test('server patches app registrations', async () => {
     assert.match(rejected.body.error, /Unsupported app patch field: appUrl/);
   } finally {
     await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server removes stale managed proxies after the proxy manager loses them', async () => {
+  const proxyManager = await startMockProxyManager();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0, proxyManagerUrl: proxyManager.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, { id: 'checkout-tax', appUrl: 'http://127.0.0.1:5174', proxyId: 'whistle-tax' });
+    await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'whistle-tax',
+      proxyUrl: 'http://127.0.0.1:8899',
+      managed: true,
+    });
+
+    const list = await getJson(`${server.origin}/_pwdev/proxies`);
+    assert.deepEqual(list.body.proxies, []);
+    const app = await getJson(`${server.origin}/_pwdev/apps/checkout-tax`);
+    assert.equal(app.body.app.proxyId, undefined);
+  } finally {
+    await server.close();
+    await proxyManager.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -731,7 +773,7 @@ test('server broker probing does not require global fetch', async () => {
     assert.equal(status.statusCode, 200);
     assert.equal(status.body.broker.configured, true);
     assert.equal(status.body.broker.reachable, true);
-    assert.equal(status.body.broker.status.running, true);
+    assert.equal(status.body.broker.status.running, false);
     assert.deepEqual(broker.requests[0], {
       method: 'GET',
       path: '/_broker/status',
@@ -823,6 +865,27 @@ test('server rejects duplicate browser start while task is active', async () => 
   }
 });
 
+test('server clears stale app sessions after a broker restart before retrying start', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, { id: 'checkout-tax', appUrl: 'http://127.0.0.1:5174' });
+    const first = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {});
+    assert.equal(first.statusCode, 200);
+
+    broker.crash();
+    const retried = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {});
+    assert.equal(retried.statusCode, 200);
+    assert.equal(retried.body.app.browserInstanceId, 'bkr_checkout-tax');
+    assert.equal(broker.requests.filter((request) => request.path === '/_broker/start').length, 2);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server starts parallel task browser sessions for one app', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
@@ -876,6 +939,100 @@ test('server starts parallel task browser sessions for one app', async () => {
   }
 });
 
+test('server exposes first-class session routes and can stop by session id', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    brokerUrl: broker.origin,
+  });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'checkout-tax',
+      appUrl: 'http://127.0.0.1:5174',
+      profile: 'checkout-tax',
+    });
+
+    await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {});
+    const taskStarted = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {
+      task: {
+        id: 'task-a',
+        owner: 'codex',
+      },
+    });
+    assert.equal(taskStarted.statusCode, 200);
+
+    const listed = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.equal(listed.statusCode, 200);
+    assert.deepEqual(
+      listed.body.sessions.map((session) => [session.sessionId, session.scope]),
+      [
+        ['checkout-tax__default', 'default'],
+        ['checkout-tax__task-a', 'task'],
+      ]
+    );
+
+    const fetched = await getJson(`${server.origin}/_pwdev/sessions/checkout-tax__task-a`);
+    assert.equal(fetched.statusCode, 200);
+    assert.equal(fetched.body.session.appId, 'checkout-tax');
+    assert.equal(fetched.body.session.taskId, 'task-a');
+    assert.equal(fetched.body.app.browserSessions['checkout-tax__task-a'].browserInstanceId, 'bkr_checkout-tax__task-a');
+
+    const stopped = await postJson(`${server.origin}/_pwdev/sessions/checkout-tax__task-a/stop`, {});
+    assert.equal(stopped.statusCode, 200);
+    assert.equal(stopped.body.browser.stopped, 'bkr_checkout-tax__task-a');
+
+    const afterStop = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.equal(afterStop.statusCode, 200);
+    assert.deepEqual(afterStop.body.sessions.map((session) => session.sessionId), ['checkout-tax__default']);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server automatically removes stale sessions from session and app reads', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    brokerUrl: broker.origin,
+  });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'checkout-tax',
+      appUrl: 'http://127.0.0.1:5174',
+      profile: 'checkout-tax',
+    });
+
+    const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {
+      task: {
+        id: 'task-a',
+        owner: 'codex',
+      },
+    });
+    assert.equal(started.statusCode, 200);
+
+    broker.crash();
+
+    const sessions = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.equal(sessions.statusCode, 200);
+    assert.deepEqual(sessions.body.sessions, []);
+
+    const app = await getJson(`${server.origin}/_pwdev/apps/checkout-tax`);
+    assert.equal(app.statusCode, 200);
+    assert.equal(app.body.app.browserSessions, undefined);
+    assert.equal(app.body.app.browserInstanceId, undefined);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server proxies broker HTTP APIs', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
@@ -888,7 +1045,7 @@ test('server proxies broker HTTP APIs', async () => {
   try {
     const status = await getJson(`${server.origin}/_pwdev/broker/status`);
     assert.equal(status.statusCode, 200);
-    assert.equal(status.body.running, true);
+    assert.equal(status.body.running, false);
     assert.deepEqual(broker.requests[0], {
       method: 'GET',
       path: '/_broker/status',
@@ -1052,6 +1209,7 @@ function requestJson(url, method, payload) {
 function startMockBroker() {
   const requests = [];
   const upgrades = [];
+  const instances = new Map();
   let origin;
   const server = http.createServer(async (req, res) => {
     const body = await readRequestJson(req);
@@ -1059,6 +1217,7 @@ function startMockBroker() {
 
     if (req.url === '/_broker/start' && req.method === 'POST') {
       const instanceId = `bkr_${body.profile}`;
+      instances.set(instanceId, { id: instanceId });
       writeTestJson(res, 200, {
         ok: true,
         instanceId,
@@ -1073,7 +1232,7 @@ function startMockBroker() {
     }
 
     if (req.url === '/_broker/status' && req.method === 'GET') {
-      writeTestJson(res, 200, { ok: true, running: true, instances: [] });
+      writeTestJson(res, 200, { ok: true, running: instances.size > 0, instances: [...instances.values()] });
       return;
     }
 
@@ -1095,6 +1254,7 @@ function startMockBroker() {
     }
 
     if (req.url === '/_broker/stop' && req.method === 'POST') {
+      instances.delete(body.instanceId);
       writeTestJson(res, 200, { ok: true, stopped: body.instanceId });
       return;
     }
@@ -1120,10 +1280,11 @@ function startMockBroker() {
       const address = server.address();
       origin = `http://127.0.0.1:${address.port}`;
       resolve({
-        origin,
-        requests,
-        upgrades,
-        close: () => new Promise((closeResolve, closeReject) => {
+      origin,
+      requests,
+      upgrades,
+      crash: () => instances.clear(),
+      close: () => new Promise((closeResolve, closeReject) => {
           server.close((error) => error ? closeReject(error) : closeResolve());
         }),
       });

@@ -250,6 +250,10 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
     "worktree": "/home/me/work/fortisase",
     "branch": "main",
     "appUrl": "https://dev.fortisase-sovereign.com",
+    "servers": [
+      { "name": "react", "port": 5173 },
+      { "name": "api", "port": 3100 }
+    ],
     "devserver": {
       "command": "npm",
       "args": ["run", "dev"],
@@ -273,7 +277,8 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
 
 `POST /_pwdev/apps` is an upsert. Re-posting the same `id` updates app
 metadata, which is useful when branch devservers restart on new ports.
-`devserver` and `engine` are registry metadata for agents and humans.
+`servers` lists local app processes for monitoring; each entry has a `name` and
+local TCP `port`. `devserver` and `engine` are registry metadata for agents and humans.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 
@@ -296,8 +301,9 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/start \
 
 The server calls broker `POST /_broker/start`. With `task.id`, it starts a
 task-scoped browser session using session id and profile `<app id>__<task id>`
-by default, then stores the server-proxied `cdpUrl` under
-`browserSessions[sessionId]`:
+by default. Sessions are first-class server resources under `/_pwdev/sessions`;
+app reads still project task sessions under `browserSessions[sessionId]` for
+convenience:
 
 ```json
 {
@@ -332,8 +338,16 @@ by default, then stores the server-proxied `cdpUrl` under
 }
 ```
 
-Starting without `task.id` uses the app's default browser slot and stores
-`cdpUrl`, `browserInstanceId`, and `activeTask` directly on the app.
+Starting without `task.id` creates the app's default session. App reads project
+that default session back onto `cdpUrl`, `browserInstanceId`, and
+`activeTask`.
+
+List sessions directly:
+
+```bash
+curl http://127.0.0.1:9696/_pwdev/sessions
+curl http://127.0.0.1:9696/_pwdev/sessions/checkout-tax__smoke-login-20260629
+```
 
 The default task profile can be overridden with an explicit `profile` in the
 browser start body. Profile names must contain only letters, numbers, dot,
@@ -404,6 +418,13 @@ Stopping the default slot removes `cdpUrl`, `browserInstanceId`,
 `browserStartedAt`, and `activeTask` from the app record. The app registration
 remains for later reuse.
 
+Stop by session id directly:
+
+```bash
+curl -X POST \
+  http://127.0.0.1:9696/_pwdev/sessions/checkout-tax__smoke-login-20260629/stop
+```
+
 ## Cleanup Policy
 
 Agents should clean up explicitly when a task is complete:
@@ -417,8 +438,10 @@ Agents should clean up explicitly when a task is complete:
 ```
 
 The server does not automatically stop active browser tasks. Automatic cleanup
-can interrupt manual login, debugging, or recovery. A future lease/TTL mechanism
-can warn about stale tasks without making browser termination implicit.
+can interrupt manual login, debugging, or recovery. Session liveness is still
+reconciled automatically on app/session reads and browser lifecycle operations:
+if broker status no longer reports an instance, the stale server session record
+is removed without requiring a manual cleanup call.
 
 ## Parallel Verification
 
@@ -466,6 +489,10 @@ POST   /_pwdev/networks
 GET    /_pwdev/networks/:id
 DELETE /_pwdev/networks/:id
 POST   /_pwdev/networks/:id/check
+
+GET    /_pwdev/sessions
+GET    /_pwdev/sessions/:id
+POST   /_pwdev/sessions/:id/stop
 
 GET    /_pwdev/apps
 POST   /_pwdev/apps

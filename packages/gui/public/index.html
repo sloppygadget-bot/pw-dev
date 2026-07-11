@@ -44,11 +44,14 @@
 
       <section class="layout">
         <aside class="nav" aria-label="Entity counts">
-          <button class="nav-item active" data-view="overview" type="button">
-            <span>Overview</span><b id="count-overview">0</b>
+          <button class="nav-item active" data-view="topology" type="button">
+            <span>Topology</span><b id="count-topology">0</b>
           </button>
           <button class="nav-item" data-view="apps" type="button">
             <span>Apps</span><b id="count-apps">0</b>
+          </button>
+          <button class="nav-item" data-view="broker" type="button">
+            <span>Broker</span><b id="count-broker">0</b>
           </button>
           <button class="nav-item" data-view="sessions" type="button">
             <span>Sessions</span><b id="count-sessions">0</b>
@@ -62,17 +65,29 @@
         </aside>
 
         <div class="content">
-          <section class="view active" id="view-overview">
+          <section class="view active" id="view-topology">
             <div class="section-title">
-              <h2>Overview</h2>
-              <span id="read-only" class="badge neutral">Read-only</span>
+              <h2>Topology</h2>
+              <div class="section-actions">
+                <div class="toggle-group" role="group" aria-label="Topology renderer">
+                  <button class="toggle-btn active" data-renderer="mermaid" type="button">Mermaid</button>
+                  <button class="toggle-btn" data-renderer="d3" type="button">D3</button>
+                </div>
+                <span id="read-only" class="badge neutral">Read-only</span>
+              </div>
             </div>
-            <div id="overview-grid" class="cards"></div>
+            <div id="topology-cards" class="topology-stack"></div>
+            <div id="topology-context" class="markdown-view card"></div>
           </section>
 
           <section class="view" id="view-apps">
             <div class="section-title"><h2>Apps</h2></div>
             <div id="apps-list" class="cards"></div>
+          </section>
+
+          <section class="view" id="view-broker">
+            <div class="section-title"><h2>Broker</h2></div>
+            <div id="broker-list" class="cards"></div>
           </section>
 
           <section class="view" id="view-sessions">

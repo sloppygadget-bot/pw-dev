@@ -2,6 +2,7 @@
 
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 
 const DEFAULT_HOST = '127.0.0.1';
@@ -81,6 +82,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   const [
     serverStatus,
     apps,
+    sessions,
     serverProxies,
     serverNetworks,
     brokerStatus,
@@ -90,12 +92,17 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   ] = await Promise.all([
     fetchJsonFrom(`${pwDevUrl}/_pwdev/status`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/apps`),
+    fetchJsonFrom(`${pwDevUrl}/_pwdev/sessions`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/proxies`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/networks`),
     fetchJsonFrom(`${brokerUrl}/_broker/status`),
     fetchJsonFrom(`${brokerUrl}/_broker/networks`),
     fetchJsonFrom(`${brokerUrl}/_broker/proxy-forwards`),
     fetchJsonFrom(`${proxyManagerUrl}/_proxy/status`),
+  ]);
+  const [appServerStatuses, proxyStatuses] = await Promise.all([
+    collectAppServerStatuses(apps.body?.apps),
+    collectProxyStatuses(serverProxies.body?.proxies, proxyStatus.body?.proxies),
   ]);
 
   return {
@@ -105,7 +112,10 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
     server: {
       status: serverStatus,
       apps,
+      sessions,
+      appServerStatuses,
       proxies: serverProxies,
+      proxyStatuses,
       networks: serverNetworks,
     },
     broker: {
@@ -117,6 +127,52 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
       status: proxyStatus,
     },
   };
+}
+
+async function collectAppServerStatuses(apps) {
+  return Promise.all((Array.isArray(apps) ? apps : []).flatMap((app) =>
+    (Array.isArray(app.servers) ? app.servers : []).map(async (server) => ({
+      appId: app.id,
+      name: server.name,
+      port: server.port,
+      running: await probeLocalPort(server.port),
+    }))
+  ));
+}
+
+async function collectProxyStatuses(proxies, managedProxies) {
+  const managedById = new Map((Array.isArray(managedProxies) ? managedProxies : []).map((proxy) => [proxy.id, proxy]));
+  return Promise.all((Array.isArray(proxies) ? proxies : []).map(async (proxy) => {
+    const managed = managedById.get(proxy.id);
+    if (managed) return { id: proxy.id, running: Boolean(managed.running) };
+    const port = localPortFromUrl(proxy.proxyUrl);
+    return { id: proxy.id, running: port ? await probeLocalPort(port) : undefined };
+  }));
+}
+
+function localPortFromUrl(rawUrl) {
+  if (!rawUrl) return undefined;
+  try {
+    const url = new URL(rawUrl);
+    if (!['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) return undefined;
+    const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function probeLocalPort(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port });
+    const finish = (running) => {
+      socket.destroy();
+      resolve(running);
+    };
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    socket.setTimeout(750, () => finish(false));
+  });
 }
 
 function fetchJsonFrom(rawUrl) {

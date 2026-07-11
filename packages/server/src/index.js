@@ -74,6 +74,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @property {string=} branch Source branch name.
  * @property {string=} appUrl URL agents should navigate to.
  * @property {PwDevDevserverCommand=} devserver Command metadata for starting the app GUI devserver.
+ * @property {PwDevAppServer[]=} servers Local servers that belong to this app and can be monitored by the GUI.
  * @property {PwDevAppEngine=} engine Runtime engine metadata for the app.
  * @property {Record<string, PwDevAccountCredentials>=} accounts Named credentials for agent-assisted login.
  * @property {string=} brokerUrl Advanced per-app broker override. Normal app registration should not set this.
@@ -164,6 +165,14 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  */
 
 /**
+ * A locally reachable process associated with an app.
+ *
+ * @typedef {object} PwDevAppServer
+ * @property {string} name Human-readable server name, for example `react`.
+ * @property {number} port Local TCP port to probe.
+ */
+
+/**
  * Runtime engine metadata for the app.
  *
  * @typedef {object} PwDevAppEngine
@@ -186,20 +195,35 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  */
 
 /**
- * Task-scoped browser session metadata stored on an app.
+ * Browser session metadata managed by the server.
  *
  * @typedef {object} PwDevBrowserSession
- * @property {string} sessionId Stable session id, composed as `<app id>__<task id>`.
- * @property {string} taskId Task id that owns the session.
+ * @property {string} sessionId Stable session id.
+ * @property {string} appId App that owns this session.
+ * @property {'default'|'task'} scope Session scope for app lifecycle compatibility.
+ * @property {string=} taskId Task id that owns the session when `scope === "task"`.
+ * @property {PwDevActiveTask=} activeTask Task metadata that owns the session.
  * @property {string} profile Broker profile used by the session.
  * @property {string} cdpUrl Server-proxied CDP URL.
+ * @property {string} brokerUrl Broker base URL used for this session.
  * @property {string} browserInstanceId Broker instance id for the Chrome process.
  * @property {string=} browserStartedAt ISO timestamp returned by the broker.
  * @property {string=} networkId Broker network id associated with the session.
  * @property {string=} proxyId Reusable proxy registry id associated with the session.
  * @property {string=} proxyForwardId Broker proxy-forward id associated with the session.
  * @property {string=} proxyServer Explicit Chrome proxy server URL associated with the session.
- * @property {PwDevActiveTask} activeTask Task metadata that owns the session.
+ */
+
+/**
+ * Mutable session registry interface used by browser lifecycle routes.
+ *
+ * @typedef {object} PwDevSessionRegistry
+ * @property {() => PwDevBrowserSession[]} list Returns known sessions sorted by id.
+ * @property {(id: string) => (PwDevBrowserSession | undefined)} get Returns one session by id.
+ * @property {(rawSession: Record<string, unknown>) => PwDevBrowserSession} upsert Creates or replaces session metadata by id.
+ * @property {(id: string, patch: Record<string, unknown>) => (PwDevBrowserSession | undefined)} update Applies a partial patch; `undefined` deletes optional fields.
+ * @property {(id: string) => boolean} delete Removes a session by id.
+ * @property {(appId: string) => PwDevBrowserSession[]} listByApp Returns sessions owned by one app.
  */
 
 /**
@@ -274,12 +298,13 @@ export async function startPwDevServer(options = {}) {
   const proxyManagerUrl = normalizeHttpUrl(options.proxyManagerUrl ?? DEFAULT_PROXY_MANAGER_URL, 'proxyManagerUrl');
   const apps = createAppRegistry();
   const proxies = createProxyRegistry();
+  const sessions = createSessionRegistry();
   let origin;
 
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker, proxyManagerUrl });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, sessions, broker, proxyManagerUrl });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -358,12 +383,13 @@ export async function startPwDevServer(options = {}) {
  *   metadata: Record<string, string | undefined>,
  *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
+ *   sessions: PwDevSessionRegistry,
  *   broker: PwDevBrokerPairing,
  *   proxyManagerUrl: string,
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, broker, proxyManagerUrl }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, sessions, broker, proxyManagerUrl }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -385,12 +411,17 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/apps')) {
-    await handleAppsRequest({ req, res, requestUrl, apps, proxies, broker, serverUrl, writeBody });
+    await handleAppsRequest({ req, res, requestUrl, apps, proxies, sessions, broker, serverUrl, writeBody });
+    return;
+  }
+
+  if (requestUrl.pathname.startsWith('/_pwdev/sessions')) {
+    await handleSessionsRequest({ req, res, requestUrl, apps, sessions, broker, serverUrl, writeBody });
     return;
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/proxies')) {
-    await handleProxiesRequest({ req, res, requestUrl, proxies, writeBody });
+    await handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxyManagerUrl, writeBody });
     return;
   }
 
@@ -551,6 +582,70 @@ function cloneBrowserSessions(sessions) {
   ]));
 }
 
+function cloneSession(session) {
+  return {
+    ...session,
+    ...(session.activeTask ? { activeTask: { ...session.activeTask } } : {}),
+  };
+}
+
+/**
+ * Create an in-memory session registry.
+ *
+ * @param {Record<string, unknown>[]=} initialSessions Initial session entries to seed.
+ * @returns {PwDevSessionRegistry}
+ */
+export function createSessionRegistry(initialSessions = []) {
+  const sessions = new Map();
+  const registry = {
+    list() {
+      return Array.from(sessions.values())
+        .sort((a, b) => a.sessionId.localeCompare(b.sessionId))
+        .map((session) => cloneSession(session));
+    },
+    get(id) {
+      const session = sessions.get(id);
+      return session ? cloneSession(session) : undefined;
+    },
+    upsert(rawSession) {
+      const session = validateSessionRegistration(rawSession);
+      const existing = sessions.get(session.sessionId);
+      const saved = {
+        ...existing,
+        ...session,
+      };
+      sessions.set(saved.sessionId, saved);
+      return cloneSession(saved);
+    },
+    update(id, patch) {
+      const existing = sessions.get(id);
+      if (!existing) return undefined;
+      const saved = { ...existing };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined || value === null) {
+          delete saved[key];
+        } else {
+          saved[key] = value;
+        }
+      }
+      sessions.set(id, saved);
+      return cloneSession(saved);
+    },
+    delete(id) {
+      return sessions.delete(id);
+    },
+    listByApp(appId) {
+      return Array.from(sessions.values())
+        .filter((session) => session.appId === appId)
+        .sort((a, b) => a.sessionId.localeCompare(b.sessionId))
+        .map((session) => cloneSession(session));
+    },
+  };
+
+  for (const session of initialSessions) registry.upsert(session);
+  return registry;
+}
+
 /**
  * Create an in-memory proxy registry.
  *
@@ -591,6 +686,32 @@ export function createProxyRegistry(initialProxies = []) {
 }
 
 /**
+ * Managed proxy processes live in the proxy manager, while their configuration
+ * is mirrored in this registry. Remove only managed records absent from a
+ * reachable manager; manually registered external proxies remain untouched.
+ */
+async function reconcileManagedProxies({ apps, proxies, proxyManagerUrl }) {
+  let status;
+  try {
+    status = await brokerJson(proxyManagerUrl, '/_proxy/status');
+  } catch {
+    return;
+  }
+  const liveIds = new Set(Array.isArray(status.proxies) ? status.proxies.map((proxy) => proxy?.id).filter(Boolean) : []);
+  const staleIds = proxies.list()
+    .filter((proxy) => proxy.managed && !liveIds.has(proxy.id))
+    .map((proxy) => proxy.id);
+  if (!staleIds.length) return;
+
+  for (const id of staleIds) proxies.delete(id);
+  for (const app of apps.list()) {
+    if (app.proxyId && staleIds.includes(app.proxyId)) {
+      apps.update(app.id, { proxyId: undefined });
+    }
+  }
+}
+
+/**
  * Handle reusable proxy registry routes under `/_pwdev/proxies`.
  *
  * `POST /_pwdev/proxies` is an upsert. Apps reference proxies by `proxyId`,
@@ -600,16 +721,19 @@ export function createProxyRegistry(initialProxies = []) {
  *   req: http.IncomingMessage,
  *   res: http.ServerResponse,
  *   requestUrl: URL,
+ *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
+ *   proxyManagerUrl: string,
  *   writeBody: boolean,
  * }} options
  * @returns {Promise<void>}
  */
-async function handleProxiesRequest({ req, res, requestUrl, proxies, writeBody }) {
+async function handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxyManagerUrl, writeBody }) {
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
 
   if (pathParts.length === 2 && pathParts[0] === '_pwdev' && pathParts[1] === 'proxies') {
     if (req.method === 'GET' || req.method === 'HEAD') {
+      await reconcileManagedProxies({ apps, proxies, proxyManagerUrl });
       writeJson(res, 200, { ok: true, proxies: proxies.list() }, writeBody);
       return;
     }
@@ -654,6 +778,160 @@ async function handleProxiesRequest({ req, res, requestUrl, proxies, writeBody }
   res.end('Method Not Allowed');
 }
 
+function composeDefaultBrowserSessionId(appId) {
+  return `${appId}__default`;
+}
+
+function splitAppSessions(sessions, appId) {
+  const appSessions = sessions.listByApp(appId);
+  const defaultSession = appSessions.find((session) => session.scope === 'default');
+  const taskSessions = Object.fromEntries(
+    appSessions
+      .filter((session) => session.scope === 'task')
+      .map((session) => [session.sessionId, session])
+  );
+  return {
+    defaultSession,
+    taskSessions,
+    allSessions: appSessions,
+  };
+}
+
+function buildAppResponse(app, sessions) {
+  const { defaultSession, taskSessions } = splitAppSessions(sessions, app.id);
+  return omitUndefined({
+    ...app,
+    cdpUrl: defaultSession?.cdpUrl,
+    profile: defaultSession?.profile ?? app.profile,
+    networkId: defaultSession?.networkId ?? app.networkId,
+    proxyId: defaultSession?.proxyId ?? app.proxyId,
+    proxyForwardId: defaultSession?.proxyForwardId ?? app.proxyForwardId,
+    proxyServer: defaultSession?.proxyServer ?? app.proxyServer,
+    browserInstanceId: defaultSession?.browserInstanceId,
+    browserStartedAt: defaultSession?.browserStartedAt,
+    activeTask: defaultSession?.activeTask,
+    browserSessions: Object.keys(taskSessions).length ? taskSessions : undefined,
+  });
+}
+
+async function reconcileSessionsBestEffort({ sessions, broker, appId }) {
+  const relevantSessions = appId ? sessions.listByApp(appId) : sessions.list();
+  if (!relevantSessions.length) return;
+
+  const brokerUrls = new Map();
+  for (const session of relevantSessions) {
+    const brokerUrl = broker.resolve(session.brokerUrl);
+    if (!brokerUrls.has(brokerUrl)) brokerUrls.set(brokerUrl, []);
+    brokerUrls.get(brokerUrl).push(session);
+  }
+
+  for (const [brokerUrl, groupedSessions] of brokerUrls) {
+    let status;
+    try {
+      status = await brokerJson(brokerUrl, '/_broker/status');
+    } catch {
+      continue;
+    }
+    const liveInstanceIds = new Set(
+      Array.isArray(status.instances)
+        ? status.instances.map((instance) => instance?.id ?? instance?.instanceId).filter(Boolean)
+        : []
+    );
+    for (const session of groupedSessions) {
+      if (!liveInstanceIds.has(session.browserInstanceId)) {
+        sessions.delete(session.sessionId);
+      }
+    }
+  }
+}
+
+async function reconcileAppBrowserSessionsBestEffort({ apps, sessions, broker, app }) {
+  await reconcileSessionsBestEffort({ sessions, broker, appId: app.id });
+  return buildAppResponse(apps.get(app.id) ?? app, sessions);
+}
+
+/**
+ * Handle first-class session routes under `/_pwdev/sessions`.
+ *
+ * @param {{
+ *   req: http.IncomingMessage,
+ *   res: http.ServerResponse,
+ *   requestUrl: URL,
+ *   apps: PwDevAppRegistry,
+ *   sessions: PwDevSessionRegistry,
+ *   broker: PwDevBrokerPairing,
+ *   serverUrl: string,
+ *   writeBody: boolean,
+ * }} options
+ * @returns {Promise<void>}
+ */
+async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, broker, serverUrl, writeBody }) {
+  const pathParts = requestUrl.pathname.split('/').filter(Boolean);
+
+  if (pathParts.length === 2 && pathParts[0] === '_pwdev' && pathParts[1] === 'sessions') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { allow: 'GET, HEAD' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    await reconcileSessionsBestEffort({ sessions, broker });
+    writeJson(res, 200, { ok: true, sessions: sessions.list() }, writeBody);
+    return;
+  }
+
+  const sessionId = pathParts[2] ? decodeURIComponent(pathParts[2]) : undefined;
+  if (!sessionId || pathParts[0] !== '_pwdev' || pathParts[1] !== 'sessions') {
+    writeJson(res, 404, { ok: false, error: 'Unknown pw-dev sessions endpoint' }, writeBody);
+    return;
+  }
+
+  if (pathParts.length === 3) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { allow: 'GET, HEAD' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    await reconcileSessionsBestEffort({ sessions, broker });
+    const session = sessions.get(sessionId);
+    if (!session) {
+      writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
+      return;
+    }
+    const app = apps.get(session.appId);
+    writeJson(res, 200, { ok: true, session, app: app ? buildAppResponse(app, sessions) : undefined, serverUrl }, writeBody);
+    return;
+  }
+
+  if (pathParts.length === 4 && pathParts[3] === 'stop') {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    await reconcileSessionsBestEffort({ sessions, broker });
+    const session = sessions.get(sessionId);
+    if (!session) {
+      writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
+      return;
+    }
+    const stop = await brokerJson(session.brokerUrl, '/_broker/stop', {
+      method: 'POST',
+      body: { instanceId: session.browserInstanceId },
+    });
+    sessions.delete(sessionId);
+    const app = apps.get(session.appId);
+    writeJson(res, 200, {
+      ok: true,
+      session,
+      app: app ? buildAppResponse(app, sessions) : undefined,
+      browser: stop,
+    }, writeBody);
+    return;
+  }
+
+  writeJson(res, 404, { ok: false, error: 'Unknown pw-dev sessions endpoint' }, writeBody);
+}
+
 /**
  * Handle central app registry routes under `/_pwdev/apps`.
  *
@@ -666,18 +944,25 @@ async function handleProxiesRequest({ req, res, requestUrl, proxies, writeBody }
  *   requestUrl: URL,
  *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
+ *   sessions: PwDevSessionRegistry,
  *   broker: PwDevBrokerPairing,
  *   serverUrl: string,
  *   writeBody: boolean,
  * }} options
  * @returns {Promise<void>}
  */
-async function handleAppsRequest({ req, res, requestUrl, apps, proxies, broker, serverUrl, writeBody }) {
+async function handleAppsRequest({ req, res, requestUrl, apps, proxies, sessions, broker, serverUrl, writeBody }) {
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
 
   if (pathParts.length === 2 && pathParts[0] === '_pwdev' && pathParts[1] === 'apps') {
     if (req.method === 'GET' || req.method === 'HEAD') {
-      writeJson(res, 200, { ok: true, apps: apps.list() }, writeBody);
+      const listedApps = await Promise.all(apps.list().map((app) => reconcileAppBrowserSessionsBestEffort({
+        apps,
+        sessions,
+        broker,
+        app,
+      })));
+      writeJson(res, 200, { ok: true, apps: listedApps }, writeBody);
       return;
     }
 
@@ -709,7 +994,8 @@ async function handleAppsRequest({ req, res, requestUrl, apps, proxies, broker, 
         writeJson(res, 404, { ok: false, error: `Unknown app: ${id}` }, writeBody);
         return;
       }
-      writeJson(res, 200, { ok: true, app }, writeBody);
+      const currentApp = await reconcileAppBrowserSessionsBestEffort({ apps, sessions, broker, app });
+      writeJson(res, 200, { ok: true, app: currentApp }, writeBody);
       return;
     }
 
@@ -745,7 +1031,8 @@ async function handleAppsRequest({ req, res, requestUrl, apps, proxies, broker, 
       writeJson(res, 404, { ok: false, error: `Unknown app: ${id}` }, writeBody);
       return;
     }
-    writeJson(res, 200, app, writeBody);
+    const currentApp = await reconcileAppBrowserSessionsBestEffort({ apps, sessions, broker, app });
+    writeJson(res, 200, currentApp, writeBody);
     return;
   }
 
@@ -755,6 +1042,7 @@ async function handleAppsRequest({ req, res, requestUrl, apps, proxies, broker, 
       res,
       apps,
       proxies,
+      sessions,
       broker,
       serverUrl,
       id,
@@ -1007,6 +1295,7 @@ function proxyProxyManagerPath(requestUrl) {
  *   res: http.ServerResponse,
  *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
+ *   sessions: PwDevSessionRegistry,
  *   broker: PwDevBrokerPairing,
  *   serverUrl: string,
  *   id: string,
@@ -1015,7 +1304,7 @@ function proxyProxyManagerPath(requestUrl) {
  * }} options
  * @returns {Promise<void>}
  */
-async function handleAppBrowserRequest({ req, res, apps, proxies, broker, serverUrl, id, command, writeBody }) {
+async function handleAppBrowserRequest({ req, res, apps, proxies, sessions, broker, serverUrl, id, command, writeBody }) {
   const app = apps.get(id);
   if (!app) {
     writeJson(res, 404, { ok: false, error: `Unknown app: ${id}` }, writeBody);
@@ -1030,7 +1319,9 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
     }
     const brokerUrl = broker.resolve(app.brokerUrl);
     const status = await brokerJson(brokerUrl, '/_broker/status');
-    writeJson(res, 200, { ok: true, app, broker: status }, writeBody);
+    await reconcileSessionsBestEffort({ sessions, broker, appId: id });
+    const currentApp = buildAppResponse(app, sessions);
+    writeJson(res, 200, { ok: true, app: currentApp, broker: status }, writeBody);
     return;
   }
 
@@ -1044,7 +1335,9 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
     const brokerUrl = broker.resolve(payload.brokerUrl ?? app.brokerUrl);
     const task = payload.task === undefined ? undefined : validateTaskInput(payload.task);
     const slot = resolveBrowserSessionSlot({ app, payload, task });
-    const conflict = findBrowserSessionConflict({ app, slot });
+    await reconcileSessionsBestEffort({ sessions, broker, appId: id });
+    const currentApp = buildAppResponse(app, sessions);
+    const conflict = findBrowserSessionConflict({ app: currentApp, sessions, slot });
     if (conflict) {
       writeJson(res, 409, conflict);
       return;
@@ -1078,38 +1371,22 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
       startedAt: new Date().toISOString(),
     } : undefined;
     const browser = { ...start, cdpUrl: proxiedCdpUrl };
-    let updated;
     let session;
-    if (slot.taskId) {
-      session = makeBrowserSession({
-        sessionId: slot.sessionId,
-        task,
-        activeTask,
-        start,
-        profile: slot.profile,
-        cdpUrl: proxiedCdpUrl,
-        network,
-        proxy,
-      });
-      updated = apps.update(id, {
-        browserSessions: {
-          ...(app.browserSessions ?? {}),
-          [slot.sessionId]: session,
-        },
-      });
-    } else {
-      updated = apps.update(id, {
-        cdpUrl: proxiedCdpUrl,
-        profile: start.profile,
-        networkId: start.networkId,
-        proxyId: proxy.proxyId ?? app.proxyId,
-        browserInstanceId: start.instanceId,
-        proxyForwardId: start.proxyForwardId,
-        proxyServer: start.proxyServer,
-        browserStartedAt: start.startedAt,
-      });
-    }
-    writeJson(res, 200, omitUndefined({ ok: true, app: updated, session, browser }));
+    session = sessions.upsert(makeBrowserSession({
+      sessionId: slot.sessionId,
+      appId: id,
+      scope: slot.taskId ? 'task' : 'default',
+      task,
+      activeTask,
+      brokerUrl,
+      start,
+      profile: slot.profile,
+      cdpUrl: proxiedCdpUrl,
+      network,
+      proxy,
+    }));
+    const updated = buildAppResponse(apps.get(id) ?? app, sessions);
+    writeJson(res, 200, omitUndefined({ ok: true, app: updated, session: slot.taskId ? session : undefined, browser }));
     return;
   }
 
@@ -1120,32 +1397,20 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
       return;
     }
     const payload = await readJsonBody(req);
-    const brokerUrl = broker.resolve(payload.brokerUrl ?? app.brokerUrl);
-    const stopTarget = resolveBrowserStopTarget({ app, payload });
+    await reconcileSessionsBestEffort({ sessions, broker, appId: id });
+    const stopTarget = resolveBrowserStopTarget({ app, sessions, payload });
     const instanceId = stopTarget?.browserInstanceId;
     if (!instanceId) {
       writeJson(res, 400, { ok: false, error: `App has no browser instance: ${id}` });
       return;
     }
-    const stop = await brokerJson(brokerUrl, '/_broker/stop', {
+    const stop = await brokerJson(stopTarget.session?.brokerUrl ?? broker.resolve(payload.brokerUrl ?? app.brokerUrl), '/_broker/stop', {
       method: 'POST',
       body: { instanceId },
     });
-    let updated;
-    if (stopTarget.taskId) {
-      const browserSessions = { ...(app.browserSessions ?? {}) };
-      delete browserSessions[stopTarget.sessionId];
-      updated = apps.update(id, {
-        browserSessions: Object.keys(browserSessions).length ? browserSessions : undefined,
-      });
-    } else {
-      updated = apps.update(id, {
-        cdpUrl: undefined,
-        browserInstanceId: undefined,
-        browserStartedAt: undefined,
-        activeTask: undefined,
-      });
-    }
+    if (stopTarget.sessionId) sessions.delete(stopTarget.sessionId);
+    else if (stopTarget.session?.sessionId) sessions.delete(stopTarget.session.sessionId);
+    const updated = buildAppResponse(apps.get(id) ?? app, sessions);
     writeJson(res, 200, { ok: true, app: updated, session: stopTarget.session, browser: stop });
     return;
   }
@@ -1154,11 +1419,11 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, broker, server
 }
 
 function resolveBrowserSessionSlot({ app, payload, task }) {
-  const sessionId = task ? composeBrowserSessionId(app.id, task.id) : undefined;
+  const sessionId = task ? composeBrowserSessionId(app.id, task.id) : composeDefaultBrowserSessionId(app.id);
   const profile = payload.profile !== undefined
     ? requiredString(payload.profile, 'profile')
     : task
-      ? sessionId
+      ? composeBrowserSessionId(app.id, task.id)
       : app.profile ?? app.id;
   validateBrowserProfileName(profile, 'profile');
   return {
@@ -1168,9 +1433,10 @@ function resolveBrowserSessionSlot({ app, payload, task }) {
   };
 }
 
-function findBrowserSessionConflict({ app, slot }) {
-  if (slot.sessionId) {
-    const existing = app.browserSessions?.[slot.sessionId];
+function findBrowserSessionConflict({ app, sessions, slot }) {
+  const { defaultSession, taskSessions, allSessions } = splitAppSessions(sessions, app.id);
+  if (slot.taskId) {
+    const existing = taskSessions[slot.sessionId];
     if (existing) {
       return {
         ok: false,
@@ -1184,17 +1450,17 @@ function findBrowserSessionConflict({ app, slot }) {
         session: existing,
       };
     }
-  } else if (app.browserInstanceId || app.activeTask) {
+  } else if (defaultSession) {
     return {
       ok: false,
       error: 'App already has an active browser task',
       appId: app.id,
-      browserInstanceId: app.browserInstanceId,
-      activeTask: app.activeTask,
+      browserInstanceId: defaultSession.browserInstanceId,
+      activeTask: defaultSession.activeTask,
     };
   }
 
-  const profileConflict = findActiveBrowserProfile(app, slot.profile);
+  const profileConflict = findActiveBrowserProfile(allSessions, slot.profile);
   if (!profileConflict) return undefined;
   return omitUndefined({
     ok: false,
@@ -1208,14 +1474,8 @@ function findBrowserSessionConflict({ app, slot }) {
   });
 }
 
-function findActiveBrowserProfile(app, profile) {
-  if (app.browserInstanceId && app.profile === profile) {
-    return {
-      browserInstanceId: app.browserInstanceId,
-      activeTask: app.activeTask,
-    };
-  }
-  for (const session of Object.values(app.browserSessions ?? {})) {
+function findActiveBrowserProfile(sessions, profile) {
+  for (const session of sessions) {
     if (session.profile === profile) {
       return {
         taskId: session.taskId,
@@ -1229,12 +1489,15 @@ function findActiveBrowserProfile(app, profile) {
   return undefined;
 }
 
-function makeBrowserSession({ sessionId, task, activeTask, start, profile, cdpUrl, network, proxy }) {
+function makeBrowserSession({ sessionId, appId, scope, task, activeTask, brokerUrl, start, profile, cdpUrl, network, proxy }) {
   return omitUndefined({
     sessionId,
-    taskId: task.id,
+    appId,
+    scope,
+    taskId: task?.id,
     profile: start.profile ?? profile,
     cdpUrl,
+    brokerUrl,
     browserInstanceId: start.instanceId,
     browserStartedAt: start.startedAt,
     networkId: start.networkId ?? network.networkId,
@@ -1245,10 +1508,11 @@ function makeBrowserSession({ sessionId, task, activeTask, start, profile, cdpUr
   });
 }
 
-function resolveBrowserStopTarget({ app, payload }) {
+function resolveBrowserStopTarget({ app, sessions, payload }) {
+  const { defaultSession, taskSessions, allSessions } = splitAppSessions(sessions, app.id);
   const sessionId = optionalString(payload.sessionId, 'sessionId');
   if (sessionId) {
-    const session = app.browserSessions?.[sessionId];
+    const session = taskSessions[sessionId] ?? (defaultSession?.sessionId === sessionId ? defaultSession : undefined);
     return session ? { sessionId, taskId: session.taskId, session, browserInstanceId: session.browserInstanceId } : undefined;
   }
 
@@ -1258,16 +1522,13 @@ function resolveBrowserStopTarget({ app, payload }) {
       ? undefined
       : validateTaskInput(payload.task).id;
   if (taskId) {
-    const session = Object.values(app.browserSessions ?? {}).find((candidate) => candidate.taskId === taskId);
+    const session = allSessions.find((candidate) => candidate.taskId === taskId);
     return session ? { sessionId: session.sessionId, taskId, session, browserInstanceId: session.browserInstanceId } : undefined;
   }
 
   const instanceId = optionalString(payload.instanceId, 'instanceId');
   if (instanceId) {
-    if (app.browserInstanceId === instanceId) {
-      return { browserInstanceId: app.browserInstanceId };
-    }
-    for (const session of Object.values(app.browserSessions ?? {})) {
+    for (const session of allSessions) {
       if (session.browserInstanceId === instanceId) {
         return { sessionId: session.sessionId, taskId: session.taskId, session, browserInstanceId: session.browserInstanceId };
       }
@@ -1275,7 +1536,11 @@ function resolveBrowserStopTarget({ app, payload }) {
     return undefined;
   }
 
-  return app.browserInstanceId ? { browserInstanceId: app.browserInstanceId } : undefined;
+  return defaultSession ? {
+    sessionId: defaultSession.sessionId,
+    session: defaultSession,
+    browserInstanceId: defaultSession.browserInstanceId,
+  } : undefined;
 }
 
 function composeBrowserSessionId(appId, taskId) {
@@ -1506,6 +1771,7 @@ function validateAppRegistration(rawApp) {
     branch: optionalString(rawApp.branch, 'branch'),
     appUrl: optionalString(rawApp.appUrl, 'appUrl'),
     devserver: rawApp.devserver === undefined ? undefined : validateDevserverCommand(rawApp.devserver),
+    servers: rawApp.servers === undefined ? undefined : validateAppServers(rawApp.servers),
     engine: rawApp.engine === undefined ? undefined : validateAppEngine(rawApp.engine),
     accounts: rawApp.accounts === undefined ? undefined : validateAccounts(rawApp.accounts),
     brokerUrl: optionalString(rawApp.brokerUrl, 'brokerUrl'),
@@ -1686,6 +1952,25 @@ function validateDevserverCommand(rawDevserver) {
   });
 }
 
+function validateAppServers(rawServers) {
+  if (!Array.isArray(rawServers)) {
+    throwValidationError('servers must be an array');
+  }
+  return rawServers.map((server, index) => {
+    if (!server || typeof server !== 'object' || Array.isArray(server)) {
+      throwValidationError(`servers[${index}] must be an object`);
+    }
+    const port = server.port;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throwValidationError(`servers[${index}].port must be an integer between 1 and 65535`);
+    }
+    return {
+      name: requiredString(server.name, `servers[${index}].name`),
+      port,
+    };
+  });
+}
+
 /**
  * Validate app runtime engine metadata.
  *
@@ -1757,9 +2042,39 @@ function validateBrowserSession(rawSession, name) {
   });
 }
 
+function validateSessionRegistration(rawSession) {
+  if (!rawSession || typeof rawSession !== 'object' || Array.isArray(rawSession)) {
+    throwValidationError('session must be an object');
+  }
+  const scope = requiredOneOf(rawSession.scope, 'scope', ['default', 'task']);
+  return omitUndefined({
+    sessionId: requiredString(rawSession.sessionId, 'sessionId'),
+    appId: requiredString(rawSession.appId, 'appId'),
+    scope,
+    taskId: rawSession.taskId === undefined ? undefined : requiredString(rawSession.taskId, 'taskId'),
+    profile: requiredString(rawSession.profile, 'profile'),
+    cdpUrl: requiredString(rawSession.cdpUrl, 'cdpUrl'),
+    brokerUrl: requiredString(rawSession.brokerUrl, 'brokerUrl'),
+    browserInstanceId: requiredString(rawSession.browserInstanceId, 'browserInstanceId'),
+    browserStartedAt: optionalString(rawSession.browserStartedAt, 'browserStartedAt'),
+    networkId: optionalString(rawSession.networkId, 'networkId'),
+    proxyId: optionalString(rawSession.proxyId, 'proxyId'),
+    proxyForwardId: optionalString(rawSession.proxyForwardId, 'proxyForwardId'),
+    proxyServer: optionalString(rawSession.proxyServer, 'proxyServer'),
+    activeTask: rawSession.activeTask === undefined ? undefined : validateActiveTask(rawSession.activeTask),
+  });
+}
+
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.trim() === '') {
     throwValidationError(`${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requiredOneOf(value, name, allowed) {
+  if (typeof value !== 'string' || !allowed.includes(value)) {
+    throwValidationError(`${name} must be one of: ${allowed.join(', ')}`);
   }
   return value;
 }
@@ -1880,6 +2195,19 @@ const { apps } = await fetch('${serverUrl}/_pwdev/apps')
 const app = apps.find((candidate) => candidate.id === 'checkout-tax');
 \`\`\`
 
+## List sessions
+
+Sessions are first-class server resources. App reads still project active
+session data for convenience, but \`/_pwdev/sessions\` is the canonical lookup
+surface for session id, task, broker instance, and CDP URL.
+
+\`\`\`js
+const { sessions } = await fetch('${serverUrl}/_pwdev/sessions')
+  .then((response) => response.json());
+
+const session = sessions.find((candidate) => candidate.sessionId === 'checkout-tax__smoke-login-20260629');
+\`\`\`
+
 ## Register an app
 
 \`\`\`js
@@ -1935,6 +2263,9 @@ production accounts, personal credentials, or sensitive tokens in app metadata.
   \`appId + taskId\` session. Do this before calling
   \`POST /_pwdev/apps/:id/browser/start\` so new work never attaches to a stale
   browser.
+- The server automatically reconciles session liveness against broker status on
+  session and app reads. If a broker restart loses an instance, stale session
+  records are removed automatically instead of requiring a manual cleanup pass.
 - Create a dedicated managed proxy for the branch/app when proxying is needed.
   Wire that proxy to the branch app by storing its \`proxyId\` on the app or by
   passing the \`proxyId\` in browser start requests.
@@ -2011,6 +2342,14 @@ await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/stop', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ taskId: 'smoke-login-20260629' }),
+});
+\`\`\`
+
+Or stop by session id directly:
+
+\`\`\`js
+await fetch('${serverUrl}/_pwdev/sessions/checkout-tax__smoke-login-20260629/stop', {
+  method: 'POST',
 });
 \`\`\`
 
@@ -2212,6 +2551,9 @@ POST   /_pwdev/networks
 GET    /_pwdev/networks/:id
 DELETE /_pwdev/networks/:id
 POST   /_pwdev/networks/:id/check
+GET    /_pwdev/sessions
+GET    /_pwdev/sessions/:id
+POST   /_pwdev/sessions/:id/stop
 GET    /_pwdev/apps
 POST   /_pwdev/apps
 GET    /_pwdev/apps/:id
@@ -2263,6 +2605,23 @@ export async function listPwDevApps({ serverUrl = '${serverUrl}' } = {}) {
   const response = await fetch(\`\${serverUrl}/_pwdev/apps\`);
   if (!response.ok) {
     throw new Error(\`pw-dev apps failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function listPwDevSessions({ serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/sessions\`);
+  if (!response.ok) {
+    throw new Error(\`pw-dev sessions failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function loadPwDevSession(sessionId, { serverUrl = '${serverUrl}' } = {}) {
+  if (!sessionId) throw new Error('loadPwDevSession requires sessionId');
+  const response = await fetch(\`\${serverUrl}/_pwdev/sessions/\${encodeURIComponent(sessionId)}\`);
+  if (!response.ok) {
+    throw new Error(\`pw-dev session load failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
 }
@@ -2452,6 +2811,17 @@ export async function stopPwDevBrowser({ serverUrl = '${serverUrl}', appId, inst
   });
   if (!response.ok) {
     throw new Error(\`pw-dev browser stop failed: \${response.status} \${await response.text()}\`);
+  }
+  return response.json();
+}
+
+export async function stopPwDevSession({ serverUrl = '${serverUrl}', sessionId } = {}) {
+  if (!sessionId) throw new Error('stopPwDevSession requires sessionId');
+  const response = await fetch(\`\${serverUrl}/_pwdev/sessions/\${encodeURIComponent(sessionId)}/stop\`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw new Error(\`pw-dev session stop failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
 }

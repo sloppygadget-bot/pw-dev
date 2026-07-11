@@ -210,6 +210,36 @@ main {
   margin-bottom: 10px;
 }
 
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.toggle-btn {
+  min-height: 30px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 12px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.toggle-btn.active {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -222,6 +252,150 @@ main {
   border-radius: 8px;
   padding: 14px;
   min-width: 0;
+}
+
+.markdown-view {
+  padding: 20px 22px;
+}
+
+.topology-stack {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.topology-card {
+  padding: 16px;
+  border-style: dashed;
+}
+
+.topology-flow-active {
+  border-color: #4f87c5;
+}
+
+.topology-flow-idle {
+  border-color: #8d98a5;
+}
+
+.topology-surface {
+  margin-bottom: 14px;
+}
+
+.topology-subtitle {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 8px;
+}
+
+.topology-summary {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.topology-summary li + li {
+  margin-top: 6px;
+}
+
+.markdown-view h3 {
+  font-size: 16px;
+  margin-bottom: 10px;
+}
+
+.markdown-view p,
+.markdown-view ul,
+.markdown-view ol {
+  margin: 0 0 14px;
+}
+
+.markdown-view ul,
+.markdown-view ol {
+  padding-left: 20px;
+}
+
+.markdown-view li + li {
+  margin-top: 6px;
+}
+
+.markdown-view code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.markdown-view pre {
+  overflow: auto;
+  background: #f1f4f8;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.markdown-fallback {
+  white-space: pre-wrap;
+}
+
+.mermaid-host {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at top left, rgba(36, 91, 143, 0.08), transparent 36%),
+    linear-gradient(180deg, #ffffff, #f8fafc);
+  padding: 12px;
+  margin: 0 0 18px;
+}
+
+.mermaid-host svg {
+  display: block;
+  max-width: none;
+  min-width: 760px;
+  height: auto;
+}
+
+.d3-host {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at top left, rgba(20, 122, 75, 0.08), transparent 38%),
+    radial-gradient(circle at bottom right, rgba(36, 91, 143, 0.08), transparent 32%),
+    linear-gradient(180deg, #ffffff, #f8fafc);
+  padding: 8px;
+}
+
+.d3-host svg {
+  display: block;
+  min-width: 760px;
+  width: 100%;
+  height: auto;
+}
+
+.d3-node-label {
+  fill: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.d3-edge-label {
+  fill: #5c6875;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.92);
+  stroke-width: 5px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.mermaid-error {
+  color: var(--red);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
 }
 
 .card-head {
@@ -291,6 +465,16 @@ main {
   overflow-wrap: anywhere;
 }
 
+.entity-link {
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.entity-link:hover {
+  color: #164a78;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
@@ -326,5 +510,11 @@ main {
     position: static;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .section-title,
+  .section-actions {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

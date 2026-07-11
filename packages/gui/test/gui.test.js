@@ -38,6 +38,15 @@ test('gui serves static app and read-only config', async () => {
     const index = await get(`${server.origin}/`);
     assert.equal(index.statusCode, 200);
     assert.match(index.body, /pw-dev Monitor/);
+    assert.match(index.body, /Topology/);
+    assert.match(index.body, /data-view="broker"/);
+    assert.match(index.body, /Mermaid/);
+    assert.match(index.body, /D3/);
+
+    const appScript = await get(`${server.origin}/app.js`);
+    assert.equal(appScript.statusCode, 200);
+    assert.match(appScript.body, /Related src app/);
+    assert.match(appScript.body, /function showApp/);
 
     const config = await getJson(`${server.origin}/api/config`);
     assert.equal(config.statusCode, 200);
@@ -52,6 +61,8 @@ test('gui serves static app and read-only config', async () => {
 });
 
 test('gui snapshot collects from server, broker, and proxy manager', async () => {
+  const appServer = await startJsonServer({ '/healthz': { ok: true } });
+  const appServerPort = Number(new URL(appServer.origin).port);
   const pwdev = await startJsonServer({
     '/_pwdev/status': {
       ok: true,
@@ -59,7 +70,10 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
       broker: { configured: true, reachable: true },
       manifest: { ok: true, id: 'main' },
     },
-    '/_pwdev/apps': { ok: true, apps: [{ id: 'main', networkId: 'agent-whistle' }] },
+    '/_pwdev/apps': {
+      ok: true,
+      apps: [{ id: 'main', networkId: 'agent-whistle', servers: [{ name: 'react', port: appServerPort }] }],
+    },
     '/_pwdev/proxies': { ok: true, proxies: [{ id: 'proxy-main' }] },
     '/_pwdev/networks': { ok: true, networks: [{ id: 'agent-whistle' }] },
   });
@@ -74,7 +88,7 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     '/_broker/proxy-forwards': { ok: true, forwards: [] },
   });
   const proxy = await startJsonServer({
-    '/_proxy/status': { ok: true, proxies: [{ id: 'proxy-main' }] },
+    '/_proxy/status': { ok: true, proxies: [{ id: 'proxy-main', running: true }] },
   });
   const gui = await startPwDevGuiServer({
     port: 0,
@@ -88,6 +102,8 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     assert.equal(snapshot.statusCode, 200);
     assert.equal(snapshot.body.ok, true);
     assert.equal(snapshot.body.server.apps.body.apps[0].id, 'main');
+    assert.deepEqual(snapshot.body.server.appServerStatuses, [{ appId: 'main', name: 'react', port: appServerPort, running: true }]);
+    assert.deepEqual(snapshot.body.server.proxyStatuses, [{ id: 'proxy-main', running: true }]);
     assert.equal(snapshot.body.broker.status.body.running, true);
     assert.equal(snapshot.body.proxyManager.status.body.proxies[0].id, 'proxy-main');
   } finally {
@@ -95,6 +111,7 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     await pwdev.close();
     await broker.close();
     await proxy.close();
+    await appServer.close();
   }
 });
 
