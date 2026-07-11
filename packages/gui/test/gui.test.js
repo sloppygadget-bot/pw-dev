@@ -80,7 +80,8 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
   const broker = await startJsonServer({
     '/_broker/status': {
       ok: true,
-      running: true,
+      state: 'active',
+      instanceCount: 1,
       topology: { mode: 'local', remote: false },
       instances: [{ id: 'bkr_1', networkId: 'agent-whistle' }],
     },
@@ -104,7 +105,8 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     assert.equal(snapshot.body.server.apps.body.apps[0].id, 'main');
     assert.deepEqual(snapshot.body.server.appServerStatuses, [{ appId: 'main', name: 'react', port: appServerPort, running: true }]);
     assert.deepEqual(snapshot.body.server.proxyStatuses, [{ id: 'proxy-main', running: true }]);
-    assert.equal(snapshot.body.broker.status.body.running, true);
+    assert.equal(snapshot.body.broker.status.body.state, 'active');
+    assert.equal(snapshot.body.broker.status.body.instanceCount, 1);
     assert.equal(snapshot.body.proxyManager.status.body.proxies[0].id, 'proxy-main');
   } finally {
     await gui.close();
@@ -141,7 +143,7 @@ test('gui snapshot keeps SSH topology reported through pw-dev server', async () 
     '/_pwdev/networks': { ok: true, networks: [] },
   });
   const broker = await startJsonServer({
-    '/_broker/status': { ok: true, running: false, instances: [] },
+    '/_broker/status': { ok: true, state: 'idle', instanceCount: 0, instances: [] },
     '/_broker/networks': { ok: true, networks: [] },
     '/_broker/proxy-forwards': { ok: true, forwards: [] },
   });

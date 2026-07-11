@@ -175,7 +175,8 @@ async function handleControlRequest({ req, res, browserManager, proxyForwardMana
     const instances = browserManager?.listInstances?.() ?? [];
     writeJson(res, 200, {
       ok: true,
-      running: instances.length > 0,
+      state: instances.length > 0 ? 'active' : 'idle',
+      instanceCount: instances.length,
       topology: brokerTopology,
       instances,
       networks: networkManager?.list?.(instances) ?? [],

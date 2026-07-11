@@ -541,7 +541,8 @@ test('server manages app browser sessions through broker', async () => {
 
     const status = await getJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/status`);
     assert.equal(status.statusCode, 200);
-    assert.equal(status.body.broker.running, true);
+    assert.equal(status.body.broker.state, 'active');
+    assert.equal(status.body.broker.instanceCount, 1);
     assert.equal(status.body.app.browserSessions['checkout-tax__smoke-login-20260629'].activeTask.owner, 'codex');
 
     const stopped = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/stop`, {
@@ -773,7 +774,8 @@ test('server broker probing does not require global fetch', async () => {
     assert.equal(status.statusCode, 200);
     assert.equal(status.body.broker.configured, true);
     assert.equal(status.body.broker.reachable, true);
-    assert.equal(status.body.broker.status.running, false);
+    assert.equal(status.body.broker.status.state, 'idle');
+    assert.equal(status.body.broker.status.instanceCount, 0);
     assert.deepEqual(broker.requests[0], {
       method: 'GET',
       path: '/_broker/status',
@@ -1045,7 +1047,8 @@ test('server proxies broker HTTP APIs', async () => {
   try {
     const status = await getJson(`${server.origin}/_pwdev/broker/status`);
     assert.equal(status.statusCode, 200);
-    assert.equal(status.body.running, false);
+    assert.equal(status.body.state, 'idle');
+    assert.equal(status.body.instanceCount, 0);
     assert.deepEqual(broker.requests[0], {
       method: 'GET',
       path: '/_broker/status',
@@ -1232,7 +1235,12 @@ function startMockBroker() {
     }
 
     if (req.url === '/_broker/status' && req.method === 'GET') {
-      writeTestJson(res, 200, { ok: true, running: instances.size > 0, instances: [...instances.values()] });
+      writeTestJson(res, 200, {
+        ok: true,
+        state: instances.size > 0 ? 'active' : 'idle',
+        instanceCount: instances.size,
+        instances: [...instances.values()],
+      });
       return;
     }
 

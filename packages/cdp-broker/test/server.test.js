@@ -207,6 +207,8 @@ test('status reports local broker topology by default', async () => {
     });
 
     assert.equal(response.statusCode, 200);
+    assert.equal(response.body.state, 'idle');
+    assert.equal(response.body.instanceCount, 0);
     assert.deepEqual(response.body.topology, { mode: 'local', remote: false });
   } finally {
     await close();
@@ -239,6 +241,8 @@ test('status reports SSH remote broker topology', async () => {
     });
 
     assert.equal(response.statusCode, 200);
+    assert.equal(response.body.state, 'idle');
+    assert.equal(response.body.instanceCount, 0);
     assert.equal(response.body.topology.mode, 'ssh');
     assert.equal(response.body.topology.remote, true);
     assert.deepEqual(response.body.topology.ssh, {

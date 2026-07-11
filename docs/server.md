@@ -556,7 +556,8 @@ Reachable broker:
   "url": "http://127.0.0.1:18080",
   "status": {
     "ok": true,
-    "running": true
+    "state": "active",
+    "instanceCount": 1
   }
 }
 ```

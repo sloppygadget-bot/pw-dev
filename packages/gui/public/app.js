@@ -298,7 +298,7 @@ async function render(snapshot) {
 
 function brokerLabel(status) {
   if (!status) return 'Reachable';
-  const running = status.running ? 'running' : 'standby';
+  const running = status.state === 'active' ? 'active' : 'idle';
   if (status.topology?.remote) {
     return `remote ${running}`;
   }
@@ -407,16 +407,17 @@ function renderApps(apps, relationships, appServerStatuses) {
 
 function renderBroker(snapshot) {
   const broker = snapshot.brokerStatus;
+  const active = broker?.state === 'active';
   renderCards(els.broker, broker ? [{
-    title: broker.running ? 'Broker running' : 'Broker standby',
+    title: active ? 'Broker active' : 'Broker idle',
     subtitle: snapshot.broker?.url,
-    badge: badge(broker.running ? 'Running' : 'Standby', broker.running ? 'good' : 'neutral'),
+    badge: badge(active ? 'Active' : 'Idle', active ? 'good' : 'neutral'),
     rows: {
       URL: snapshot.broker?.url,
       Topology: broker.topology?.mode,
       Remote: broker.topology?.remote ? 'Yes' : 'No',
       'SSH target': broker.topology?.ssh?.target,
-      Instances: broker.instances?.length ?? 0,
+      Instances: broker.instanceCount ?? broker.instances?.length ?? 0,
       Networks: networkLink(broker.networks),
     },
   }] : []);
@@ -1255,7 +1256,7 @@ function formatBrokerNodeLabel(snapshot, sessions = []) {
   if (sessions.length) lines.push('Session: app ⇔ browser');
   if (status.instances?.length) lines.push(`${status.instances.length} browser${status.instances.length === 1 ? '' : 's'}`);
   if (status.topology?.ssh?.target) lines.push(status.topology.ssh.target);
-  if (status.running === false) lines.push('standby');
+  if (status.state === 'idle') lines.push('idle');
   return lines.join('\n');
 }
 
