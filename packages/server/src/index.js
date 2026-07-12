@@ -2760,9 +2760,11 @@ export async function loadPwDevNetworks({ serverUrl = '${serverUrl}' } = {}) {
   return response.json();
 }
 
-export async function checkPwDevNetwork(networkId, { serverUrl = '${serverUrl}' } = {}) {
+export async function checkPwDevNetwork(networkId, { serverUrl = '${serverUrl}', ...probe } = {}) {
   const response = await fetch(\`\${serverUrl}/_pwdev/networks/\${encodeURIComponent(networkId)}/check\`, {
     method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(probe),
   });
   if (!response.ok) {
     throw new Error(\`pw-dev network check failed: \${response.status} \${await response.text()}\`);

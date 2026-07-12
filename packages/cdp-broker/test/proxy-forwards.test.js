@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import http from 'node:http';
 import test from 'node:test';
 
 import {
@@ -147,4 +148,34 @@ test('deletes unused proxy forward', async () => {
   assert.deepEqual(result, { deleted: true, forwardId: forward.forwardId });
   assert.equal(child.killed, true);
   assert.deepEqual(manager.list(), []);
+});
+
+test('probes the forwarded HTTP proxy', async () => {
+  const probeServer = http.createServer();
+  probeServer.on('connect', (req, socket) => {
+    socket.end('HTTP/1.1 200 Connection Established\r\nConnection: close\r\n\r\n');
+  });
+  await new Promise((resolve) => probeServer.listen(0, '127.0.0.1', resolve));
+  const port = probeServer.address().port;
+  const child = fakeChild();
+  const manager = createProxyForwardManager({
+    sshTarget: 'user@code-server',
+    spawnImpl: () => child,
+    quiet: true,
+  });
+
+  try {
+    const forward = await manager.create({ remotePort: 8899, localPort: port });
+    const result = await manager.check(forward.forwardId, {
+      host: 'example.com',
+      port: 80,
+      timeoutMs: 1000,
+    });
+
+    assert.equal(result.reachable, true);
+    assert.equal(result.statusCode, 200);
+    assert.equal(result.remotePort, 8899);
+  } finally {
+    await new Promise((resolve) => probeServer.close(resolve));
+  }
 });

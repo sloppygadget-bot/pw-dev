@@ -153,7 +153,7 @@ async function handleControlRequest({ req, res, browserManager, proxyForwardMana
       return;
     }
     if (action === 'check' && req.method === 'POST') {
-      const result = networkManager.check(networkId, instances);
+      const result = await networkManager.check(networkId, instances, await readJsonBody(req));
       writeJson(res, 200, { ok: true, ...result });
       return;
     }

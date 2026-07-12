@@ -42,6 +42,10 @@ export async function startPwDevGuiServer(options = {}) {
         writeJson(res, 200, await collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }));
         return;
       }
+      if (requestUrl.pathname.startsWith('/api/network-check/')) {
+        await proxyNetworkCheck({ req, res, requestUrl, pwDevUrl });
+        return;
+      }
       if (requestUrl.pathname === '/api/pwdev' || requestUrl.pathname.startsWith('/api/pwdev/')) {
         await proxyPwDevRequest({ req, res, requestUrl, pwDevUrl });
         return;
@@ -245,6 +249,33 @@ async function proxyPwDevRequest({ req, res, requestUrl, pwDevUrl }) {
       error: `pw-dev server is unreachable at ${pwDevUrl}: ${error.message}`,
     });
   });
+  upstream.end();
+}
+
+async function proxyNetworkCheck({ req, res, requestUrl, pwDevUrl }) {
+  if (req.method !== 'POST') {
+    writeJson(res, 405, { ok: false, error: 'network check requires POST' });
+    return;
+  }
+  const networkId = requestUrl.pathname.slice('/api/network-check/'.length);
+  const upstreamUrl = new URL(
+    `/_pwdev/networks/${encodeURIComponent(decodeURIComponent(networkId))}/check`,
+    ensureTrailingSlash(pwDevUrl)
+  );
+  const upstream = http.request(upstreamUrl, {
+    method: 'POST',
+    headers: { accept: 'application/json' },
+  }, (response) => {
+    res.writeHead(response.statusCode ?? 502, {
+      ...response.headers,
+      'cache-control': 'no-store',
+    });
+    response.pipe(res);
+  });
+  upstream.once('error', (error) => writeJson(res, 502, {
+    ok: false,
+    error: `pw-dev server is unreachable at ${pwDevUrl}: ${error.message}`,
+  }));
   upstream.end();
 }
 

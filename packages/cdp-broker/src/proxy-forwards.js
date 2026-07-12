@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import net from 'node:net';
 
 import { getFreePort } from './chrome.js';
 
@@ -84,6 +85,12 @@ class ProxyForwardManager {
     const forward = this.forwards.get(forwardId);
     if (!forward) return undefined;
     return describeForward(forward, inUseBy(forward.forwardId, instances));
+  }
+
+  async check(forwardId, options = {}) {
+    const forward = this.forwards.get(forwardId);
+    if (!forward) return undefined;
+    return probeHttpProxy(forward, options);
   }
 
   delete(forwardId, instances = []) {
@@ -191,4 +198,99 @@ function inUseBy(forwardId, instances) {
 
 function makeForwardId() {
   return `pf_${crypto.randomBytes(16).toString('base64url')}`;
+}
+
+async function probeHttpProxy(forward, {
+  host = 'example.com',
+  port = 80,
+  timeoutMs = 3000,
+} = {}) {
+  const startedAt = Date.now();
+  const probeHost = normalizeProbeHost(host);
+  const probePort = normalizeProbePort(port);
+  const target = `${probeHost}:${probePort}`;
+  const timeout = normalizeProbeTimeout(timeoutMs);
+
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port: forward.localPort });
+    let settled = false;
+    let response = '';
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({
+        forwardId: forward.forwardId,
+        localPort: forward.localPort,
+        remotePort: forward.remotePort,
+        target,
+        latencyMs: Date.now() - startedAt,
+        ...result,
+      });
+    };
+
+    socket.setTimeout(timeout, () => finish({
+      reachable: false,
+      error: `probe timed out after ${timeout}ms`,
+    }));
+    socket.once('error', (error) => finish({
+      reachable: false,
+      error: error.code || error.message,
+    }));
+    socket.on('data', (chunk) => {
+      response += chunk.toString('latin1');
+      if (response.length > 64 * 1024) {
+        finish({ reachable: false, error: 'probe response headers exceeded 64KiB' });
+        return;
+      }
+      const headerEnd = response.indexOf('\r\n\r\n');
+      if (headerEnd < 0) return;
+      const statusLine = response.slice(0, headerEnd).split('\r\n', 1)[0];
+      const match = /^HTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s|$)/.exec(statusLine);
+      if (!match) {
+        finish({ reachable: false, error: 'remote endpoint did not return an HTTP response' });
+        return;
+      }
+      finish({ reachable: true, statusCode: Number(match[1]) });
+    });
+    socket.once('connect', () => {
+      socket.write([
+        `CONNECT ${target} HTTP/1.1`,
+        `Host: ${target}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n'));
+    });
+  });
+}
+
+function normalizeProbeTimeout(value) {
+  const timeout = Number(value);
+  if (!Number.isInteger(timeout) || timeout < 100 || timeout > 30000) {
+    const error = new Error('timeoutMs must be an integer between 100 and 30000');
+    error.statusCode = 400;
+    throw error;
+  }
+  return timeout;
+}
+
+function normalizeProbeHost(value) {
+  if (typeof value !== 'string' || !value || /[\r\n\s]/.test(value)) {
+    const error = new Error('host must be a non-empty hostname without whitespace');
+    error.statusCode = 400;
+    throw error;
+  }
+  return value;
+}
+
+function normalizeProbePort(value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    const error = new Error('port must be an integer between 1 and 65535');
+    error.statusCode = 400;
+    throw error;
+  }
+  return port;
 }

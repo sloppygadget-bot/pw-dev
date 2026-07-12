@@ -254,6 +254,12 @@ main {
   min-width: 0;
 }
 
+.card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .markdown-view {
   padding: 20px 22px;
 }

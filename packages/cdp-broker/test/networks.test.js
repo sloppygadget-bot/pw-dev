@@ -64,3 +64,37 @@ test('rejects changing an in-use network', async () => {
     /Network is in use/
   );
 });
+
+test('reports active ssh-peer probe results', async () => {
+  const manager = createNetworkManager({
+    proxyForwardManager: {
+      create: async () => ({
+        forwardId: 'pf_probe',
+        proxyServer: 'http://127.0.0.1:18899',
+      }),
+      check: async (forwardId, options) => ({
+        forwardId,
+        reachable: true,
+        statusCode: 407,
+        target: `${options.host}:${options.port}`,
+      }),
+    },
+  });
+  await manager.upsert({
+    id: 'probe-network',
+    proxy: { mode: 'ssh-peer', remotePort: 8899 },
+  });
+
+  const result = await manager.check('probe-network', [], {
+    host: 'proxy-check.invalid',
+    port: 80,
+  });
+
+  assert.equal(result.reachable, true);
+  assert.deepEqual(result.probe, {
+    forwardId: 'pf_probe',
+    reachable: true,
+    statusCode: 407,
+    target: 'proxy-check.invalid:80',
+  });
+});

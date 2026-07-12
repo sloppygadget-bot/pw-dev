@@ -522,6 +522,20 @@ CDP URLs, but it also leaves a raw broker API escape hatch for advanced tooling.
 `/_pwdev/proxy/*` maps to `proxy` `/_proxy/*`, so agents can create/delete
 managed Whistle instances without knowing the manager port.
 
+For an `ssh-peer` network, `POST /_pwdev/networks/:id/check` actively probes
+the broker-resolved local proxy forward with an HTTP `CONNECT` handshake. A
+response from the remote proxy confirms that the SSH tunnel reaches its peer.
+The optional JSON body accepts `host`, `port`, and `timeoutMs`:
+
+```bash
+curl -s -X POST http://127.0.0.1:9696/_pwdev/networks/agent-whistle/check \
+  -H 'content-type: application/json' \
+  -d '{"host":"example.com","port":80,"timeoutMs":3000}' | jq
+```
+
+The response includes `reachable`, `probe.statusCode`, `probe.latencyMs`, and
+an error string when the SSH forward or remote proxy cannot be reached.
+
 ## Broker Diagnostics
 
 Default broker configured but unreachable:

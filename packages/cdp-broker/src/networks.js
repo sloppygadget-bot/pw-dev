@@ -86,18 +86,30 @@ class NetworkManager {
     };
   }
 
-  check(id, instances = []) {
+  async check(id, instances = [], options = {}) {
     const network = this.get(id, instances);
     if (!network) {
       const error = new Error(`Unknown network: ${id}`);
       error.statusCode = 404;
       throw error;
     }
+    let probe;
+    if (network.proxy.mode === 'ssh-peer') {
+      probe = await this.proxyForwardManager?.check?.(network.resolved?.proxyForwardId, options);
+      if (!probe) {
+        probe = {
+          forwardId: network.resolved?.proxyForwardId,
+          reachable: false,
+          error: 'SSH proxy forward is not active',
+        };
+      }
+    }
     return {
       networkId: network.id,
-      reachable: true,
+      reachable: probe ? probe.reachable : true,
       resolved: network.resolved,
       inUseBy: network.inUseBy,
+      ...(probe ? { probe } : {}),
     };
   }
 

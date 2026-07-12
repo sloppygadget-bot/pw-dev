@@ -469,7 +469,14 @@ function renderNetworks(networks, relationships) {
     networkId: network.id,
     title: network.name ?? network.id,
     subtitle: network.id,
-    badge: badge(network.proxy?.mode ?? 'network', network.proxy?.mode === 'ssh-peer' ? 'warn' : 'neutral'),
+    badge: badge(
+      network.lastProbeReachable === true ? 'SSH tunnel alive' :
+        network.lastProbeReachable === false ? 'SSH tunnel failed' :
+          network.proxy?.mode ?? 'network',
+      network.lastProbeReachable === true ? 'good' :
+        network.lastProbeReachable === false ? 'bad' :
+          network.proxy?.mode === 'ssh-peer' ? 'warn' : 'neutral'
+    ),
     rows: {
       Kind: network.kind,
       Owner: network.owner,
@@ -479,11 +486,30 @@ function renderNetworks(networks, relationships) {
       'Local port': network.proxy?.localPort,
       'Proxy server': network.resolved?.proxyServer,
       'Proxy forward': network.resolved?.proxyForwardId,
+      Probe: network.lastProbe?.statusCode,
+      'Probe latency': network.lastProbe?.latencyMs ? `${network.lastProbe.latencyMs}ms` : undefined,
       'In use by': joinList(network.inUseBy),
       Related: related(relationships, 'network', network.id),
       Updated: formatDate(network.updatedAt),
     },
+    actions: network.proxy?.mode === 'ssh-peer'
+      ? [{ label: 'Probe tunnel', onClick: () => probeNetwork(network.id) }]
+      : undefined,
   })));
+}
+
+async function probeNetwork(networkId) {
+  try {
+    const result = await fetchJson(`/api/network-check/${encodeURIComponent(networkId)}`, { method: 'POST' });
+    const network = state.last?.networks?.find((item) => item.id === networkId);
+    if (network && result.probe) {
+      network.lastProbe = result.probe;
+      network.lastProbeReachable = result.reachable;
+    }
+    if (state.last) await render(state.last);
+  } catch (error) {
+    console.error(`Network probe failed: ${error.message}`);
+  }
 }
 
 function renderProxies(proxies, relationships) {
@@ -1329,6 +1355,25 @@ function renderCards(root, cards) {
       list.append(dt, dd);
     }
     card.append(list);
+    if (item.actions?.length) {
+      const actions = document.createElement('div');
+      actions.className = 'card-actions';
+      for (const action of item.actions) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = action.label;
+        button.addEventListener('click', async () => {
+          button.disabled = true;
+          try {
+            await action.onClick();
+          } finally {
+            button.disabled = false;
+          }
+        });
+        actions.append(button);
+      }
+      card.append(actions);
+    }
     root.append(card);
   }
 }
@@ -1391,8 +1436,11 @@ function escapeHtml(value) {
     .replaceAll('"', '&quot;');
 }
 
-async function fetchJson(path) {
-  const response = await fetch(path, { headers: { accept: 'application/json' } });
+async function fetchJson(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { accept: 'application/json', ...(options.headers ?? {}) },
+  });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} for ${path}`);
   }
