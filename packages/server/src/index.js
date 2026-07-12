@@ -697,7 +697,39 @@ async function reconcileManagedProxies({ apps, proxies, proxyManagerUrl }) {
   } catch {
     return;
   }
-  const liveIds = new Set(Array.isArray(status.proxies) ? status.proxies.map((proxy) => proxy?.id).filter(Boolean) : []);
+  const liveManagedProxies = Array.isArray(status.proxies)
+    ? status.proxies
+        .filter((proxy) => proxy && typeof proxy === 'object' && typeof proxy.id === 'string' && proxy.id.trim() !== '')
+        .map((proxy) => ({
+          id: proxy.id,
+          kind: proxy.kind,
+          name: proxy.name,
+          appId: proxy.appId,
+          taskId: proxy.taskId,
+          owner: proxy.owner,
+          purpose: proxy.purpose,
+          labels: proxy.labels,
+          proxyUrl: proxy.proxyUrl,
+          guiUrl: proxy.guiUrl,
+          rulesetFile: proxy.rulesetFile,
+          rules: proxy.rules,
+          managed: true,
+          createdAt: proxy.createdAt ?? proxy.startedAt,
+          updatedAt: proxy.updatedAt,
+        }))
+    : [];
+  const liveIds = new Set(liveManagedProxies.map((proxy) => proxy.id));
+
+  for (const proxy of liveManagedProxies) {
+    proxies.upsert(proxy);
+    if (proxy.appId) {
+      const app = apps.get(proxy.appId);
+      if (app && app.proxyId !== proxy.id) {
+        apps.update(proxy.appId, { proxyId: proxy.id });
+      }
+    }
+  }
+
   const staleIds = proxies.list()
     .filter((proxy) => proxy.managed && !liveIds.has(proxy.id))
     .map((proxy) => proxy.id);

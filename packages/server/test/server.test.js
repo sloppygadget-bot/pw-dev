@@ -447,6 +447,52 @@ test('server removes stale managed proxies after the proxy manager loses them', 
   }
 });
 
+test('server rehydrates live managed proxies from the proxy manager after restart', async () => {
+  const proxyManager = await startMockProxyManager({
+    proxies: [{
+      id: 'whistle-tax',
+      kind: 'whistle',
+      appId: 'checkout-tax',
+      taskId: 'smoke-login',
+      owner: 'codex',
+      purpose: 'Route tax app traffic',
+      labels: ['smoke'],
+      proxyUrl: 'http://127.0.0.1:8899',
+      guiUrl: 'http://127.0.0.1:9801',
+      rulesetFile: '/tmp/whistle-tax/ruleset.txt',
+      rules: {
+        defaultRuleset: 'tax.example.test 127.0.0.1:5173',
+        overrideRuleset: '',
+        effectiveRuleset: 'tax.example.test 127.0.0.1:5173',
+        version: 1,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+      startedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      running: true,
+    }],
+  });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0, proxyManagerUrl: proxyManager.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, { id: 'checkout-tax', appUrl: 'http://127.0.0.1:5174' });
+
+    const list = await getJson(`${server.origin}/_pwdev/proxies`);
+    assert.equal(list.statusCode, 200);
+    assert.equal(list.body.proxies.length, 1);
+    assert.equal(list.body.proxies[0].id, 'whistle-tax');
+    assert.equal(list.body.proxies[0].managed, true);
+    assert.equal(list.body.proxies[0].proxyUrl, 'http://127.0.0.1:8899');
+
+    const app = await getJson(`${server.origin}/_pwdev/apps/checkout-tax`);
+    assert.equal(app.body.app.proxyId, 'whistle-tax');
+  } finally {
+    await server.close();
+    await proxyManager.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server validates proxy and account registrations', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -1300,15 +1346,16 @@ function startMockBroker() {
   });
 }
 
-function startMockProxyManager() {
+function startMockProxyManager(options = {}) {
   const requests = [];
+  const proxies = Array.isArray(options.proxies) ? [...options.proxies] : [];
   let origin;
   const server = http.createServer(async (req, res) => {
     const body = await readRequestJson(req);
     requests.push({ method: req.method, path: req.url, body });
 
     if (req.url === '/_proxy/status' && req.method === 'GET') {
-      writeTestJson(res, 200, { ok: true, manager: true });
+      writeTestJson(res, 200, { ok: true, manager: true, proxies });
       return;
     }
 
@@ -1324,6 +1371,7 @@ function startMockProxyManager() {
       resolve({
         origin,
         requests,
+        proxies,
         close: () => new Promise((closeResolve, closeReject) => {
           server.close((error) => error ? closeReject(error) : closeResolve());
         }),
