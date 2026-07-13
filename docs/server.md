@@ -61,6 +61,10 @@ directory when the proxy exits or is stopped.
 Most managed proxies should be scoped to one task/test/verification. Agents can
 tag them with `taskId`, `owner`, `purpose`, and `labels`, then start a browser
 session with the returned `proxy.id` and delete the proxy when the task ends.
+If the proxy manager is restarted after a crash, it automatically terminates
+orphaned pw-dev Whistle processes before accepting new proxies. This cleanup is
+limited to processes launched with a `-S` storage directory under the configured
+Whistle storage root, so unrelated Whistle instances are not stopped.
 Compose the `ruleset` for the debugging job at hand: point app traffic at a
 GUI devserver, mock API responses, inject local code, or combine those
 behaviors in one task-scoped proxy:

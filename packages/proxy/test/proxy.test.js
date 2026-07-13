@@ -222,6 +222,52 @@ test('manager clears proxy records when child spawn fails', async () => {
   assert.deepEqual(manager.serverUrl, 'http://127.0.0.1:9696');
 });
 
+test('proxy manager cleans orphaned Whistle processes on startup', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-orphans-'));
+  const orphanStorageDir = fs.mkdtempSync(path.join(w2StorageRoot, 'react-login-portal-whistle-'));
+  const unrelatedStorageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'unrelated-whistle-'));
+  const killed = [];
+  const registryClient = fakeRegistryClient({
+    proxies: [{
+      id: 'react-login-portal-whistle',
+      appId: 'react-login-portal',
+      storageDir: orphanStorageDir,
+    }],
+  });
+  const manager = createProxyManager({
+    quiet: true,
+    w2StorageRoot,
+    registryClient,
+    processListImpl: async () => [
+      {
+        pid: 357971,
+        commandLine: `node whistle.js run -p 8892 --uiport 9804 -S ${orphanStorageDir}`,
+      },
+      {
+        pid: 357972,
+        commandLine: `node whistle.js run -p 8893 --uiport 9805 -S ${unrelatedStorageDir}`,
+      },
+    ],
+    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+  });
+
+  try {
+    const server = await startProxyManagerServer({ manager, port: 0 });
+    await server.close();
+    assert.deepEqual(killed, [{ pid: 357971, signal: 'SIGTERM' }]);
+    assert.equal(fs.existsSync(orphanStorageDir), false);
+    assert.equal(fs.existsSync(unrelatedStorageDir), true);
+    assert.deepEqual(registryClient.deletes, ['react-login-portal-whistle']);
+    assert.deepEqual(registryClient.appPatches, [{
+      id: 'react-login-portal',
+      patch: { proxyId: null },
+    }]);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+    fs.rmSync(unrelatedStorageDir, { recursive: true, force: true });
+  }
+});
+
 test('manager patches managed proxy override rules without restarting Whistle', async () => {
   const spawned = [];
   const appliedRules = [];
@@ -312,12 +358,16 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
   }
 });
 
-function fakeRegistryClient({ apps = [] } = {}) {
+function fakeRegistryClient({ apps = [], proxies = [] } = {}) {
   const client = {
     updates: [],
     deletes: [],
     appPatches: [],
     apps,
+    proxies,
+    async listProxies() {
+      return this.proxies;
+    },
     async updateProxy(proxy) {
       this.updates.push(proxy);
       return proxy;

@@ -30,6 +30,8 @@ const DEFAULT_W2_STORAGE_ROOT = path.join(PROXY_MANAGER_PACKAGE_ROOT, '.runtime'
  *   portAvailable?: (port: number) => Promise<boolean>,
  *   spawnImpl?: typeof spawn,
  *   applyRulesImpl?: (options: { guiUrl: string, ruleName: string, rulesText: string }) => Promise<void>,
+ *   processListImpl?: () => Promise<Array<{ pid: number, commandLine: string }>>,
+ *   killProcessImpl?: (pid: number, signal: NodeJS.Signals) => void,
  *   registryClient?: PwDevRegistryClient,
  *   quiet?: boolean,
  * }} options
@@ -44,6 +46,8 @@ export function createProxyManager(options = {}) {
   const uiPortRange = parsePortRange(options.uiPortRange ?? DEFAULT_UI_PORT_RANGE, 'uiPortRange');
   const portAvailable = options.portAvailable ?? isPortAvailable;
   const applyRulesImpl = options.applyRulesImpl ?? applyWhistleProjectRules;
+  const processListImpl = options.processListImpl ?? listSystemProcesses;
+  const killProcessImpl = options.killProcessImpl ?? ((pid, signal) => process.kill(pid, signal));
   const quiet = Boolean(options.quiet);
   const proxies = new Map();
 
@@ -255,6 +259,15 @@ export function createProxyManager(options = {}) {
       const stopped = await Promise.all(Array.from(proxies.keys()).map((id) => this.deleteProxy(id)));
       return { ok: true, proxies: stopped };
     },
+    async cleanupOrphans() {
+      return cleanupOrphanedProxies({
+        root: w2StorageRoot,
+        processListImpl,
+        killProcessImpl,
+        registryClient,
+        quiet,
+      });
+    },
   };
 }
 
@@ -265,6 +278,7 @@ export function createProxyManager(options = {}) {
  */
 export async function startProxyManagerServer(options = {}) {
   const manager = options.manager ?? createProxyManager();
+  await manager.cleanupOrphans?.();
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? 18081;
   const server = createProxyManagerHttpServer({ manager });
@@ -359,6 +373,10 @@ async function handleProxyManagerRequest({ req, res, manager }) {
 export function createPwDevRegistryClient({ serverUrl = DEFAULT_PW_DEV_SERVER_URL } = {}) {
   const baseUrl = normalizeHttpUrl(serverUrl, 'serverUrl');
   return {
+    async listProxies() {
+      const payload = await requestJson(new URL('/_pwdev/proxies', ensureTrailingSlash(baseUrl)));
+      return payload.proxies;
+    },
     async updateProxy(proxy) {
       const payload = await requestJson(new URL('/_pwdev/proxies', ensureTrailingSlash(baseUrl)), {
         method: 'POST',
@@ -709,6 +727,86 @@ async function cleanupManagedProxy(record, quiet, registryClient) {
   await record.managedCleanupPromise;
 }
 
+async function cleanupOrphanedProxies({ root, processListImpl, killProcessImpl, registryClient, quiet }) {
+  let processes;
+  try {
+    processes = await processListImpl();
+  } catch (error) {
+    if (!quiet) console.error(`orphan proxy discovery failed: ${error.message}`);
+    return { ok: false, cleaned: [] };
+  }
+
+  const rootPath = path.resolve(root);
+  const orphans = processes
+    .map((processInfo) => ({
+      ...processInfo,
+      storageDir: extractManagedStorageDir(processInfo.commandLine, rootPath),
+    }))
+    .filter((processInfo) => processInfo.storageDir);
+  if (!orphans.length) return { ok: true, cleaned: [] };
+
+  let registryProxies = [];
+  try {
+    registryProxies = await registryClient.listProxies?.() ?? [];
+  } catch (error) {
+    if (!quiet) console.error(`orphan proxy registry lookup failed: ${error.message}`);
+  }
+
+  const cleaned = [];
+  for (const orphan of orphans) {
+    try {
+      killProcessImpl(orphan.pid, 'SIGTERM');
+    } catch (error) {
+      if (error?.code !== 'ESRCH' && !quiet) {
+        console.error(`orphan proxy termination failed for ${orphan.pid}: ${error.message}`);
+      }
+    }
+
+    await fs.rm(orphan.storageDir, { recursive: true, force: true }).catch((error) => {
+      if (!quiet) console.error(`orphan proxy storage cleanup failed: ${orphan.storageDir}: ${error.message}`);
+    });
+
+    const records = registryProxies.filter((proxy) => proxy?.storageDir === orphan.storageDir);
+    for (const record of records) {
+      await Promise.resolve(registryClient.deleteProxy?.(record.id)).catch((error) => {
+        if (!quiet) console.error(`orphan proxy registry cleanup failed: ${record.id}: ${error.message}`);
+      });
+      if (record.appId) {
+        await Promise.resolve(registryClient.updateApp?.(record.appId, { proxyId: null })).catch((error) => {
+          if (!quiet) console.error(`orphan proxy app cleanup failed: ${record.appId}: ${error.message}`);
+        });
+      }
+    }
+    cleaned.push({ pid: orphan.pid, storageDir: orphan.storageDir, ids: records.map((record) => record.id) });
+  }
+  return { ok: true, cleaned };
+}
+
+function extractManagedStorageDir(commandLine, root) {
+  if (typeof commandLine !== 'string' || !commandLine.includes(' run ')) return undefined;
+  const match = /(?:^|\s)-S\s+("[^"]+"|'[^']+'|\S+)/.exec(commandLine);
+  if (!match) return undefined;
+  const storageDir = path.resolve(match[1].replace(/^(['"])(.*)\1$/, '$2'));
+  if (storageDir === root || !storageDir.startsWith(`${root}${path.sep}`)) return undefined;
+  return storageDir;
+}
+
+async function listSystemProcesses() {
+  if (process.platform !== 'linux') return [];
+  const entries = await fs.readdir('/proc', { withFileTypes: true });
+  const processes = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    try {
+      const commandLine = (await fs.readFile(`/proc/${entry.name}/cmdline`, 'utf8')).replaceAll('\0', ' ').trim();
+      if (commandLine) processes.push({ pid: Number(entry.name), commandLine });
+    } catch {
+      // Processes may exit between /proc enumeration and cmdline read.
+    }
+  }
+  return processes;
+}
+
 async function selectPort({ requested, range, usedPorts, portAvailable, name }) {
   if (requested !== undefined) {
     if (usedPorts.has(requested) || !await portAvailable(requested)) {
@@ -809,6 +907,7 @@ function httpError(statusCode, message, details) {
 /**
  * @typedef {object} PwDevRegistryClient
  * @property {(proxy: Record<string, any>) => Promise<Record<string, any>>} updateProxy
+ * @property {() => Promise<Record<string, any>[]>} listProxies
  * @property {(id: string, patch: Record<string, any>) => Promise<Record<string, any>>} updateApp
  * @property {(id: string) => Promise<void>=} deleteProxy
  */
