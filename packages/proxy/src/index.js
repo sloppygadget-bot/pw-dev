@@ -169,6 +169,10 @@ export function createProxyManager(options = {}) {
           labels: request.labels,
           proxyUrl,
           guiUrl,
+          storageDir,
+          proxyPort,
+          uiPort,
+          pid: child.pid,
           rulesetFile,
           rules,
           managed: true,
@@ -222,6 +226,10 @@ export function createProxyManager(options = {}) {
           labels: proxy.labels,
           proxyUrl: proxy.proxyUrl,
           guiUrl: proxy.guiUrl,
+          storageDir: proxy.storageDir,
+          proxyPort: proxy.proxyPort,
+          uiPort: proxy.uiPort,
+          pid: proxy.pid,
           rulesetFile: proxy.rulesetFile,
           rules: nextRules,
           managed: true,
@@ -265,6 +273,18 @@ export function createProxyManager(options = {}) {
         processListImpl,
         killProcessImpl,
         registryClient,
+        preservedStorageDirs: new Set([...proxies.values()].map((proxy) => proxy.storageDir)),
+        quiet,
+      });
+    },
+    async recover() {
+      return recoverRegisteredProxies({
+        root: w2StorageRoot,
+        processListImpl,
+        killProcessImpl,
+        registryClient,
+        proxies,
+        whistle,
         quiet,
       });
     },
@@ -278,6 +298,7 @@ export function createProxyManager(options = {}) {
  */
 export async function startProxyManagerServer(options = {}) {
   const manager = options.manager ?? createProxyManager();
+  await manager.recover?.();
   await manager.cleanupOrphans?.();
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? 18081;
@@ -727,7 +748,94 @@ async function cleanupManagedProxy(record, quiet, registryClient) {
   await record.managedCleanupPromise;
 }
 
-async function cleanupOrphanedProxies({ root, processListImpl, killProcessImpl, registryClient, quiet }) {
+async function recoverRegisteredProxies({
+  root,
+  processListImpl,
+  killProcessImpl,
+  registryClient,
+  proxies,
+  whistle,
+  quiet,
+}) {
+  let processes;
+  try {
+    processes = await processListImpl();
+  } catch (error) {
+    if (!quiet) console.error(`proxy recovery discovery failed: ${error.message}`);
+    return { ok: false, recovered: [], stale: [] };
+  }
+
+  let registryProxies;
+  try {
+    registryProxies = await registryClient.listProxies?.() ?? [];
+  } catch (error) {
+    if (!quiet) console.error(`proxy recovery registry lookup failed: ${error.message}`);
+    return { ok: false, recovered: [], stale: [] };
+  }
+
+  const processByStorageDir = new Map();
+  for (const processInfo of processes) {
+    const storageDir = extractManagedStorageDir(processInfo.commandLine, path.resolve(root));
+    if (storageDir && !processByStorageDir.has(storageDir)) {
+      processByStorageDir.set(storageDir, { ...processInfo, storageDir });
+    }
+  }
+
+  const recovered = [];
+  const stale = [];
+  for (const registered of registryProxies) {
+    if (!registered?.managed || !registered.storageDir) continue;
+    const storageDir = path.resolve(registered.storageDir);
+    if (!isWithinRoot(storageDir, root)) continue;
+    const processInfo = processByStorageDir.get(storageDir);
+    if (!processInfo) {
+      stale.push(registered.id);
+      await removeStaleRegistryRecord(registered, registryClient, quiet);
+      continue;
+    }
+
+    const proxyPort = registered.proxyPort ?? parseCommandPort(processInfo.commandLine, '-p');
+    const uiPort = registered.uiPort ?? parseCommandPort(processInfo.commandLine, '--uiport');
+    if (!proxyPort || !uiPort) continue;
+    const rules = registered.rules ?? await readPersistedRules(storageDir);
+    const record = makeProcessRecord({
+      id: registered.id,
+      kind: registered.kind ?? 'whistle',
+      name: registered.name,
+      appId: registered.appId,
+      taskId: registered.taskId,
+      owner: registered.owner,
+      purpose: registered.purpose,
+      labels: registered.labels,
+      command: registered.command ?? whistle.command,
+      args: registered.args ?? processInfo.commandLine.split(/\s+/).slice(1),
+      proxyPort,
+      uiPort,
+      proxyUrl: registered.proxyUrl ?? `http://127.0.0.1:${proxyPort}`,
+      guiUrl: registered.guiUrl ?? `http://127.0.0.1:${uiPort}`,
+      storageDir,
+      rulesetFile: registered.rulesetFile ?? path.join(storageDir, 'ruleset.txt'),
+      rules,
+      whistleRuleName: makeWhistleRuleName(registered.id),
+      pid: processInfo.pid,
+    });
+    record.startedAt = registered.startedAt ?? record.startedAt;
+    record.updatedAt = registered.updatedAt ?? record.updatedAt;
+    record.child = {
+      pid: processInfo.pid,
+      killed: false,
+      kill: (signal) => {
+        record.child.killed = true;
+        killProcessImpl(processInfo.pid, signal);
+      },
+    };
+    proxies.set(record.id, record);
+    recovered.push(stripChild(record));
+  }
+  return { ok: true, recovered, stale };
+}
+
+async function cleanupOrphanedProxies({ root, processListImpl, killProcessImpl, registryClient, preservedStorageDirs = new Set(), quiet }) {
   let processes;
   try {
     processes = await processListImpl();
@@ -742,7 +850,7 @@ async function cleanupOrphanedProxies({ root, processListImpl, killProcessImpl, 
       ...processInfo,
       storageDir: extractManagedStorageDir(processInfo.commandLine, rootPath),
     }))
-    .filter((processInfo) => processInfo.storageDir);
+    .filter((processInfo) => processInfo.storageDir && !preservedStorageDirs.has(processInfo.storageDir));
   if (!orphans.length) return { ok: true, cleaned: [] };
 
   let registryProxies = [];
@@ -750,6 +858,7 @@ async function cleanupOrphanedProxies({ root, processListImpl, killProcessImpl, 
     registryProxies = await registryClient.listProxies?.() ?? [];
   } catch (error) {
     if (!quiet) console.error(`orphan proxy registry lookup failed: ${error.message}`);
+    return { ok: false, cleaned: [] };
   }
 
   const cleaned = [];
@@ -782,13 +891,52 @@ async function cleanupOrphanedProxies({ root, processListImpl, killProcessImpl, 
   return { ok: true, cleaned };
 }
 
+async function readPersistedRules(storageDir) {
+  try {
+    const [defaultRuleset, overrideRuleset] = await Promise.all([
+      fs.readFile(path.join(storageDir, 'default-ruleset.txt'), 'utf8'),
+      fs.readFile(path.join(storageDir, 'override-ruleset.txt'), 'utf8'),
+    ]);
+    return createManagedRuleState({
+      defaultRuleset,
+      overrideRuleset,
+      previousVersion: 0,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function removeStaleRegistryRecord(record, registryClient, quiet) {
+  await Promise.resolve(registryClient.deleteProxy?.(record.id)).catch((error) => {
+    if (!quiet) console.error(`stale proxy registry cleanup failed: ${record.id}: ${error.message}`);
+  });
+  if (record.appId) {
+    await Promise.resolve(registryClient.updateApp?.(record.appId, { proxyId: null })).catch((error) => {
+      if (!quiet) console.error(`stale proxy app cleanup failed: ${record.appId}: ${error.message}`);
+    });
+  }
+}
+
 function extractManagedStorageDir(commandLine, root) {
   if (typeof commandLine !== 'string' || !commandLine.includes(' run ')) return undefined;
   const match = /(?:^|\s)-S\s+("[^"]+"|'[^']+'|\S+)/.exec(commandLine);
   if (!match) return undefined;
   const storageDir = path.resolve(match[1].replace(/^(['"])(.*)\1$/, '$2'));
-  if (storageDir === root || !storageDir.startsWith(`${root}${path.sep}`)) return undefined;
+  if (!isWithinRoot(storageDir, root)) return undefined;
   return storageDir;
+}
+
+function isWithinRoot(candidate, root) {
+  const resolvedRoot = path.resolve(root);
+  const resolvedCandidate = path.resolve(candidate);
+  return resolvedCandidate !== resolvedRoot && resolvedCandidate.startsWith(`${resolvedRoot}${path.sep}`);
+}
+
+function parseCommandPort(commandLine, flag) {
+  const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`(?:^|\\s)${escapedFlag}\\s+(\\d+)(?:\\s|$)`).exec(commandLine || '');
+  return match ? Number(match[1]) : undefined;
 }
 
 async function listSystemProcesses() {

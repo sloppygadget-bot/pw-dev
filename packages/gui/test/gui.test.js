@@ -37,7 +37,7 @@ test('gui serves static app and read-only config', async () => {
   try {
     const index = await get(`${server.origin}/`);
     assert.equal(index.statusCode, 200);
-    assert.match(index.body, /pw-dev Monitor/);
+    assert.match(index.body, /<h1>pw-dev<\/h1>/);
     assert.match(index.body, /Topology/);
     assert.match(index.body, /data-view="broker"/);
     assert.match(index.body, /Mermaid/);
@@ -57,6 +57,32 @@ test('gui serves static app and read-only config', async () => {
     assert.match(rejected.body.error, /read-only/);
   } finally {
     await server.close();
+  }
+});
+
+test('gui proxies a managed Whistle GUI under a same-origin route', async () => {
+  const whistle = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`whistle gui path: ${req.url}`);
+  });
+  await new Promise((resolve) => whistle.listen(0, '127.0.0.1', resolve));
+  const whistleUrl = `http://127.0.0.1:${whistle.address().port}`;
+  const pwdev = await startJsonServer({
+    '/_pwdev/proxies/proxy-main': {
+      ok: true,
+      proxy: { id: 'proxy-main', guiUrl: whistleUrl },
+    },
+  });
+  const gui = await startPwDevGuiServer({ port: 0, pwDevUrl: pwdev.origin });
+
+  try {
+    const response = await get(`${gui.origin}/proxy/proxy-main/gui/`);
+    assert.equal(response.statusCode, 200);
+    assert.match(response.body, /whistle gui path: \//);
+  } finally {
+    await gui.close();
+    await pwdev.close();
+    await new Promise((resolve) => whistle.close(resolve));
   }
 });
 

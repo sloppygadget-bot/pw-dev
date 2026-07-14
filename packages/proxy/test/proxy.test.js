@@ -115,6 +115,10 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
       labels: ['smoke', 'login'],
       proxyUrl: 'http://127.0.0.1:8899',
       guiUrl: 'http://127.0.0.1:9801',
+      storageDir: created.proxy.storageDir,
+      proxyPort: 8899,
+      uiPort: 9801,
+      pid: spawned[0].child.pid,
       rulesetFile: created.proxy.rulesetFile,
       rules: created.proxy.rules,
       managed: true,
@@ -265,6 +269,53 @@ test('proxy manager cleans orphaned Whistle processes on startup', async () => {
   } finally {
     fs.rmSync(w2StorageRoot, { recursive: true, force: true });
     fs.rmSync(unrelatedStorageDir, { recursive: true, force: true });
+  }
+});
+
+test('proxy manager recovers registered Whistle profiles on startup', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-recover-'));
+  const storageDir = path.join(w2StorageRoot, 'recoverable-whistle');
+  fs.mkdirSync(storageDir, { recursive: true });
+  fs.writeFileSync(path.join(storageDir, 'default-ruleset.txt'), 'a b');
+  fs.writeFileSync(path.join(storageDir, 'override-ruleset.txt'), '');
+  const killed = [];
+  const registryClient = fakeRegistryClient({
+    proxies: [{
+      id: 'recoverable-whistle',
+      kind: 'whistle',
+      proxyUrl: 'http://127.0.0.1:8899',
+      guiUrl: 'http://127.0.0.1:9800',
+      storageDir,
+      proxyPort: 8899,
+      uiPort: 9800,
+      pid: 4001,
+      managed: true,
+    }],
+  });
+  const manager = createProxyManager({
+    quiet: true,
+    w2StorageRoot,
+    registryClient,
+    processListImpl: async () => [{
+      pid: 4001,
+      commandLine: `node whistle.js run -p 8899 --uiport 9800 -S ${storageDir}`,
+    }],
+    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+  });
+
+  try {
+    const server = await startProxyManagerServer({ manager, port: 0 });
+    const status = await getJson(`${server.origin}/_proxy/status`);
+    assert.equal(status.body.proxies.length, 1);
+    assert.equal(status.body.proxies[0].id, 'recoverable-whistle');
+    assert.equal(status.body.proxies[0].pid, 4001);
+    assert.deepEqual(killed, []);
+
+    await manager.deleteProxy('recoverable-whistle');
+    assert.deepEqual(killed, [{ pid: 4001, signal: 'SIGTERM' }]);
+    await server.close();
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
   }
 });
 

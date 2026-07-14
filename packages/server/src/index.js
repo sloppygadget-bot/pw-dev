@@ -134,6 +134,10 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @property {string[]=} labels Agent-defined labels for filtering and cleanup.
  * @property {string=} proxyUrl Direct Chrome proxy server URL, for example `http://127.0.0.1:8899`.
  * @property {string=} guiUrl Whistle GUI URL, for example `http://127.0.0.1:9800`.
+ * @property {string=} storageDir Whistle `-S` profile directory used for recovery.
+ * @property {number=} proxyPort Allocated Whistle proxy port.
+ * @property {number=} uiPort Allocated Whistle GUI port.
+ * @property {number=} pid Current Whistle process id when managed.
  * @property {string=} brokerProxyForwardId Broker-managed proxy forward id.
  * @property {string=} rulesetFile Local ruleset handoff file used to create this proxy.
  * @property {{ defaultRuleset: string, overrideRuleset: string, effectiveRuleset: string, version: number, updatedAt: string }=} rules Managed live rules state for proxies created by `pw-dev proxy`.
@@ -711,6 +715,10 @@ async function reconcileManagedProxies({ apps, proxies, proxyManagerUrl }) {
           labels: proxy.labels,
           proxyUrl: proxy.proxyUrl,
           guiUrl: proxy.guiUrl,
+          storageDir: proxy.storageDir,
+          proxyPort: proxy.proxyPort,
+          uiPort: proxy.uiPort,
+          pid: proxy.pid,
           rulesetFile: proxy.rulesetFile,
           rules: proxy.rules,
           managed: true,
@@ -1864,8 +1872,12 @@ function validateProxyRegistration(rawProxy) {
     labels: rawProxy.labels === undefined ? undefined : validateStringArray(rawProxy.labels, 'labels'),
     proxyUrl: optionalString(rawProxy.proxyUrl, 'proxyUrl'),
     guiUrl: optionalString(rawProxy.guiUrl, 'guiUrl'),
+    storageDir: optionalPath(rawProxy.storageDir, 'storageDir'),
+    rulesetFile: optionalPath(rawProxy.rulesetFile, 'rulesetFile'),
+    proxyPort: rawProxy.proxyPort === undefined ? undefined : requiredPositiveInteger(rawProxy.proxyPort, 'proxyPort'),
+    uiPort: rawProxy.uiPort === undefined ? undefined : requiredPositiveInteger(rawProxy.uiPort, 'uiPort'),
+    pid: rawProxy.pid === undefined ? undefined : requiredPositiveInteger(rawProxy.pid, 'pid'),
     brokerProxyForwardId: optionalString(rawProxy.brokerProxyForwardId, 'brokerProxyForwardId'),
-    rulesetFile: optionalString(rawProxy.rulesetFile, 'rulesetFile'),
     rules: rawProxy.rules === undefined ? undefined : validateManagedProxyRules(rawProxy.rules),
     managed: rawProxy.managed === undefined ? undefined : Boolean(rawProxy.managed),
     createdAt: optionalString(rawProxy.createdAt, 'createdAt'),

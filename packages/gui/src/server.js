@@ -46,6 +46,10 @@ export async function startPwDevGuiServer(options = {}) {
         await proxyNetworkCheck({ req, res, requestUrl, pwDevUrl });
         return;
       }
+      if (requestUrl.pathname.startsWith('/proxy/')) {
+        await proxyWhistleGui({ req, res, requestUrl, pwDevUrl });
+        return;
+      }
       if (requestUrl.pathname === '/api/pwdev' || requestUrl.pathname.startsWith('/api/pwdev/')) {
         await proxyPwDevRequest({ req, res, requestUrl, pwDevUrl });
         return;
@@ -275,6 +279,60 @@ async function proxyNetworkCheck({ req, res, requestUrl, pwDevUrl }) {
   upstream.once('error', (error) => writeJson(res, 502, {
     ok: false,
     error: `pw-dev server is unreachable at ${pwDevUrl}: ${error.message}`,
+  }));
+  upstream.end();
+}
+
+async function proxyWhistleGui({ req, res, requestUrl, pwDevUrl }) {
+  const match = /^\/proxy\/([^/]+)\/gui(\/.*)?$/.exec(requestUrl.pathname);
+  if (!match) {
+    writeText(res, 404, 'text/plain; charset=utf-8', 'Not Found');
+    return;
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    writeJson(res, 405, { ok: false, error: 'Whistle GUI proxy only supports GET and HEAD' });
+    return;
+  }
+  if (!match[2]) {
+    const location = `${requestUrl.pathname}/`;
+    res.writeHead(302, { location });
+    res.end();
+    return;
+  }
+
+  let proxyId;
+  try {
+    proxyId = decodeURIComponent(match[1]);
+  } catch {
+    writeText(res, 400, 'text/plain; charset=utf-8', 'Invalid proxy id');
+    return;
+  }
+  const record = await fetchJsonFrom(`${pwDevUrl}/_pwdev/proxies/${encodeURIComponent(proxyId)}`);
+  const guiUrl = record.body?.proxy?.guiUrl;
+  if (!record.ok || !guiUrl) {
+    writeJson(res, record.statusCode === 404 ? 404 : 502, {
+      ok: false,
+      error: record.error || `Proxy GUI is unavailable for ${proxyId}`,
+    });
+    return;
+  }
+
+  const upstreamUrl = new URL(match[2] || '/', ensureTrailingSlash(guiUrl));
+  upstreamUrl.search = requestUrl.search;
+  const upstream = http.request(upstreamUrl, {
+    method: req.method,
+    headers: {
+      accept: req.headers.accept || '*/*',
+      'accept-encoding': 'identity',
+    },
+  }, (response) => {
+    const headers = { ...response.headers, 'cache-control': 'no-store' };
+    res.writeHead(response.statusCode ?? 502, headers);
+    response.pipe(res);
+  });
+  upstream.once('error', (error) => writeJson(res, 502, {
+    ok: false,
+    error: `Whistle GUI is unreachable at ${guiUrl}: ${error.message}`,
   }));
   upstream.end();
 }

@@ -524,7 +524,16 @@ function renderProxies(proxies, relationships) {
       Owner: proxy.owner,
       Purpose: proxy.purpose,
       URL: proxy.proxyUrl,
-      GUI: proxy.guiUrl,
+      GUI: proxy.guiUrl ? {
+        link: true,
+        text: proxy.guiUrl,
+        href: `/proxy/${encodeURIComponent(proxy.id)}/gui/`,
+        onClick: () => window.open(
+          `/proxy/${encodeURIComponent(proxy.id)}/gui/`,
+          '_blank',
+          'noopener,noreferrer'
+        ),
+      } : undefined,
       'Broker forward': proxy.brokerProxyForwardId,
       Labels: joinList(proxy.labels),
       Related: related(relationships, 'proxy', proxy.id),
