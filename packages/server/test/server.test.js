@@ -44,7 +44,7 @@ test('parseArgs reads server options', () => {
   assert.equal(options.registerDefaultApp, true);
 });
 
-test('parseArgs defaults to a server-owned proxy manager on port 9697', () => {
+test('parseArgs defaults to a lazy server-owned proxy manager on port 9697', () => {
   const options = parseArgs([]);
   assert.equal(options.proxyManagerHost, '127.0.0.1');
   assert.equal(options.proxyManagerPort, 9697);
@@ -185,11 +185,14 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /\/_pwdev\/broker\/proxy-forwards/);
     assert.match(instructions.body, /brokerProxyForwardId/);
     assert.match(instructions.body, /\/_pwdev\/sessions/);
-    assert.match(instructions.body, /Playwright CLI/);
+    assert.match(instructions.body, /Playwright package, CLI/);
     assert.match(instructions.body, /bundled skills/);
+    assert.match(instructions.body, /Playwright installation owned by the client agent/);
+    assert.match(instructions.body, /attach to the pw-dev broker session/);
+    assert.match(instructions.body, /close\(\) disconnects this client/);
     assert.match(instructions.body, /Do not delete and recreate the proxy just to change rules/);
     assert.match(instructions.body, /mock API endpoint/);
-    assert.match(instructions.body, /starts the local proxy manager alongside/);
+    assert.match(instructions.body, /starts the local proxy manager lazily/);
     assert.match(instructions.body, /--proxy-manager-url/);
     assert.doesNotMatch(instructions.body, /If `pw-dev proxy` is running/);
 

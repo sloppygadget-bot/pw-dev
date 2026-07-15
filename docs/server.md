@@ -43,9 +43,10 @@ Use `--broker-url` only when the broker runs somewhere else. If the default or
 configured broker is not reachable, `GET /_pwdev/status` reports
 `reachable: false` and browser lifecycle routes return `503`.
 
-`pw-dev server` starts the proxy manager alongside its own API on
-`http://127.0.0.1:9697`, and stops it on shutdown. The server proxies it under
-`/_pwdev/proxy/*`. It creates Whistle instances from external-agent
+`pw-dev server` starts the proxy manager lazily on the first proxy operation
+and stops it on shutdown. The local manager listens on
+`http://127.0.0.1:9697` and is proxied under `/_pwdev/proxy/*`. It creates
+Whistle instances from external-agent
 rulesets, allocates separate proxy and GUI ports, registers the resulting
 proxy metadata, and can attach that proxy to an app by patching the app
 `proxyId`. Each managed Whistle proxy is started with isolated `-S` storage

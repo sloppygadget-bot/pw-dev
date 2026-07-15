@@ -107,10 +107,11 @@ The server does not auto-register its root manifest in `/_pwdev/apps`.
 Register apps explicitly with `POST /_pwdev/apps`; use
 `--register-default-app` only for the older single-app convenience mode.
 
-The server starts and stops the local proxy manager with it on
-`http://127.0.0.1:9697`. Use `--no-proxy-manager` when managing that service
-separately; an external manager can be supplied with `--proxy-manager-url`.
-The standalone `npm start -- proxy` command remains available for that case.
+The server starts the local proxy manager lazily on the first proxied proxy
+operation and stops it with the server on `http://127.0.0.1:9697`. Use
+`--no-proxy-manager` when managing that service separately; an external manager
+can be supplied with `--proxy-manager-url`. The standalone
+`npm start -- proxy` command remains available for that case.
 
 The proxy manager creates managed Whistle instances from rulesets supplied by
 an external agent. Each instance gets separate proxy and GUI ports, isolated

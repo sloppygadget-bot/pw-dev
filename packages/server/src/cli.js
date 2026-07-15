@@ -26,27 +26,41 @@ export async function main(argv) {
   }
 
   const proxyManagerUrl = options.proxyManagerUrl ?? `http://${options.proxyManagerHost}:${options.proxyManagerPort}`;
-  const server = await startPwDevServer({ ...options, proxyManagerUrl });
   let proxyManager;
   let proxyManagerServer;
+  let proxyManagerStartPromise;
   const ownsProxyManager = options.startProxyManager && !options.proxyManagerUrl;
-  if (ownsProxyManager) {
-    try {
-      proxyManager = createProxyManager({ serverUrl: server.origin });
-      proxyManagerServer = await startProxyManagerServer({
-        manager: proxyManager,
-        host: options.proxyManagerHost,
-        port: options.proxyManagerPort,
-      });
-    } catch (error) {
-      await proxyManager?.stopAll?.();
-      await server.close();
-      throw error;
-    }
-  }
+  let server;
+  const ensureProxyManager = ownsProxyManager
+    ? async () => {
+        if (proxyManagerServer) return proxyManagerServer;
+        if (!proxyManagerStartPromise) {
+          proxyManagerStartPromise = (async () => {
+            try {
+              proxyManager = createProxyManager({ serverUrl: server.origin });
+              proxyManagerServer = await startProxyManagerServer({
+                manager: proxyManager,
+                host: options.proxyManagerHost,
+                port: options.proxyManagerPort,
+              });
+              console.log(`pw-dev proxy listening: ${proxyManagerServer.origin}`);
+              return proxyManagerServer;
+            } catch (error) {
+              await proxyManager?.stopAll?.();
+              proxyManager = undefined;
+              proxyManagerServer = undefined;
+              throw error;
+            } finally {
+              proxyManagerStartPromise = undefined;
+            }
+          })();
+        }
+        return proxyManagerStartPromise;
+      }
+    : undefined;
+  server = await startPwDevServer({ ...options, proxyManagerUrl, ensureProxyManager });
   console.log(`pw-dev server listening: ${server.origin}`);
   console.log(`root: ${server.root}`);
-  if (proxyManagerServer) console.log(`pw-dev proxy listening: ${proxyManagerServer.origin}`);
 
   let shutdownPromise;
   const shutdown = async (signal) => {
@@ -161,7 +175,7 @@ Options:
   --proxy-manager-port <port>
                   Local proxy manager listen port. Default: 9697
   --no-proxy-manager
-                  Do not start or stop a proxy manager with this server
+                  Disable automatic proxy-manager startup and shutdown
   --cdp-url <url>  CDP URL for browser automation
   --profile <name> Broker profile for browser automation
   --proxy-forward-id <id>

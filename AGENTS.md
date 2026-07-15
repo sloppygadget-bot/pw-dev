@@ -90,6 +90,28 @@ Start the agent-facing server:
 npm start -- server --port 9696
 ```
 
+Initialize the server origin for client-agent handoff:
+
+```bash
+export PW_DEV_URL="${PW_DEV_URL:-http://127.0.0.1:9696}"
+```
+
+### Server lifecycle
+
+Run the server in the foreground during local work. The server-owned proxy
+manager starts lazily on the first server-proxied proxy operation. Press
+`Ctrl-C` to stop the server gracefully; any manager it started is stopped with
+it. To restart, stop the existing server and run the same command again:
+
+```bash
+npm start -- server --port 9696
+```
+
+When the server is backgrounded, send `SIGTERM` to the server process for a
+graceful stop, then start it again. Do not start or stop the internal proxy
+manager separately unless the server was explicitly configured with
+`--no-proxy-manager`.
+
 The server also has no npm dependencies. To run it directly after cloning:
 
 ```bash
@@ -99,7 +121,7 @@ git clone https://github.com/sloppygadget-bot/pw-dev.git && cd pw-dev && node pa
 Default server URL:
 
 ```text
-http://127.0.0.1:9696
+$PW_DEV_URL
 ```
 
 The server probes the default broker at `http://127.0.0.1:18080`. Only pass
@@ -121,82 +143,33 @@ npm start -- server \
 
 ## Basic Agent Usage
 
-After the server is running, treat its live discovery endpoints as the source
-of truth for API details. Start with:
+The launcher should pass the server origin to the client agent as
+`PW_DEV_URL`. The client agent should not need any pw-dev knowledge beyond
+that URL. After the server is running, treat its live discovery endpoints as
+the source of truth for API details. Start with:
 
 ```bash
-curl http://127.0.0.1:9696/_pwdev/status
-curl http://127.0.0.1:9696/_pwdev/instructions
+curl "$PW_DEV_URL/_pwdev/status"
+curl "$PW_DEV_URL/_pwdev/instructions"
 ```
 
 `/_pwdev/instructions` is the machine-readable usage guide exposed by the
 running server. Do not rely on stale hardcoded API assumptions when the server
 can provide current instructions.
 
-Useful discovery endpoints:
+Use the server-origin APIs under `$PW_DEV_URL/_pwdev/*`. Do not connect to
+internal broker or proxy-manager ports directly.
 
-```text
-GET /_pwdev/status
-GET /_pwdev/instructions
-GET /_pwdev/apps
-GET /_pwdev/apps/:id/manifest
-GET /_pwdev/client.js
-```
+For the complete discovery sequence, endpoint list, browser workflow, and
+Playwright examples, fetch `GET $PW_DEV_URL/_pwdev/instructions`. The client
+helper source is available at `GET $PW_DEV_URL/_pwdev/client.js`.
 
-Typical flow:
-
-1. Start broker with `npm start -- broker --standby`.
-2. Start server with `npm start -- server --port 9696`.
-3. Fetch `GET /_pwdev/status` and verify the broker is configured and reachable.
-4. Fetch `GET /_pwdev/instructions` for current API usage.
-5. Fetch an app manifest and attach Playwright to the returned `cdpUrl`.
+At a high level, start the broker, start the server, verify
+`GET $PW_DEV_URL/_pwdev/status`, then follow the live instructions to select an
+app and attach Playwright to its returned `cdpUrl`.
 
 Agents should connect to the `cdpUrl` returned by pw-dev. Do not launch a
 separate browser unless the task explicitly requires it.
-
-## Optional Proxy Manager
-
-The server starts and stops the proxy manager with the 9696 server when managed
-Whistle proxies are needed:
-
-```bash
-npm start -- server --port 9696
-```
-
-Use `--no-proxy-manager` when managing it separately, or pass an external
-manager with `--proxy-manager-url`. The standalone command remains available:
-
-```bash
-npm start -- proxy --port 9697
-```
-
-Default proxy manager URL:
-
-```text
-http://127.0.0.1:9697
-```
-
-The server proxies proxy-manager APIs under `/_pwdev/proxy/*`.
-
-Managed Whistle proxies start with HTTPS capture enabled (`Enable HTTPS /
-Capture Tunnel Traffic`).
-
-For browser routing, prefer broker networks over direct proxy-forward wiring.
-Create or register a broker-owned network through `POST /_pwdev/networks`, then
-start browser sessions with `networkId`. Use `proxy.mode: "ssh-peer"` when the
-proxy lives on the SSH peer configured by broker `--ssh`; the broker owns the
-underlying proxy forward.
-
-Most managed proxies should be task-scoped: create one for a specific
-test/verification, start the browser with that `proxyId`, then delete the proxy
-when the task ends. To create a live managed proxy, send
-`POST /_pwdev/proxy/proxies` with `ruleset` and either `id` or `appId`. If only
-`appId` is supplied, the proxy id defaults to `<appId>-whistle`.
-
-Shared managed proxies do not need an `appId`; pass the returned proxy id as
-`proxyId` in each browser start request or app registration that should use it.
-Agents can tag proxies with optional tracking fields: `taskId`, `owner`,
-`purpose`, and `labels`.
 
 ## References
 

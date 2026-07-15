@@ -47,6 +47,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} appUrl URL of the actual app devserver. Defaults to this server's origin.
  * @property {string=} brokerUrl Broker base URL paired with this server for browser lifecycle endpoints. Defaults to `http://127.0.0.1:18080`.
  * @property {string=} proxyManagerUrl Optional proxy manager base URL proxied under `/_pwdev/proxy/*`. Defaults to `http://127.0.0.1:9697`.
+ * @property {() => Promise<unknown>=} ensureProxyManager Lazily starts a server-owned proxy manager before proxy-manager requests.
  * @property {string=} cdpUrl Optional Playwright CDP URL for direct browser attachment.
  * @property {string=} profile Optional broker profile name for the app.
  * @property {string=} networkId Optional broker network id for browser sessions.
@@ -308,7 +309,7 @@ export async function startPwDevServer(options = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, sessions, broker, proxyManagerUrl });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -390,10 +391,11 @@ export async function startPwDevServer(options = {}) {
  *   sessions: PwDevSessionRegistry,
  *   broker: PwDevBrokerPairing,
  *   proxyManagerUrl: string,
+ *   ensureProxyManager?: () => Promise<unknown>,
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, sessions, broker, proxyManagerUrl }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -410,6 +412,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/proxy')) {
+    if (ensureProxyManager) await ensureProxyManager();
     await proxyProxyManagerHttpRequest({ req, res, requestUrl, proxyManagerUrl });
     return;
   }
@@ -2318,18 +2321,34 @@ production accounts, personal credentials, or sensitive tokens in app metadata.
   proxies. Keep persistent broker profiles only when their login/session state
   is intentionally reusable.
 
-## Playwright in pw-dev
+## Playwright clients
 
-Generated Playwright task code should live inside the pw-dev workspace so it can
-use the Playwright package shipped with pw-dev. If Playwright is not installed,
-run \`npm run install:playwright\` from the pw-dev root.
+There are two supported ways to run Playwright against a pw-dev browser:
 
-That install step also makes the Playwright CLI and its bundled skills available
-inside pw-dev. Use the package, CLI, and bundled skills for probing,
-smoke-check, and browser inspection tasks before falling back to hand-written
-scripts.
+1. Use the Playwright package, CLI, and bundled skills installed in the pw-dev
+   workspace. Generated task code should live inside pw-dev and can use
+   \`npm run install:playwright\` when Playwright is not installed.
+2. Use a Playwright installation owned by the client agent. The agent can run
+   scripts from its own workspace and attach to the pw-dev broker session using
+   the returned \`cdpUrl\`.
 
-Default location for generated Playwright scripts and artifacts:
+In both modes, attach to the existing browser; do not launch a separate one.
+After the script finishes, detach without stopping the broker-owned browser:
+
+\`\`\`js
+const browser = await chromium.connectOverCDP(cdpUrl);
+try {
+  // Run the agent's Playwright task here.
+} finally {
+  // For a browser connected over CDP, close() disconnects this client.
+  await browser.close();
+}
+\`\`\`
+
+Use the server browser/session stop endpoint separately when the task's browser
+session should actually be stopped.
+
+Default location for generated pw-dev Playwright scripts and artifacts:
 
 \`\`\`text
 .agent/tasks/<task-id>/run.mjs
@@ -2399,9 +2418,10 @@ await fetch('${serverUrl}/_pwdev/sessions/checkout-tax__smoke-login-20260629/sto
 
 ## Create a managed Whistle proxy
 
-The normal \`pw-dev server\` command starts the local proxy manager alongside
-the server and stops it with the server. Use the server-proxied API; agents do
-not need the proxy manager port directly. Send a ready-to-apply \`ruleset\`;
+The normal \`pw-dev server\` command starts the local proxy manager lazily on
+the first server-proxied proxy operation and stops it with the server. Use the
+server-proxied API; agents do not need the proxy manager port directly. Send a
+ready-to-apply \`ruleset\`;
 pw-dev creates a Whistle instance with separate proxy and GUI ports, registers
 it under \`/_pwdev/proxies\`, and starts it with HTTPS capture enabled
 (\`Enable HTTPS / Capture Tunnel Traffic\`), and attaches it to \`appId\` when
