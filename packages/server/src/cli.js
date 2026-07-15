@@ -9,6 +9,7 @@
  */
 
 import path from 'node:path';
+import { createProxyManager, startProxyManagerServer } from '../../proxy/src/index.js';
 import { startPwDevServer } from './index.js';
 
 /**
@@ -24,13 +25,39 @@ export async function main(argv) {
     return;
   }
 
-  const server = await startPwDevServer(options);
+  const proxyManagerUrl = options.proxyManagerUrl ?? `http://${options.proxyManagerHost}:${options.proxyManagerPort}`;
+  const server = await startPwDevServer({ ...options, proxyManagerUrl });
+  let proxyManager;
+  let proxyManagerServer;
+  const ownsProxyManager = options.startProxyManager && !options.proxyManagerUrl;
+  if (ownsProxyManager) {
+    try {
+      proxyManager = createProxyManager({ serverUrl: server.origin });
+      proxyManagerServer = await startProxyManagerServer({
+        manager: proxyManager,
+        host: options.proxyManagerHost,
+        port: options.proxyManagerPort,
+      });
+    } catch (error) {
+      await proxyManager?.stopAll?.();
+      await server.close();
+      throw error;
+    }
+  }
   console.log(`pw-dev server listening: ${server.origin}`);
   console.log(`root: ${server.root}`);
+  if (proxyManagerServer) console.log(`pw-dev proxy listening: ${proxyManagerServer.origin}`);
 
+  let shutdownPromise;
   const shutdown = async (signal) => {
+    if (shutdownPromise) return shutdownPromise;
     console.log(`Received ${signal}; shutting down.`);
-    await server.close();
+    shutdownPromise = (async () => {
+      await server.close();
+      if (proxyManager) await proxyManager.stopAll();
+      if (proxyManagerServer) await proxyManagerServer.close();
+    })();
+    return shutdownPromise;
   };
   process.once('SIGINT', () => void shutdown('SIGINT'));
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
@@ -47,6 +74,9 @@ export async function main(argv) {
  */
 export function parseArgs(argv) {
   const options = {};
+  options.proxyManagerHost = '127.0.0.1';
+  options.proxyManagerPort = 9697;
+  options.startProxyManager = true;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') {
@@ -71,6 +101,12 @@ export function parseArgs(argv) {
       options.brokerUrl = readValue(argv, ++i, arg);
     } else if (arg === '--proxy-manager-url') {
       options.proxyManagerUrl = readValue(argv, ++i, arg);
+    } else if (arg === '--proxy-manager-host') {
+      options.proxyManagerHost = readValue(argv, ++i, arg);
+    } else if (arg === '--proxy-manager-port') {
+      options.proxyManagerPort = parsePort(readValue(argv, ++i, arg), arg);
+    } else if (arg === '--no-proxy-manager') {
+      options.startProxyManager = false;
     } else if (arg === '--cdp-url') {
       options.cdpUrl = readValue(argv, ++i, arg);
     } else if (arg === '--profile') {
@@ -119,7 +155,13 @@ Options:
   --broker-url <url>
                   Broker URL. Default: http://127.0.0.1:18080
   --proxy-manager-url <url>
-                  Proxy manager URL. Default: http://127.0.0.1:18081
+                  Existing proxy manager URL; disables automatic startup
+  --proxy-manager-host <host>
+                  Local proxy manager listen host. Default: 127.0.0.1
+  --proxy-manager-port <port>
+                  Local proxy manager listen port. Default: 9697
+  --no-proxy-manager
+                  Do not start or stop a proxy manager with this server
   --cdp-url <url>  CDP URL for browser automation
   --profile <name> Broker profile for browser automation
   --proxy-forward-id <id>

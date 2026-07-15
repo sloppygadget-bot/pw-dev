@@ -9,7 +9,7 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 9797;
 const DEFAULT_PWDEV_URL = 'http://127.0.0.1:9696';
 const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
-const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
+const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
 const PUBLIC_DIR = path.resolve(new URL('../public', import.meta.url).pathname);
 
 const MIME_TYPES = new Map([

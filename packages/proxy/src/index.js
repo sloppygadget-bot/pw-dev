@@ -301,7 +301,7 @@ export async function startProxyManagerServer(options = {}) {
   await manager.recover?.();
   await manager.cleanupOrphans?.();
   const host = options.host ?? '127.0.0.1';
-  const port = options.port ?? 18081;
+  const port = options.port ?? 9697;
   const server = createProxyManagerHttpServer({ manager });
   await new Promise((resolve, reject) => {
     server.once('error', reject);

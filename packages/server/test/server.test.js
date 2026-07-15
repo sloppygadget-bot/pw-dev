@@ -20,7 +20,7 @@ test('parseArgs reads server options', () => {
     '--branch', 'main',
     '--app-url', 'http://127.0.0.1:5173',
     '--broker-url', 'http://127.0.0.1:18080',
-    '--proxy-manager-url', 'http://127.0.0.1:18081',
+    '--proxy-manager-url', 'http://127.0.0.1:9697',
     '--cdp-url', 'http://127.0.0.1:18080/_broker/instances/checkout-main',
     '--profile', 'checkout-main',
     '--proxy-forward-id', 'whistle',
@@ -36,12 +36,30 @@ test('parseArgs reads server options', () => {
   assert.equal(options.branch, 'main');
   assert.equal(options.appUrl, 'http://127.0.0.1:5173');
   assert.equal(options.brokerUrl, 'http://127.0.0.1:18080');
-  assert.equal(options.proxyManagerUrl, 'http://127.0.0.1:18081');
+  assert.equal(options.proxyManagerUrl, 'http://127.0.0.1:9697');
   assert.equal(options.cdpUrl, 'http://127.0.0.1:18080/_broker/instances/checkout-main');
   assert.equal(options.profile, 'checkout-main');
   assert.equal(options.proxyForwardId, 'whistle');
   assert.equal(options.proxyServer, 'http://127.0.0.1:8899');
   assert.equal(options.registerDefaultApp, true);
+});
+
+test('parseArgs defaults to a server-owned proxy manager on port 9697', () => {
+  const options = parseArgs([]);
+  assert.equal(options.proxyManagerHost, '127.0.0.1');
+  assert.equal(options.proxyManagerPort, 9697);
+  assert.equal(options.startProxyManager, true);
+});
+
+test('parseArgs supports an externally managed proxy manager', () => {
+  const options = parseArgs([
+    '--proxy-manager-host', '0.0.0.0',
+    '--proxy-manager-port', '9798',
+    '--no-proxy-manager',
+  ]);
+  assert.equal(options.proxyManagerHost, '0.0.0.0');
+  assert.equal(options.proxyManagerPort, 9798);
+  assert.equal(options.startProxyManager, false);
 });
 
 test('resolveStaticPath keeps requests under root', () => {
@@ -171,6 +189,9 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /bundled skills/);
     assert.match(instructions.body, /Do not delete and recreate the proxy just to change rules/);
     assert.match(instructions.body, /mock API endpoint/);
+    assert.match(instructions.body, /starts the local proxy manager alongside/);
+    assert.match(instructions.body, /--proxy-manager-url/);
+    assert.doesNotMatch(instructions.body, /If `pw-dev proxy` is running/);
 
     const client = await get(`${server.origin}/_pwdev/client.js`);
     assert.equal(client.statusCode, 200);

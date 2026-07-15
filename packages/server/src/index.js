@@ -27,7 +27,7 @@ const MIME_TYPES = new Map([
 ]);
 
 const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
-const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
+const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
 
 /**
  * Options for `startPwDevServer`.
@@ -46,7 +46,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:18081';
  * @property {string=} branch Source branch name for display/discovery.
  * @property {string=} appUrl URL of the actual app devserver. Defaults to this server's origin.
  * @property {string=} brokerUrl Broker base URL paired with this server for browser lifecycle endpoints. Defaults to `http://127.0.0.1:18080`.
- * @property {string=} proxyManagerUrl Optional proxy manager base URL proxied under `/_pwdev/proxy/*`. Defaults to `http://127.0.0.1:18081`.
+ * @property {string=} proxyManagerUrl Optional proxy manager base URL proxied under `/_pwdev/proxy/*`. Defaults to `http://127.0.0.1:9697`.
  * @property {string=} cdpUrl Optional Playwright CDP URL for direct browser attachment.
  * @property {string=} profile Optional broker profile name for the app.
  * @property {string=} networkId Optional broker network id for browser sessions.
@@ -2399,12 +2399,16 @@ await fetch('${serverUrl}/_pwdev/sessions/checkout-tax__smoke-login-20260629/sto
 
 ## Create a managed Whistle proxy
 
-If \`pw-dev proxy\` is running, use the server-proxied API. Agents do not need
-the proxy manager port directly. Send a ready-to-apply \`ruleset\`; pw-dev
-creates a Whistle instance with separate proxy and GUI ports, registers it
-under \`/_pwdev/proxies\`, starts it with HTTPS capture enabled
+The normal \`pw-dev server\` command starts the local proxy manager alongside
+the server and stops it with the server. Use the server-proxied API; agents do
+not need the proxy manager port directly. Send a ready-to-apply \`ruleset\`;
+pw-dev creates a Whistle instance with separate proxy and GUI ports, registers
+it under \`/_pwdev/proxies\`, and starts it with HTTPS capture enabled
 (\`Enable HTTPS / Capture Tunnel Traffic\`), and attaches it to \`appId\` when
 provided.
+
+If the server was started with \`--no-proxy-manager\`, configure an external
+manager with \`--proxy-manager-url\` before using these routes.
 
 Create requires \`ruleset\` and either \`id\` or \`appId\`. If only \`appId\`
 is supplied, the proxy id defaults to \`<appId>-whistle\`.

@@ -2,7 +2,7 @@
 
 import { createProxyManager, startProxyManagerServer } from './index.js';
 
-const DEFAULT_PORT = 18081;
+const DEFAULT_PORT = 9697;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:9696';
 const DEFAULT_PROXY_PORT_RANGE = '8888-8899';
@@ -101,7 +101,7 @@ Usage:
 
 Options:
   --host <host>       Listen host. Default: 127.0.0.1
-  --port <port>       Listen port. Default: 18081
+  --port <port>       Listen port. Default: 9697
   --server-url <url>  pw-dev server URL. Default: http://127.0.0.1:9696
   --w2-command <cmd>  Whistle command override. Default: bundled whistle
   --w2-storage-root <path>

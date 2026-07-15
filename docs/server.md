@@ -43,20 +43,19 @@ Use `--broker-url` only when the broker runs somewhere else. If the default or
 configured broker is not reachable, `GET /_pwdev/status` reports
 `reachable: false` and browser lifecycle routes return `503`.
 
-Start the optional proxy manager:
-
-```bash
-npm start -- proxy
-```
-
-`proxy` keeps its own API on `http://127.0.0.1:18081`, and the server proxies
-it under `/_pwdev/proxy/*`. It creates Whistle instances from external-agent
+`pw-dev server` starts the proxy manager alongside its own API on
+`http://127.0.0.1:9697`, and stops it on shutdown. The server proxies it under
+`/_pwdev/proxy/*`. It creates Whistle instances from external-agent
 rulesets, allocates separate proxy and GUI ports, registers the resulting
 proxy metadata, and can attach that proxy to an app by patching the app
 `proxyId`. Each managed Whistle proxy is started with isolated `-S` storage
 under `packages/proxy/.runtime/whistle` and HTTPS capture enabled
 (`Enable HTTPS / Capture Tunnel Traffic`); the proxy manager removes that
 directory when the proxy exits or is stopped.
+
+Use `--no-proxy-manager` when managing the proxy service separately, or pass an
+external manager with `--proxy-manager-url`. The standalone `npm start -- proxy`
+command remains available for that setup.
 
 Most managed proxies should be scoped to one task/test/verification. Agents can
 tag them with `taskId`, `owner`, `purpose`, and `labels`, then start a browser

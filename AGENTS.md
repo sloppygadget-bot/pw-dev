@@ -156,16 +156,24 @@ separate browser unless the task explicitly requires it.
 
 ## Optional Proxy Manager
 
-Start the proxy manager only when a task needs managed Whistle proxies:
+The server starts and stops the proxy manager with the 9696 server when managed
+Whistle proxies are needed:
 
 ```bash
-npm start -- proxy
+npm start -- server --port 9696
+```
+
+Use `--no-proxy-manager` when managing it separately, or pass an external
+manager with `--proxy-manager-url`. The standalone command remains available:
+
+```bash
+npm start -- proxy --port 9697
 ```
 
 Default proxy manager URL:
 
 ```text
-http://127.0.0.1:18081
+http://127.0.0.1:9697
 ```
 
 The server proxies proxy-manager APIs under `/_pwdev/proxy/*`.

@@ -70,6 +70,6 @@ Options:
   --server-url <url>   Alias for --pwdev-url
   --broker-url <url>   Broker URL. Default: http://127.0.0.1:18080
   --proxy-manager-url <url>
-                       Proxy manager URL. Default: http://127.0.0.1:18081
+                       Proxy manager URL. Default: http://127.0.0.1:9697
   --help               Show this help`;
 }

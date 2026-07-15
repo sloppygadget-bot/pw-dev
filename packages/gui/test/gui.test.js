@@ -11,14 +11,14 @@ test('parseArgs reads gui options', () => {
     '--port', '4777',
     '--pwdev-url', 'http://127.0.0.1:9696',
     '--broker-url', 'http://127.0.0.1:18080',
-    '--proxy-manager-url', 'http://127.0.0.1:18081',
+    '--proxy-manager-url', 'http://127.0.0.1:9697',
   ]);
 
   assert.equal(options.host, '0.0.0.0');
   assert.equal(options.port, 4777);
   assert.equal(options.pwDevUrl, 'http://127.0.0.1:9696');
   assert.equal(options.brokerUrl, 'http://127.0.0.1:18080');
-  assert.equal(options.proxyManagerUrl, 'http://127.0.0.1:18081');
+  assert.equal(options.proxyManagerUrl, 'http://127.0.0.1:9697');
 });
 
 test('resolveStaticPath keeps gui static requests under root', () => {
@@ -31,7 +31,7 @@ test('gui serves static app and read-only config', async () => {
     port: 0,
     pwDevUrl: 'http://127.0.0.1:9696',
     brokerUrl: 'http://127.0.0.1:18080',
-    proxyManagerUrl: 'http://127.0.0.1:18081',
+    proxyManagerUrl: 'http://127.0.0.1:9697',
   });
 
   try {
