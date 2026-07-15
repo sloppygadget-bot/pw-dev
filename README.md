@@ -222,6 +222,7 @@ GET    /_pwdev/proxy/status
 GET    /_pwdev/proxy/proxies
 POST   /_pwdev/proxy/proxies
 GET    /_pwdev/proxy/proxies/:id
+PUT    /_pwdev/proxy/proxies/:id/rules
 DELETE /_pwdev/proxy/proxies/:id
 POST   /_pwdev/proxy/proxies/:id/stop
 POST   /_pwdev/proxy/stop-all

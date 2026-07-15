@@ -2440,15 +2440,12 @@ track why the proxy exists, and compose the \`ruleset\` for the debugging job
 at hand: point app traffic at a GUI devserver, mock API responses, inject
 local code, or combine those behaviors in one task-scoped proxy.
 
-Managed proxies expose live rules state at \`proxy.rules\`. Treat the create-time
-\`ruleset\` as the default ruleset, then replace \`proxy.rules.overrideRuleset\`
-with \`PATCH /_pwdev/proxy/proxies/:id\` whenever the task needs a new override.
-Do not delete and recreate the proxy just to change rules. Reuse the running
-managed proxy, read its current \`proxy.rules\`, compute the next override, and
-patch it in place. That lets an agent add a mock API endpoint, switch a rewrite
-target, or remove a temporary override without rebuilding the proxy or
-restarting the browser. Use read-modify-write with \`proxy.rules.version\` to
-avoid lost updates.
+Managed proxies expose live rules state at \`proxy.rules\`. Rules replacement is
+full-state and uses \`PUT /_pwdev/proxy/proxies/:id/rules\`; send the complete
+default and override rulesets together with \`baseVersion\`. Read the current
+\`proxy.rules\`, compute the desired replacement, and write it in place. The
+running proxy and browser do not need to be rebuilt. Use \`baseVersion\` to avoid
+lost updates.
 
 \`\`\`js
 const managedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies', {
@@ -2482,18 +2479,14 @@ const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
 const currentProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle')
   .then((response) => response.json());
 
-// Example: add a temporary mock endpoint on the running proxy.
-const updatedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle', {
-  method: 'PATCH',
+// Example: replace the complete rules state on the running proxy.
+const updatedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle/rules', {
+  method: 'PUT',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
-    rules: {
-      baseVersion: currentProxy.proxy.rules.version,
-      overrideRuleset: [
-        currentProxy.proxy.rules.overrideRuleset,
-        'example.com/api/orders/preview resBody://{ "ok": true, "source": "mock" }',
-      ].filter(Boolean).join('\\n'),
-    },
+    baseVersion: currentProxy.proxy.rules.version,
+    defaultRuleset: currentProxy.proxy.rules.defaultRuleset,
+    overrideRuleset: 'example.com/api/orders/preview resBody://{ "ok": true, "source": "mock" }',
   }),
 }).then((response) => response.json());
 \`\`\`
@@ -2635,7 +2628,7 @@ GET    /_pwdev/proxy/status
 GET    /_pwdev/proxy/proxies
 POST   /_pwdev/proxy/proxies
 GET    /_pwdev/proxy/proxies/:id
-PATCH  /_pwdev/proxy/proxies/:id
+PUT    /_pwdev/proxy/proxies/:id/rules
 DELETE /_pwdev/proxy/proxies/:id
 POST   /_pwdev/proxy/proxies/:id/stop
 POST   /_pwdev/proxy/stop-all
@@ -2754,14 +2747,14 @@ export async function loadPwDevManagedProxy(proxyId, { serverUrl = '${serverUrl}
   return response.json();
 }
 
-export async function updatePwDevManagedProxy(proxyId, patch, { serverUrl = '${serverUrl}' } = {}) {
-  const response = await fetch(\`\${serverUrl}/_pwdev/proxy/proxies/\${encodeURIComponent(proxyId)}\`, {
-    method: 'PATCH',
+export async function replacePwDevManagedProxyRules(proxyId, rules, { serverUrl = '${serverUrl}' } = {}) {
+  const response = await fetch(\`\${serverUrl}/_pwdev/proxy/proxies/\${encodeURIComponent(proxyId)}/rules\`, {
+    method: 'PUT',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(patch),
+    body: JSON.stringify(rules),
   });
   if (!response.ok) {
-    throw new Error(\`pw-dev managed proxy update failed: \${response.status} \${await response.text()}\`);
+    throw new Error(\`pw-dev managed proxy rules replacement failed: \${response.status} \${await response.text()}\`);
   }
   return response.json();
 }

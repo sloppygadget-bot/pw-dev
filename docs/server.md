@@ -88,26 +88,21 @@ registration that should use it. Supplying `appId` during managed proxy
 creation is only a convenience: the proxy manager patches that app's `proxyId`
 for you.
 
-Managed proxies expose live rules state at `proxy.rules`. Treat the create-time
-`ruleset` as the default ruleset, then replace `proxy.rules.overrideRuleset`
-with `PATCH /_pwdev/proxy/proxies/:id` whenever the task needs a new override.
-Do not delete and recreate the proxy just to change rules. Reuse the running
-managed proxy, read its current `proxy.rules`, compute the next override, and
-patch it in place. That lets an agent add a mock API endpoint, switch a rewrite
-target, or remove a temporary override without rebuilding the proxy or
-restarting the browser. Use read-modify-write with `proxy.rules.version` to
-avoid lost updates:
+Managed proxies expose live rules state at `proxy.rules`. Replace the complete
+rules state with `PUT /_pwdev/proxy/proxies/:id/rules`, sending both the default
+and override rulesets with `baseVersion`. Read the current `proxy.rules`, compute
+the desired replacement, and write it in place. The proxy and browser continue
+running, and `baseVersion` prevents lost updates:
 
 ```bash
 CURRENT=$(curl -s http://127.0.0.1:9696/_pwdev/proxy/proxies/smoke-login-proxy)
 
-curl -X PATCH http://127.0.0.1:9696/_pwdev/proxy/proxies/smoke-login-proxy \
+curl -X PUT http://127.0.0.1:9696/_pwdev/proxy/proxies/smoke-login-proxy/rules \
   -H 'content-type: application/json' \
   -d "{
-    \"rules\": {
-      \"baseVersion\": $(printf '%s' \"$CURRENT\" | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.stdout.write(String(JSON.parse(s).proxy.rules.version)))'),
-      \"overrideRuleset\": \"example.com/api/orders/preview resBody://{ \\\"ok\\\": true, \\\"source\\\": \\\"mock\\\" }\"
-    }
+    \"baseVersion\": $(printf '%s' \"$CURRENT\" | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.stdout.write(String(JSON.parse(s).proxy.rules.version)))'),
+    \"defaultRuleset\": $(printf '%s' \"$CURRENT\" | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.stdout.write(JSON.stringify(JSON.parse(s).proxy.rules.defaultRuleset)))'),
+    \"overrideRuleset\": \"example.com/api/orders/preview resBody://{ \\\"ok\\\": true, \\\"source\\\": \\\"mock\\\" }\"
   }"
 ```
 
@@ -515,7 +510,7 @@ GET    /_pwdev/proxy/status
 GET    /_pwdev/proxy/proxies
 POST   /_pwdev/proxy/proxies
 GET    /_pwdev/proxy/proxies/:id
-PATCH  /_pwdev/proxy/proxies/:id
+PUT    /_pwdev/proxy/proxies/:id/rules
 DELETE /_pwdev/proxy/proxies/:id
 POST   /_pwdev/proxy/proxies/:id/stop
 POST   /_pwdev/proxy/stop-all

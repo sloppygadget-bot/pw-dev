@@ -190,8 +190,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /Playwright installation owned by the client agent/);
     assert.match(instructions.body, /attach to the pw-dev broker session/);
     assert.match(instructions.body, /close\(\) disconnects this client/);
-    assert.match(instructions.body, /Do not delete and recreate the proxy just to change rules/);
-    assert.match(instructions.body, /mock API endpoint/);
+    assert.match(instructions.body, /PUT \/_pwdev\/proxy\/proxies\/:id\/rules/);
+    assert.match(instructions.body, /complete rules state/);
     assert.match(instructions.body, /starts the local proxy manager lazily/);
     assert.match(instructions.body, /--proxy-manager-url/);
     assert.doesNotMatch(instructions.body, /If `pw-dev proxy` is running/);
@@ -207,6 +207,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(client.body, /networkId/);
     assert.match(client.body, /loadPwDevManifest/);
     assert.match(client.body, /connectPwDev/);
+    assert.match(client.body, /replacePwDevManagedProxyRules/);
   } finally {
     await server.close();
     fs.rmSync(root, { recursive: true, force: true });

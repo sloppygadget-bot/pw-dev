@@ -191,11 +191,11 @@ export function createProxyManager(options = {}) {
 
       return { ok: true, proxy: stripChild(record), app };
     },
-    async patchProxy(id, input) {
+    async replaceProxyRules(id, input) {
       const proxy = proxies.get(id);
       if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
-      const patch = validatePatchProxyRequest(input);
-      if (patch.rules.baseVersion !== proxy.rules.version) {
+      const replacement = validateReplaceProxyRulesRequest(input);
+      if (replacement.baseVersion !== proxy.rules.version) {
         throw httpError(409, 'Managed proxy rules changed', {
           code: 'RULES_VERSION_CONFLICT',
           proxy: stripChild(proxy),
@@ -203,16 +203,12 @@ export function createProxyManager(options = {}) {
       }
 
       const nextRules = createManagedRuleState({
-        defaultRuleset: proxy.rules.defaultRuleset,
-        overrideRuleset: patch.rules.overrideRuleset,
+        defaultRuleset: replacement.defaultRuleset,
+        overrideRuleset: replacement.overrideRuleset,
         previousVersion: proxy.rules.version,
       });
 
-      await applyRulesImpl({
-        guiUrl: proxy.guiUrl,
-        ruleName: proxy.whistleRuleName,
-        rulesText: nextRules.effectiveRuleset,
-      });
+      await replaceWhistleRules({ proxy, nextRules, applyRulesImpl, quiet });
 
       try {
         await registryClient.updateProxy(omitUndefined({
@@ -368,15 +364,20 @@ async function handleProxyManagerRequest({ req, res, manager }) {
       writeJson(res, 200, await manager.getProxy(id));
       return;
     }
-    if (req.method === 'PATCH') {
-      writeJson(res, 200, await manager.patchProxy(id, await readJsonBody(req)));
-      return;
-    }
     if (req.method === 'DELETE') {
       writeJson(res, 200, await manager.deleteProxy(id));
       return;
     }
-    writeMethodNotAllowed(res, 'GET, PATCH, DELETE');
+    writeMethodNotAllowed(res, 'GET, DELETE');
+    return;
+  }
+  if (parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'rules') {
+    const id = decodeURIComponent(parts[2]);
+    if (req.method === 'PUT') {
+      writeJson(res, 200, await manager.replaceProxyRules(id, await readJsonBody(req)));
+      return;
+    }
+    writeMethodNotAllowed(res, 'PUT');
     return;
   }
   if (req.method === 'POST' && parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'stop') {
@@ -540,30 +541,28 @@ function validateCreateProxyRequest(input) {
   };
 }
 
-function validatePatchProxyRequest(input) {
+function validateReplaceProxyRulesRequest(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw httpError(400, 'proxy patch body must be an object');
+    throw httpError(400, 'proxy rules replacement body must be an object');
   }
-  const allowed = new Set(['rules']);
+  const allowed = new Set(['baseVersion', 'defaultRuleset', 'overrideRuleset']);
   for (const key of Object.keys(input)) {
-    if (!allowed.has(key)) throw httpError(400, `unknown proxy patch field: ${key}`);
+    if (!allowed.has(key)) throw httpError(400, `unknown proxy rules replacement field: ${key}`);
   }
-  if (!input.rules || typeof input.rules !== 'object' || Array.isArray(input.rules)) {
-    throw httpError(400, 'rules patch is required');
-  }
-  const { rules } = input;
-  const baseVersion = Number(rules.baseVersion);
+  const baseVersion = Number(input.baseVersion);
   if (!Number.isInteger(baseVersion) || baseVersion < 1) {
-    throw httpError(400, 'rules.baseVersion must be a positive integer');
+    throw httpError(400, 'baseVersion must be a positive integer');
   }
-  if (typeof rules.overrideRuleset !== 'string') {
-    throw httpError(400, 'rules.overrideRuleset must be a string');
+  if (typeof input.defaultRuleset !== 'string') {
+    throw httpError(400, 'defaultRuleset must be a string');
+  }
+  if (typeof input.overrideRuleset !== 'string') {
+    throw httpError(400, 'overrideRuleset must be a string');
   }
   return {
-    rules: {
-      baseVersion,
-      overrideRuleset: rules.overrideRuleset,
-    },
+    baseVersion,
+    defaultRuleset: input.defaultRuleset,
+    overrideRuleset: input.overrideRuleset,
   };
 }
 
@@ -646,6 +645,42 @@ function structuredRulesetToText(ruleset) {
 
 function makeWhistleRuleName(id) {
   return `pw-dev:${id}`;
+}
+
+async function replaceWhistleRules({ proxy, nextRules, applyRulesImpl, quiet }) {
+  const baseRuleName = `${proxy.whistleRuleName}.base`;
+  const apply = (ruleName, rulesText) => applyRulesImpl({
+    guiUrl: proxy.guiUrl,
+    ruleName,
+    rulesText,
+  });
+
+  // Keep a live backup under a separate Whistle project while replacing the
+  // active project. This avoids Whistle appending to the existing project.
+  await apply(baseRuleName, '');
+  await apply(baseRuleName, proxy.rules.effectiveRuleset);
+  try {
+    await apply(proxy.whistleRuleName, '');
+    await apply(proxy.whistleRuleName, nextRules.effectiveRuleset);
+  } catch (error) {
+    try {
+      await apply(proxy.whistleRuleName, '');
+      await apply(proxy.whistleRuleName, proxy.rules.effectiveRuleset);
+    } catch (restoreError) {
+      if (!quiet) {
+        console.error(`proxy rules rollback failed: ${proxy.id}: ${restoreError.message}`);
+      }
+    }
+    throw error;
+  } finally {
+    try {
+      await apply(baseRuleName, '');
+    } catch (cleanupError) {
+      if (!quiet) {
+        console.error(`proxy rules backup cleanup failed: ${proxy.id}: ${cleanupError.message}`);
+      }
+    }
+  }
 }
 
 async function applyWhistleProjectRules({ guiUrl, ruleName, rulesText }) {

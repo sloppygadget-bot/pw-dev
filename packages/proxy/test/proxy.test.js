@@ -364,7 +364,7 @@ test('proxy manager removes app-scoped proxies no longer referenced by an app', 
   }
 });
 
-test('manager patches managed proxy override rules without restarting Whistle', async () => {
+test('manager replaces managed proxy rules without restarting Whistle', async () => {
   const spawned = [];
   const appliedRules = [];
   const manager = createProxyManager({
@@ -376,34 +376,48 @@ test('manager patches managed proxy override rules without restarting Whistle', 
   });
 
   const created = await manager.createProxy({ id: 'whistle-main', ruleset: 'a b' });
-  const patched = await manager.patchProxy('whistle-main', {
-    rules: {
-      baseVersion: created.proxy.rules.version,
-      overrideRuleset: 'c d',
-    },
+  const replaced = await manager.replaceProxyRules('whistle-main', {
+    baseVersion: created.proxy.rules.version,
+    defaultRuleset: 'a b',
+    overrideRuleset: 'c d',
   });
 
   assert.equal(spawned.length, 1);
-  assert.equal(patched.proxy.rules.version, 2);
-  assert.equal(patched.proxy.rules.defaultRuleset, 'a b');
-  assert.equal(patched.proxy.rules.overrideRuleset, 'c d');
-  assert.equal(patched.proxy.rules.effectiveRuleset, 'a b\n\nc d');
+  assert.equal(replaced.proxy.rules.version, 2);
+  assert.equal(replaced.proxy.rules.defaultRuleset, 'a b');
+  assert.equal(replaced.proxy.rules.overrideRuleset, 'c d');
+  assert.equal(replaced.proxy.rules.effectiveRuleset, 'a b\n\nc d');
   assert.deepEqual(appliedRules, [{
     guiUrl: created.proxy.guiUrl,
     ruleName: 'pw-dev:whistle-main',
     rulesText: 'a b',
   }, {
     guiUrl: created.proxy.guiUrl,
+    ruleName: 'pw-dev:whistle-main.base',
+    rulesText: '',
+  }, {
+    guiUrl: created.proxy.guiUrl,
+    ruleName: 'pw-dev:whistle-main.base',
+    rulesText: 'a b',
+  }, {
+    guiUrl: created.proxy.guiUrl,
+    ruleName: 'pw-dev:whistle-main',
+    rulesText: '',
+  }, {
+    guiUrl: created.proxy.guiUrl,
     ruleName: 'pw-dev:whistle-main',
     rulesText: 'a b\n\nc d',
+  }, {
+    guiUrl: created.proxy.guiUrl,
+    ruleName: 'pw-dev:whistle-main.base',
+    rulesText: '',
   }]);
 
   await assert.rejects(
-    () => manager.patchProxy('whistle-main', {
-      rules: {
-        baseVersion: 1,
-        overrideRuleset: 'stale',
-      },
+    () => manager.replaceProxyRules('whistle-main', {
+      baseVersion: 1,
+      defaultRuleset: 'a b',
+      overrideRuleset: 'stale',
     }),
     /Managed proxy rules changed/
   );
@@ -432,15 +446,14 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     assert.equal(read.statusCode, 200);
     assert.equal(read.body.proxy.proxyUrl, created.body.proxy.proxyUrl);
 
-    const patched = await patchJson(`${server.origin}/_proxy/proxies/whistle-main`, {
-      rules: {
-        baseVersion: created.body.proxy.rules.version,
-        overrideRuleset: 'c d',
-      },
+    const replaced = await putJson(`${server.origin}/_proxy/proxies/whistle-main/rules`, {
+      baseVersion: created.body.proxy.rules.version,
+      defaultRuleset: created.body.proxy.rules.defaultRuleset,
+      overrideRuleset: 'c d',
     });
-    assert.equal(patched.statusCode, 200);
-    assert.equal(patched.body.proxy.rules.version, 2);
-    assert.equal(patched.body.proxy.rules.overrideRuleset, 'c d');
+    assert.equal(replaced.statusCode, 200);
+    assert.equal(replaced.body.proxy.rules.version, 2);
+    assert.equal(replaced.body.proxy.rules.overrideRuleset, 'c d');
 
     const status = await getJson(`${server.origin}/_proxy/status`);
     assert.equal(status.statusCode, 200);
@@ -524,8 +537,8 @@ function postJson(url, payload) {
   return requestJson(url, 'POST', payload);
 }
 
-function patchJson(url, payload) {
-  return requestJson(url, 'PATCH', payload);
+function putJson(url, payload) {
+  return requestJson(url, 'PUT', payload);
 }
 
 function deleteJson(url) {
