@@ -6,6 +6,8 @@ import {
   buildSshControlCheckArgs,
   buildSshControlMasterArgs,
   buildSshConfigArgs,
+  buildSshRemoteMachineArgs,
+  parseSshRemoteMachine,
   parseSshConfigValue,
   parseArgs,
   resolveSshControlPath,
@@ -156,6 +158,30 @@ test('parses SSH config values case-insensitively', () => {
   assert.equal(
     parseSshConfigValue('user test\ncontrolpath /tmp/control-abc\n', 'ControlPath'),
     '/tmp/control-abc'
+  );
+});
+
+test('builds and parses SSH remote machine probe data', () => {
+  assert.deepEqual(
+    buildSshRemoteMachineArgs({
+      target: 'user@code-server',
+      controlPath: '/tmp/control-%C',
+    }),
+    [
+      '-o',
+      'ControlPath=/tmp/control-%C',
+      'user@code-server',
+      'printf "hostname=%s\\n" "$(hostname 2>/dev/null || true)"; printf "addresses=%s\\n" "$(hostname -I 2>/dev/null || hostname -i 2>/dev/null || true)"; printf "platform=%s\\n" "$(uname -s 2>/dev/null || true)"; printf "release=%s\\n" "$(uname -r 2>/dev/null || true)"',
+    ]
+  );
+  assert.deepEqual(
+    parseSshRemoteMachine('hostname=code-server\naddresses=10.11.2.10 172.17.0.1\nplatform=Linux\nrelease=6.8.0\n'),
+    {
+      hostname: 'code-server',
+      addresses: ['10.11.2.10', '172.17.0.1'],
+      platform: 'Linux',
+      release: '6.8.0',
+    }
   );
 });
 

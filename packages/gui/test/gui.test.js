@@ -47,6 +47,8 @@ test('gui serves static app and read-only config', async () => {
     assert.equal(appScript.statusCode, 200);
     assert.match(appScript.body, /Related src app/);
     assert.match(appScript.body, /function showApp/);
+    assert.match(appScript.body, /Remote IP addresses/);
+    assert.match(appScript.body, /Remote OS \/ kernel/);
 
     const config = await getJson(`${server.origin}/api/config`);
     assert.equal(config.statusCode, 200);
@@ -191,6 +193,66 @@ test('gui snapshot keeps SSH topology reported through pw-dev server', async () 
     await gui.close();
     await pwdev.close();
     await broker.close();
+    await proxy.close();
+  }
+});
+
+test('gui snapshot discovers multiple brokers from server sessions', async () => {
+  const broker1 = await startJsonServer({
+    '/_broker/status': {
+      ok: true,
+      state: 'idle',
+      instanceCount: 0,
+      topology: { mode: 'ssh', remote: true },
+      instances: [],
+    },
+    '/_broker/networks': { ok: true, networks: [] },
+    '/_broker/proxy-forwards': { ok: true, forwards: [] },
+  });
+  const broker2 = await startJsonServer({
+    '/_broker/status': {
+      ok: true,
+      state: 'active',
+      instanceCount: 1,
+      topology: { mode: 'local', remote: false },
+      instances: [{ id: 'bkr_2' }],
+    },
+    '/_broker/networks': { ok: true, networks: [] },
+    '/_broker/proxy-forwards': { ok: true, forwards: [] },
+  });
+  const pwdev = await startJsonServer({
+    '/_pwdev/status': {
+      ok: true,
+      broker: { configured: true, reachable: true, url: broker1.origin },
+      manifest: { ok: true, id: 'main' },
+    },
+    '/_pwdev/apps': { ok: true, apps: [] },
+    '/_pwdev/sessions': {
+      ok: true,
+      sessions: [{ sessionId: 'session-2', brokerUrl: broker2.origin }],
+    },
+    '/_pwdev/proxies': { ok: true, proxies: [] },
+    '/_pwdev/networks': { ok: true, networks: [] },
+  });
+  const proxy = await startJsonServer({ '/_proxy/status': { ok: true, proxies: [] } });
+  const gui = await startPwDevGuiServer({
+    port: 0,
+    pwDevUrl: pwdev.origin,
+    brokerUrl: broker1.origin,
+    proxyManagerUrl: proxy.origin,
+  });
+
+  try {
+    const snapshot = await getJson(`${gui.origin}/api/snapshot`);
+    assert.equal(snapshot.statusCode, 200);
+    assert.equal(snapshot.body.brokers.length, 2);
+    assert.equal(snapshot.body.brokers[0].status.body.state, 'idle');
+    assert.equal(snapshot.body.brokers[1].status.body.state, 'active');
+  } finally {
+    await gui.close();
+    await pwdev.close();
+    await broker1.close();
+    await broker2.close();
     await proxy.close();
   }
 });

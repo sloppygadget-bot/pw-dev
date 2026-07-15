@@ -124,12 +124,13 @@ main {
 
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
   gap: 12px;
   margin-bottom: 18px;
 }
 
 .metric {
+  min-width: 0;
   min-height: 76px;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -148,6 +149,26 @@ main {
 
 .metric strong {
   font-size: 18px;
+}
+
+.metric-stack {
+  display: grid;
+  gap: 2px;
+  font-size: 18px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.metric-stack > div {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+}
+
+.metric-status {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
 }
 
 .layout {

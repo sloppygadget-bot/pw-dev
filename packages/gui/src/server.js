@@ -108,6 +108,9 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
     fetchJsonFrom(`${brokerUrl}/_broker/proxy-forwards`),
     fetchJsonFrom(`${proxyManagerUrl}/_proxy/status`),
   ]);
+  const brokerUrls = discoverBrokerUrls({ brokerUrl, serverStatus, apps, sessions });
+  const brokers = await Promise.all(brokerUrls.map((url) => collectBrokerSnapshot(url)));
+  const primaryBroker = brokers.find((broker) => broker.url === brokerUrl) ?? brokers[0];
   const [appServerStatuses, proxyStatuses] = await Promise.all([
     collectAppServerStatuses(apps.body?.apps),
     collectProxyStatuses(serverProxies.body?.proxies, proxyStatus.body?.proxies),
@@ -127,14 +130,46 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
       networks: serverNetworks,
     },
     broker: {
-      status: brokerStatus,
-      networks: brokerNetworks,
-      proxyForwards: brokerForwards,
+      status: primaryBroker?.status ?? brokerStatus,
+      networks: primaryBroker?.networks ?? brokerNetworks,
+      proxyForwards: primaryBroker?.proxyForwards ?? brokerForwards,
     },
+    brokers,
     proxyManager: {
       status: proxyStatus,
     },
   };
+}
+
+function discoverBrokerUrls({ brokerUrl, serverStatus, apps, sessions }) {
+  const urls = new Set();
+  const add = (value) => {
+    if (!value) return;
+    try {
+      const url = new URL(value);
+      if (url.protocol === 'http:' || url.protocol === 'https:') urls.add(url.origin);
+    } catch {
+      // Ignore stale or malformed session overrides.
+    }
+  };
+
+  add(brokerUrl);
+  add(serverStatus.body?.broker?.url);
+  for (const session of sessions.body?.sessions ?? []) add(session.brokerUrl);
+  for (const app of apps.body?.apps ?? []) {
+    add(app.brokerUrl);
+    for (const session of Object.values(app.browserSessions ?? {})) add(session?.brokerUrl);
+  }
+  return [...urls];
+}
+
+async function collectBrokerSnapshot(url) {
+  const [status, networks, proxyForwards] = await Promise.all([
+    fetchJsonFrom(`${url}/_broker/status`),
+    fetchJsonFrom(`${url}/_broker/networks`),
+    fetchJsonFrom(`${url}/_broker/proxy-forwards`),
+  ]);
+  return { url, status, networks, proxyForwards };
 }
 
 async function collectAppServerStatuses(apps) {

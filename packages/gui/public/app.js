@@ -16,6 +16,7 @@ const els = {
   refresh: document.querySelector('#refresh'),
   serverState: document.querySelector('#server-state'),
   brokerState: document.querySelector('#broker-state'),
+  sessionsState: document.querySelector('#sessions-state'),
   updatedAt: document.querySelector('#updated-at'),
   topologyCards: document.querySelector('#topology-cards'),
   topologyContext: document.querySelector('#topology-context'),
@@ -54,7 +55,7 @@ void init();
 async function init() {
   const config = await fetchJson('/api/config');
   state.pwDevUrl = config.pwDevUrl;
-  els.target.textContent = `server ${config.pwDevUrl} | broker ${config.brokerUrl} | proxy ${config.proxyManagerUrl}`;
+  els.target.textContent = 'agent-first dev scaffold';
   state.visualizers = await loadVisualizers();
   syncRendererButtons();
   await refresh();
@@ -126,6 +127,7 @@ function normalizeSnapshot(raw) {
   const proxyStatus = raw.proxyManager.status;
   const appServerStatuses = raw.server.appServerStatuses ?? [];
   const proxyStatuses = raw.server.proxyStatuses ?? [];
+  const brokerEntries = normalizeBrokerEntries(raw);
 
   const serverOk = status.ok && status.body?.ok;
   const appList = apps.ok && apps.body?.apps
@@ -165,6 +167,7 @@ function normalizeSnapshot(raw) {
     status,
     broker: status.body?.broker,
     brokerStatus,
+    brokers: brokerEntries,
     proxyStatus,
     apps: appList,
     appServerStatuses,
@@ -173,9 +176,31 @@ function normalizeSnapshot(raw) {
     proxyForwards,
     sessions,
     relationships,
-    errors: [status, apps, serverSessions, proxies, serverNetworks, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus].filter((item) => !item.ok),
+    errors: [status, apps, serverSessions, proxies, serverNetworks, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
     updatedAt: new Date(raw.collectedAt),
   };
+}
+
+function normalizeBrokerEntries(raw) {
+  const primaryViaServer = raw.server.status.body?.broker?.status;
+  const entries = Array.isArray(raw.brokers) && raw.brokers.length
+    ? raw.brokers
+    : [{
+      url: raw.urls?.brokerUrl,
+      status: raw.broker.status,
+      networks: raw.broker.networks,
+      proxyForwards: raw.broker.proxyForwards,
+    }];
+  return entries.map((entry) => ({
+    url: entry.url,
+    fetch: entry.status,
+    status: mergeBrokerStatus({
+      direct: entry.status?.ok ? entry.status.body : undefined,
+      viaServer: entry.url === raw.urls?.brokerUrl ? primaryViaServer : undefined,
+    }),
+    networks: entry.networks,
+    proxyForwards: entry.proxyForwards,
+  }));
 }
 
 function sessionsForApp(app) {
@@ -274,15 +299,25 @@ async function render(snapshot) {
   els.serverState.textContent = snapshot.serverOk ? 'Online' : 'Error';
   els.serverState.className = snapshot.serverOk ? 'good-text' : 'bad-text';
 
-  const brokerReachable = Boolean(snapshot.brokerStatus);
-  els.brokerState.textContent = brokerReachable ? brokerLabel(snapshot.brokerStatus) : 'Unreachable';
+  const brokerReachable = snapshot.brokers.some((broker) => broker.status);
+  els.brokerState.replaceChildren();
+  for (const [index, broker] of snapshot.brokers.entries()) {
+    const line = document.createElement('div');
+    line.textContent = `${index + 1}: ${brokerLabel(broker.status)}`;
+    line.className = `metric-status ${broker.status ? 'good-text' : 'bad-text'}`;
+    els.brokerState.append(line);
+  }
+  if (!snapshot.brokers.length) els.brokerState.textContent = 'None';
   els.brokerState.className = brokerReachable ? 'good-text' : 'bad-text';
+
+  els.sessionsState.textContent = `${snapshot.sessions.length} active`;
+  els.sessionsState.className = snapshot.sessions.length ? 'good-text' : 'good-text';
 
   els.updatedAt.textContent = snapshot.updatedAt.toLocaleTimeString();
 
   setCount('topology', topologyFlowCount(snapshot));
   setCount('apps', snapshot.apps.length);
-  setCount('broker', snapshot.brokerStatus ? 1 : 0);
+  setCount('broker', snapshot.brokers.length);
   setCount('sessions', snapshot.sessions.length);
   setCount('networks', snapshot.networks.length);
   setCount('proxies', snapshot.proxies.length);
@@ -297,7 +332,7 @@ async function render(snapshot) {
 }
 
 function brokerLabel(status) {
-  if (!status) return 'Reachable';
+  if (!status) return 'offline';
   const running = status.state === 'active' ? 'active' : 'idle';
   if (status.topology?.remote) {
     return `remote ${running}`;
@@ -406,21 +441,29 @@ function renderApps(apps, relationships, appServerStatuses) {
 }
 
 function renderBroker(snapshot) {
-  const broker = snapshot.brokerStatus;
-  const active = broker?.state === 'active';
-  renderCards(els.broker, broker ? [{
-    title: active ? 'Broker active' : 'Broker idle',
-    subtitle: snapshot.broker?.url,
-    badge: badge(active ? 'Active' : 'Idle', active ? 'good' : 'neutral'),
-    rows: {
-      URL: snapshot.broker?.url,
-      Topology: broker.topology?.mode,
-      Remote: broker.topology?.remote ? 'Yes' : 'No',
-      'SSH target': broker.topology?.ssh?.target,
-      Instances: broker.instanceCount ?? broker.instances?.length ?? 0,
-      Networks: networkLink(broker.networks),
-    },
-  }] : []);
+  renderCards(els.broker, snapshot.brokers.map((entry, index) => {
+    const broker = entry.status;
+    const active = broker?.state === 'active';
+    const remoteMachine = broker?.topology?.ssh?.remoteMachine;
+    const remoteOs = [remoteMachine?.platform, remoteMachine?.release].filter(Boolean).join(' ');
+    return {
+      title: `BROKER${index + 1}`,
+      subtitle: entry.url,
+      badge: badge(broker ? (active ? 'Active' : 'Idle') : 'Offline', broker ? (active ? 'good' : 'neutral') : 'bad'),
+      rows: {
+        URL: entry.url,
+        Topology: broker?.topology?.mode,
+        Remote: broker?.topology?.remote ? 'Yes' : 'No',
+        'SSH target': broker?.topology?.ssh?.target,
+        'Remote hostname': remoteMachine?.hostname,
+        'Remote IP addresses': joinList(remoteMachine?.addresses),
+        'Remote OS / kernel': remoteOs,
+        'Remote machine probe': remoteMachine?.error,
+        Instances: broker?.instanceCount ?? broker?.instances?.length ?? 0,
+        Networks: networkLink(broker?.networks),
+      },
+    };
+  }));
 }
 
 function renderSessions(sessions, relationships) {
@@ -1291,6 +1334,12 @@ function formatBrokerNodeLabel(snapshot, sessions = []) {
   if (sessions.length) lines.push('Session: app ⇔ browser');
   if (status.instances?.length) lines.push(`${status.instances.length} browser${status.instances.length === 1 ? '' : 's'}`);
   if (status.topology?.ssh?.target) lines.push(status.topology.ssh.target);
+  const remoteMachine = status.topology?.ssh?.remoteMachine;
+  if (remoteMachine?.hostname) lines.push(remoteMachine.hostname);
+  if (remoteMachine?.addresses?.length) lines.push(remoteMachine.addresses.join(', '));
+  if (remoteMachine?.platform || remoteMachine?.release) {
+    lines.push([remoteMachine.platform, remoteMachine.release].filter(Boolean).join(' '));
+  }
   if (status.state === 'idle') lines.push('idle');
   return lines.join('\n');
 }

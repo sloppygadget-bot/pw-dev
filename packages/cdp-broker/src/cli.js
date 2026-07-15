@@ -114,6 +114,20 @@ export async function main(argv) {
     });
   }
 
+  let sshRemoteMachine;
+  if (options.ssh) {
+    ensureSshControlMaster({
+      target: options.ssh,
+      controlPersist: sshControlPersist,
+      controlPath: sshControlPath,
+      quiet: Boolean(options.quiet),
+    });
+    sshRemoteMachine = inspectSshRemoteMachine({
+      target: options.ssh,
+      controlPath: sshControlPath,
+    });
+  }
+
   server = createBrokerServer({
     browserManager,
     proxyForwardManager,
@@ -125,6 +139,7 @@ export async function main(argv) {
         target: options.ssh,
         remotePort: brokerRemotePort,
         controlPersist: sshControlPersist,
+        remoteMachine: sshRemoteMachine,
       },
     } : undefined,
   });
@@ -151,12 +166,6 @@ export async function main(argv) {
   }
 
   if (options.ssh) {
-    ensureSshControlMaster({
-      target: options.ssh,
-      controlPersist: sshControlPersist,
-      controlPath: sshControlPath,
-      quiet: Boolean(options.quiet),
-    });
     const ssh = startSshTunnel({
       target: options.ssh,
       localPort: brokerPort,
@@ -412,6 +421,56 @@ export function resolveSshControlPath({ target, controlPath, spawnSyncImpl = spa
   });
   if (result.error || result.status !== 0) return undefined;
   return parseSshConfigValue(result.stdout, 'controlpath');
+}
+
+export function buildSshRemoteMachineArgs({ target, controlPath }) {
+  return [
+    '-o',
+    `ControlPath=${controlPath}`,
+    target,
+    [
+      'printf "hostname=%s\\n" "$(hostname 2>/dev/null || true)"',
+      'printf "addresses=%s\\n" "$(hostname -I 2>/dev/null || hostname -i 2>/dev/null || true)"',
+      'printf "platform=%s\\n" "$(uname -s 2>/dev/null || true)"',
+      'printf "release=%s\\n" "$(uname -r 2>/dev/null || true)"',
+    ].join('; '),
+  ];
+}
+
+export function parseSshRemoteMachine(output) {
+  const values = {};
+  for (const line of String(output ?? '').split(/\r?\n/)) {
+    const separator = line.indexOf('=');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator);
+    const value = line.slice(separator + 1).trim();
+    if (value) values[key] = value;
+  }
+
+  const remoteMachine = {
+    hostname: values.hostname,
+    addresses: values.addresses?.split(/\s+/).filter(Boolean),
+    platform: values.platform,
+    release: values.release,
+  };
+  return Object.fromEntries(
+    Object.entries(remoteMachine).filter(([, value]) =>
+      Array.isArray(value) ? value.length > 0 : value !== undefined
+    )
+  );
+}
+
+function inspectSshRemoteMachine({ target, controlPath }) {
+  const result = spawnSync('ssh', buildSshRemoteMachineArgs({ target, controlPath }), {
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  if (result.error || result.status !== 0) {
+    return {
+      error: result.error?.message || String(result.stderr || '').trim() || 'Remote machine probe failed',
+    };
+  }
+  return parseSshRemoteMachine(result.stdout);
 }
 
 export function buildSshControlCheckArgs({ target, controlPath }) {
