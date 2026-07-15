@@ -319,6 +319,51 @@ test('proxy manager recovers registered Whistle profiles on startup', async () =
   }
 });
 
+test('proxy manager removes app-scoped proxies no longer referenced by an app', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-unreferenced-'));
+  const storageDir = path.join(w2StorageRoot, 'unreferenced-whistle');
+  fs.mkdirSync(storageDir, { recursive: true });
+  const killed = [];
+  const registryClient = fakeRegistryClient({
+    apps: [{ id: 'checkout', proxyId: 'another-proxy' }],
+    proxies: [{
+      id: 'unreferenced-whistle',
+      appId: 'checkout',
+      proxyUrl: 'http://127.0.0.1:8899',
+      guiUrl: 'http://127.0.0.1:9800',
+      storageDir,
+      proxyPort: 8899,
+      uiPort: 9800,
+      managed: true,
+    }],
+  });
+  const manager = createProxyManager({
+    quiet: true,
+    w2StorageRoot,
+    registryClient,
+    processListImpl: async () => [{
+      pid: 4002,
+      commandLine: `node whistle.js run -p 8899 --uiport 9800 -S ${storageDir}`,
+    }],
+    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+  });
+
+  try {
+    const server = await startProxyManagerServer({ manager, port: 0 });
+    const status = await getJson(`${server.origin}/_proxy/status`);
+    assert.deepEqual(status.body.proxies, []);
+    assert.deepEqual(killed, [{ pid: 4002, signal: 'SIGTERM' }]);
+    assert.deepEqual(registryClient.deletes, ['unreferenced-whistle']);
+    assert.deepEqual(registryClient.appPatches, [{
+      id: 'checkout',
+      patch: { proxyId: null },
+    }]);
+    await server.close();
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
 test('manager patches managed proxy override rules without restarting Whistle', async () => {
   const spawned = [];
   const appliedRules = [];
@@ -416,6 +461,9 @@ function fakeRegistryClient({ apps = [], proxies = [] } = {}) {
     appPatches: [],
     apps,
     proxies,
+    async listApps() {
+      return this.apps;
+    },
     async listProxies() {
       return this.proxies;
     },
@@ -432,6 +480,7 @@ function fakeRegistryClient({ apps = [], proxies = [] } = {}) {
     },
     async deleteProxy(id) {
       this.deletes.push(id);
+      this.proxies = this.proxies.filter((proxy) => proxy.id !== id);
     },
   };
   return client;

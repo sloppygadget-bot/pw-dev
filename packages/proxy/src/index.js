@@ -394,6 +394,10 @@ async function handleProxyManagerRequest({ req, res, manager }) {
 export function createPwDevRegistryClient({ serverUrl = DEFAULT_PW_DEV_SERVER_URL } = {}) {
   const baseUrl = normalizeHttpUrl(serverUrl, 'serverUrl');
   return {
+    async listApps() {
+      const payload = await requestJson(new URL('/_pwdev/apps', ensureTrailingSlash(baseUrl)));
+      return payload.apps;
+    },
     async listProxies() {
       const payload = await requestJson(new URL('/_pwdev/proxies', ensureTrailingSlash(baseUrl)));
       return payload.proxies;
@@ -773,6 +777,21 @@ async function recoverRegisteredProxies({
     return { ok: false, recovered: [], stale: [] };
   }
 
+  let appProxyReferences;
+  if (registryClient.listApps) {
+    try {
+      const apps = await registryClient.listApps() ?? [];
+      appProxyReferences = new Set(
+        apps
+          .map((app) => app?.proxyId)
+          .filter((proxyId) => typeof proxyId === 'string' && proxyId.length > 0)
+      );
+    } catch (error) {
+      if (!quiet) console.error(`proxy app reference lookup failed: ${error.message}`);
+      return { ok: false, recovered: [], stale: [] };
+    }
+  }
+
   const processByStorageDir = new Map();
   for (const processInfo of processes) {
     const storageDir = extractManagedStorageDir(processInfo.commandLine, path.resolve(root));
@@ -785,6 +804,11 @@ async function recoverRegisteredProxies({
   const stale = [];
   for (const registered of registryProxies) {
     if (!registered?.managed || !registered.storageDir) continue;
+    if (registered.appId && appProxyReferences && !appProxyReferences.has(registered.id)) {
+      stale.push(registered.id);
+      await removeStaleRegistryRecord(registered, registryClient, quiet);
+      continue;
+    }
     const storageDir = path.resolve(registered.storageDir);
     if (!isWithinRoot(storageDir, root)) continue;
     const processInfo = processByStorageDir.get(storageDir);
@@ -1054,6 +1078,7 @@ function httpError(statusCode, message, details) {
 
 /**
  * @typedef {object} PwDevRegistryClient
+ * @property {() => Promise<Record<string, any>[]>} listApps
  * @property {(proxy: Record<string, any>) => Promise<Record<string, any>>} updateProxy
  * @property {() => Promise<Record<string, any>[]>} listProxies
  * @property {(id: string, patch: Record<string, any>) => Promise<Record<string, any>>} updateApp
