@@ -325,6 +325,27 @@ test('server persists app metadata but not browser runtime state across restart'
   }
 });
 
+test('server persists browser templates and rematerializes their network before start', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const broker = await startMockBroker();
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, { id: 'checkout-tax', appUrl: 'http://127.0.0.1:5174' });
+    await postJson(`${server.origin}/_pwdev/networks`, { id: 'agent-whistle', proxy: { mode: 'none' } });
+    const created = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'checkout-tax-browser', appId: 'checkout-tax', networkId: 'agent-whistle', ignoreSslErrors: true,
+    });
+    assert.equal(created.statusCode, 200);
+    const started = await postJson(`${server.origin}/_pwdev/browsers/checkout-tax-browser/start`, {});
+    assert.equal(started.statusCode, 200);
+    assert.equal(started.body.browser.runtime.instanceId, 'bkr_checkout-tax-browser');
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server manages reusable proxy registrations', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({

@@ -52,6 +52,20 @@ Network definitions persist in `<worktree>/.pw-dev/networks.json`; when a
 broker is reachable, the server restores those definitions before a network is
 used for a browser start.
 
+Browser templates persist in `<worktree>/.pw-dev/browsers.json`. A template
+contains `id`, `appId`, optional `profile`, `networkId`, `proxyId`, broker
+override, and browser launch options. Its live broker instance is transient:
+after a broker restart, start the same template again rather than recreating
+its configuration.
+
+```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
+  -H 'content-type: application/json' \
+  -d '{"id":"checkout-tax","appId":"checkout-tax","networkId":"agent-whistle","ignoreSslErrors":true}'
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop
+```
+
 Managed proxy configuration and rules are stored in each proxy's Whistle
 profile directory. The proxy manager reloads those profiles as stopped proxies
 after restart; use the server-proxied lifecycle endpoints to start them again:

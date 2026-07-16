@@ -61,6 +61,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} appRegistryFile Durable app registry JSON path. Defaults to `<worktree>/.pw-dev/apps.json`.
  * @property {string=} networkRegistryFile Durable broker network JSON path. Defaults to `<worktree>/.pw-dev/networks.json`.
  * @property {string=} proxyRegistryFile Durable proxy registry JSON path. Defaults to `<worktree>/.pw-dev/proxies.json`.
+ * @property {string=} browserRegistryFile Durable browser template JSON path. Defaults to `<worktree>/.pw-dev/browsers.json`.
  * @property {boolean=} registerDefaultApp Register the root manifest in `/_pwdev/apps`. Defaults to false.
  */
 
@@ -283,14 +284,19 @@ export async function startPwDevServer(options = {}) {
   const networks = createNetworkRegistry(loadPersistedNetworks(networkRegistryFile), {
     persist: (registeredNetworks) => persistNetworks(networkRegistryFile, registeredNetworks),
   });
+  const browserRegistryFile = path.resolve(options.browserRegistryFile ?? path.join(worktree, '.pw-dev', 'browsers.json'));
+  const browsers = createBrowserRegistry(loadPersistedBrowsers(browserRegistryFile), {
+    persist: (registeredBrowsers) => persistRegistryFile(browserRegistryFile, { version: 1, browsers: registeredBrowsers }),
+  });
+  const browserRuntime = new Map();
   const proxyRegistryFile = path.resolve(options.proxyRegistryFile ?? path.join(worktree, '.pw-dev', 'proxies.json'));
   const proxies = createProxyRegistry(loadPersistedProxies(proxyRegistryFile), {
     persist: (registeredProxies) => persistProxies(proxyRegistryFile, registeredProxies),
   });
   const sessions = createSessionRegistry();
   let networksRestored = false;
-  const restoreNetworks = async () => {
-    if (networksRestored) return;
+  const restoreNetworks = async (force = false) => {
+    if (networksRestored && !force) return;
     for (const network of networks.list()) {
       await brokerJson(broker.summary().url, '/_broker/networks', { method: 'POST', body: network });
     }
@@ -301,7 +307,7 @@ export async function startPwDevServer(options = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, networks, restoreNetworks, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, networks, restoreNetworks, browsers, browserRuntime, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -389,7 +395,7 @@ export async function startPwDevServer(options = {}) {
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, networks, restoreNetworks, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, networks, restoreNetworks, browsers, browserRuntime, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -426,8 +432,13 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
     return;
   }
 
+  if (requestUrl.pathname === '/_pwdev/browsers' || requestUrl.pathname.startsWith('/_pwdev/browsers/')) {
+    await handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, browserRuntime, proxies, broker, serverUrl, restoreNetworks, writeBody });
+    return;
+  }
+
   if (requestUrl.pathname.startsWith('/_pwdev/apps')) {
-    if (requestUrl.pathname.endsWith('/browser/start')) await restoreNetworks();
+    if (requestUrl.pathname.endsWith('/browser/start')) await restoreNetworks(true);
     await handleAppsRequest({ req, res, requestUrl, apps, proxies, sessions, broker, serverUrl, writeBody });
     return;
   }
@@ -705,6 +716,40 @@ function persistNetworks(networkRegistryFile, networks) {
 function persistedNetwork(network) {
   const { resolved: _resolved, createdAt: _createdAt, updatedAt: _updatedAt, inUseBy: _inUseBy, ...persistent } = network;
   return persistent;
+}
+
+function createBrowserRegistry(initialBrowsers = [], options = {}) {
+  const browsers = new Map(initialBrowsers.map((browser) => [browser.id, browser]));
+  const persist = () => options.persist?.(Array.from(browsers.values()));
+  return {
+    list: () => Array.from(browsers.values()).sort((a, b) => a.id.localeCompare(b.id)).map((browser) => ({ ...browser })),
+    get: (id) => browsers.has(id) ? { ...browsers.get(id) } : undefined,
+    upsert(raw) {
+      const browser = validateBrowserTemplate(raw);
+      const existing = browsers.get(browser.id);
+      const saved = { ...existing, ...browser, updatedAt: new Date().toISOString() };
+      if (!existing?.createdAt) saved.createdAt = saved.updatedAt;
+      browsers.set(saved.id, saved);
+      persist();
+      return { ...saved };
+    },
+    delete(id) {
+      const deleted = browsers.delete(id);
+      if (deleted) persist();
+      return deleted;
+    },
+  };
+}
+
+function loadPersistedBrowsers(file) {
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'));
+    if (!parsed || !Array.isArray(parsed.browsers)) throw new Error('expected an object with a browsers array');
+    return parsed.browsers.map(validateBrowserTemplate);
+  } catch (error) {
+    throw new Error(`Could not load browser registry ${file}: ${error.message}`);
+  }
 }
 
 /** @param {string} proxyRegistryFile @returns {Record<string, unknown>[]} */
@@ -1169,6 +1214,75 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
  * }} options
  * @returns {Promise<void>}
  */
+async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, browserRuntime, proxies, broker, serverUrl, restoreNetworks, writeBody }) {
+  const parts = requestUrl.pathname.split('/').filter(Boolean);
+  if (parts.length === 2) {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      writeJson(res, 200, { ok: true, browsers: browsers.list().map((browser) => ({ ...browser, runtime: browserRuntime.get(browser.id) })) }, writeBody);
+      return;
+    }
+    if (req.method === 'POST') {
+      const browser = browsers.upsert(await readJsonBody(req));
+      writeJson(res, 200, { ok: true, browser });
+      return;
+    }
+  }
+  const id = parts[2] ? decodeURIComponent(parts[2]) : undefined;
+  const template = id ? browsers.get(id) : undefined;
+  if (!id || !template) {
+    writeJson(res, 404, { ok: false, error: `Unknown browser template: ${id}` }, writeBody);
+    return;
+  }
+  if (parts.length === 3 && (req.method === 'GET' || req.method === 'HEAD')) {
+    writeJson(res, 200, { ok: true, browser: { ...template, runtime: browserRuntime.get(id) } }, writeBody);
+    return;
+  }
+  if (parts.length === 3 && req.method === 'DELETE') {
+    browsers.delete(id);
+    browserRuntime.delete(id);
+    writeJson(res, 200, { ok: true, id }, writeBody);
+    return;
+  }
+  const action = parts[3];
+  if (parts.length === 4 && action === 'start' && req.method === 'POST') {
+    const app = apps.get(template.appId);
+    if (!app) throwValidationError(`Unknown app for browser template: ${template.appId}`);
+    await restoreNetworks(true);
+    const brokerUrl = broker.resolve(template.brokerUrl ?? app.brokerUrl);
+    const network = template.networkId ? { networkId: template.networkId } : {};
+    const proxy = network.networkId ? {} : resolveProxyForBrowserStart({ proxies, proxyId: template.proxyId ?? app.proxyId });
+    const start = await brokerJson(brokerUrl, '/_broker/start', {
+      method: 'POST',
+      body: omitUndefined({
+        profile: template.profile ?? template.id,
+        networkId: network.networkId,
+        proxyServer: proxy.proxyServer,
+        proxyForwardId: proxy.proxyForwardId,
+        ignoreSslErrors: template.ignoreSslErrors,
+        proxyBypassList: template.proxyBypassList,
+        headless: template.headless,
+        resetProfile: template.resetProfile,
+      }),
+    });
+    const runtime = { instanceId: start.instanceId, brokerUrl, cdpUrl: rewriteBrokerUrlToServerProxy(start.cdpUrl, serverUrl), startedAt: start.startedAt };
+    browserRuntime.set(id, runtime);
+    writeJson(res, 200, { ok: true, browser: { ...template, runtime }, start: { ...start, cdpUrl: runtime.cdpUrl } }, writeBody);
+    return;
+  }
+  if (parts.length === 4 && action === 'stop' && req.method === 'POST') {
+    const runtime = browserRuntime.get(id);
+    if (!runtime?.instanceId) {
+      writeJson(res, 200, { ok: true, browser: { ...template }, alreadyStopped: true }, writeBody);
+      return;
+    }
+    const stop = await brokerJson(runtime.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: runtime.instanceId } });
+    browserRuntime.delete(id);
+    writeJson(res, 200, { ok: true, browser: template, stop }, writeBody);
+    return;
+  }
+  writeJson(res, 404, { ok: false, error: 'Unknown browser template endpoint' }, writeBody);
+}
+
 async function handleAppsRequest({ req, res, requestUrl, apps, proxies, sessions, broker, serverUrl, writeBody }) {
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
 
@@ -2017,6 +2131,29 @@ function validateAppRegistration(rawApp) {
     updatedAt: optionalString(rawApp.updatedAt, 'updatedAt'),
   };
   return omitUndefined(app);
+}
+
+function validateBrowserTemplate(rawBrowser) {
+  if (!rawBrowser || typeof rawBrowser !== 'object' || Array.isArray(rawBrowser)) {
+    throwValidationError('browser template must be an object');
+  }
+  const id = requiredString(rawBrowser.id, 'id');
+  const appId = requiredString(rawBrowser.appId, 'appId');
+  const profile = optionalString(rawBrowser.profile, 'profile');
+  if (profile) validateBrowserProfileName(profile, 'profile');
+  return omitUndefined({
+    id,
+    appId,
+    name: optionalString(rawBrowser.name, 'name'),
+    profile,
+    brokerUrl: optionalString(rawBrowser.brokerUrl, 'brokerUrl'),
+    networkId: optionalString(rawBrowser.networkId, 'networkId'),
+    proxyId: optionalString(rawBrowser.proxyId, 'proxyId'),
+    proxyBypassList: optionalString(rawBrowser.proxyBypassList, 'proxyBypassList'),
+    ignoreSslErrors: rawBrowser.ignoreSslErrors === undefined ? undefined : Boolean(rawBrowser.ignoreSslErrors),
+    headless: rawBrowser.headless === undefined ? undefined : Boolean(rawBrowser.headless),
+    resetProfile: rawBrowser.resetProfile === undefined ? undefined : Boolean(rawBrowser.resetProfile),
+  });
 }
 
 function validateAppPatch(rawPatch) {

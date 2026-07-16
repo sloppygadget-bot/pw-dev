@@ -438,6 +438,7 @@ function renderApps(apps, relationships) {
       Branch: app.branch,
       Network: app.networkId,
       Proxy: app.proxyId,
+      README: app.readme ? copyableText(app.readme) : undefined,
       Sessions: related(relationships, 'app', app.id),
       CDP: app.cdpUrl,
       Worktree: app.worktree,
@@ -1388,6 +1389,30 @@ function renderCards(root, cards) {
           value.onClick();
         });
         dd.append(link);
+      } else if (isCopyableText(value)) {
+        const text = document.createElement('span');
+        text.className = 'ellipsis-text';
+        text.textContent = value.text;
+        text.title = value.text;
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'copy-button';
+        copy.textContent = 'Copy';
+        copy.title = 'Copy full README text';
+        copy.addEventListener('click', async () => {
+          copy.disabled = true;
+          try {
+            await copyText(value.text);
+            copy.textContent = 'Copied';
+          } finally {
+            window.setTimeout(() => {
+              copy.textContent = 'Copy';
+              copy.disabled = false;
+            }, 1000);
+          }
+        });
+        dd.className = 'copyable-value';
+        dd.append(text, copy);
       } else {
         dd.className = looksCodeLike(value) ? 'mono' : '';
         dd.textContent = String(value);
@@ -1420,6 +1445,29 @@ function renderCards(root, cards) {
 
 function isCardLink(value) {
   return typeof value === 'object' && value !== null && value.link === true;
+}
+
+function copyableText(text) {
+  return { copyableText: true, text };
+}
+
+function isCopyableText(value) {
+  return typeof value === 'object' && value !== null && value.copyableText === true;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.append(input);
+  input.select();
+  document.execCommand('copy');
+  input.remove();
 }
 
 function emptyState(message = 'No records') {
