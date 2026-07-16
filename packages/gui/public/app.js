@@ -22,6 +22,7 @@ const els = {
   topologyContext: document.querySelector('#topology-context'),
   apps: document.querySelector('#apps-list'),
   broker: document.querySelector('#broker-list'),
+  browsers: document.querySelector('#browsers-list'),
   sessions: document.querySelector('#sessions-list'),
   networks: document.querySelector('#networks-list'),
   proxies: document.querySelector('#proxies-list'),
@@ -160,6 +161,13 @@ function normalizeSnapshot(raw) {
     }))
     : appList.flatMap((app) => sessionsForApp(app));
   const relationships = computeRelationships({ apps: appList, sessions, proxies: proxyList, networks: networkList, proxyForwards, brokerStatus });
+  const browsers = brokerEntries.flatMap((entry, brokerIndex) =>
+    (entry.status?.instances ?? []).map((instance) => ({
+      ...instance,
+      brokerUrl: entry.url,
+      brokerIndex: brokerIndex + 1,
+    }))
+  );
 
   return {
     serverOk,
@@ -167,6 +175,7 @@ function normalizeSnapshot(raw) {
     broker: status.body?.broker,
     brokerStatus,
     brokers: brokerEntries,
+    browsers,
     proxyStatus,
     apps: appList,
     proxies: proxyList,
@@ -299,7 +308,7 @@ async function render(snapshot) {
   els.brokerState.replaceChildren();
   for (const [index, broker] of snapshot.brokers.entries()) {
     const line = document.createElement('div');
-    line.textContent = `${index + 1}: ${brokerLabel(broker.status)}`;
+    line.textContent = `${index + 1} ${brokerLabel(broker.status)}`;
     line.className = `metric-status ${broker.status ? 'good-text' : 'bad-text'}`;
     els.brokerState.append(line);
   }
@@ -314,6 +323,7 @@ async function render(snapshot) {
   setCount('topology', topologyFlowCount(snapshot));
   setCount('apps', snapshot.apps.length);
   setCount('broker', snapshot.brokers.length);
+  setCount('browsers', snapshot.browsers.length);
   setCount('sessions', snapshot.sessions.length);
   setCount('networks', snapshot.networks.length);
   setCount('proxies', snapshot.proxies.length);
@@ -322,6 +332,7 @@ async function render(snapshot) {
   if (token !== state.renderToken) return;
   renderApps(snapshot.apps, snapshot.relationships);
   renderBroker(snapshot);
+  renderBrowsers(snapshot.browsers, snapshot.sessions);
   renderSessions(snapshot.sessions, snapshot.relationships);
   renderNetworks(snapshot.networks, snapshot.relationships);
   renderProxies(snapshot.proxies, snapshot.relationships);
@@ -455,6 +466,26 @@ function renderBroker(snapshot) {
         'Remote machine probe': remoteMachine?.error,
         Instances: broker?.instanceCount ?? broker?.instances?.length ?? 0,
         Networks: networkLink(broker?.networks),
+      },
+    };
+  }));
+}
+
+function renderBrowsers(browsers, sessions) {
+  renderCards(els.browsers, browsers.map((browser) => {
+    const relatedSessions = sessions.filter((session) => session.browserInstanceId === browser.id);
+    return {
+      title: browser.id,
+      subtitle: `BROKER${browser.brokerIndex}`,
+      badge: badge('Running', 'good'),
+      rows: {
+        Profile: browser.profile,
+        Network: browser.networkId,
+        'Proxy server': browser.proxyServer,
+        'SSH proxy mapping': browser.proxyForwardId ? 'active' : undefined,
+        'Proxy forward': browser.proxyForwardId,
+        Sessions: relatedSessions.map((session) => session.sessionId).join(', ') || undefined,
+        Started: formatDate(browser.startedAt),
       },
     };
   }));

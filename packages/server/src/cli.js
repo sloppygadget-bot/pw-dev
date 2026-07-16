@@ -111,6 +111,8 @@ export function parseArgs(argv) {
       options.branch = readValue(argv, ++i, arg);
     } else if (arg === '--app-url') {
       options.appUrl = readValue(argv, ++i, arg);
+    } else if (arg === '--app-registry-file') {
+      options.appRegistryFile = path.resolve(readValue(argv, ++i, arg));
     } else if (arg === '--broker-url') {
       options.brokerUrl = readValue(argv, ++i, arg);
     } else if (arg === '--proxy-manager-url') {
@@ -164,6 +166,8 @@ Options:
   --worktree <dir> Worktree path for /_pwdev/manifest. Default: root
   --branch <name>  Branch name for /_pwdev/manifest
   --app-url <url>  App URL. Default: this server origin
+  --app-registry-file <file>
+                  Durable app registry. Default: <worktree>/.pw-dev/apps.json
   --broker-url <url>
                   Broker URL. Default: http://127.0.0.1:18080
   --proxy-manager-url <url>

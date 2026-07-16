@@ -105,6 +105,14 @@ By default the server probes the broker at `http://127.0.0.1:18080`. Use
 The server does not auto-register its root manifest in `/_pwdev/apps`.
 Register apps explicitly with `POST /_pwdev/apps`; use
 `--register-default-app` only for the older single-app convenience mode.
+App registrations persist under `<worktree>/.pw-dev/apps.json` by default,
+while active browser sessions remain broker-owned and are not restored after a
+server restart. Use an app registration's `readme` field for agent operating
+instructions, including devserver/environment setup and, when relevant, the
+proxy-rule template and composition method.
+Managed proxy rules and configuration live in that proxy's Whistle profile
+directory. Control a persisted managed proxy through
+`POST /_pwdev/proxy/proxies/:id/start`, `.../:id/stop`, or `.../:id/restart`.
 
 The server starts the local proxy manager lazily on the first proxied proxy
 operation and stops it with the server on `http://127.0.0.1:9697`. Use
@@ -172,6 +180,7 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
     "worktree": "/home/me/work/fortisase",
     "branch": "main",
     "appUrl": "https://dev.fortisase-sovereign.com",
+    "readme": "Run npm run dev before testing. Copy .env.example to .env.local.",
     "accounts": {
       "login": {
         "usr": "xxx",

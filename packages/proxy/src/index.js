@@ -50,10 +50,19 @@ export function createProxyManager(options = {}) {
   const killProcessImpl = options.killProcessImpl ?? ((pid, signal) => process.kill(pid, signal));
   const quiet = Boolean(options.quiet);
   const proxies = new Map();
+  let profilesLoaded = false;
+  const ensureProfilesLoaded = async () => {
+    if (profilesLoaded) return;
+    profilesLoaded = true;
+    for (const profile of await loadProxyProfiles(w2StorageRoot, whistle, quiet)) {
+      proxies.set(profile.id, profile);
+    }
+  };
 
   return {
     serverUrl,
     async status() {
+      await ensureProfilesLoaded();
       return {
         ok: true,
         serverUrl,
@@ -66,14 +75,17 @@ export function createProxyManager(options = {}) {
       };
     },
     async listProxies() {
+      await ensureProfilesLoaded();
       return { ok: true, proxies: listProcessRecords(proxies) };
     },
     async getProxy(id) {
+      await ensureProfilesLoaded();
       const proxy = proxies.get(id);
       if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
       return { ok: true, proxy: stripChild(proxy) };
     },
     async createProxy(input) {
+      await ensureProfilesLoaded();
       const request = validateCreateProxyRequest(input);
       if (proxies.has(request.id)) {
         throw httpError(409, `Managed proxy already exists: ${request.id}`);
@@ -94,7 +106,8 @@ export function createProxyManager(options = {}) {
         name: 'uiPort',
       });
 
-      const storageDir = await createProxyStorageDir({ root: w2StorageRoot, id: request.id });
+      const storageDir = request.storageDir ?? await createProxyStorageDir({ root: w2StorageRoot, id: request.id });
+      if (request.storageDir) await fs.mkdir(storageDir, { recursive: true });
       const { rulesetFile } = await writeRuleset({ storageDir, ruleset: request.ruleset });
       const rules = createManagedRuleState({
         defaultRuleset: normalizeRulesetText(request.ruleset),
@@ -140,13 +153,11 @@ export function createProxyManager(options = {}) {
       });
       proxies.set(request.id, record);
       child.once?.('error', (error) => {
-        proxies.delete(request.id);
-        void cleanupManagedProxy(record, quiet, registryClient);
+        markProxyStopped(record);
         if (!quiet) console.error(`proxy process failed: ${request.id}: ${error.message}`);
       });
       child.once?.('exit', (code, signal) => {
-        proxies.delete(request.id);
-        void cleanupManagedProxy(record, quiet, registryClient);
+        markProxyStopped(record);
         if (!quiet) console.error(`proxy process exited: ${request.id} code=${code} signal=${signal}`);
       });
       record.child = child;
@@ -182,6 +193,7 @@ export function createProxyManager(options = {}) {
           app = await registryClient.updateApp(request.appId, { proxyId: request.id });
         }
         await writeManagedRuleFiles({ storageDir, rules });
+        await writeProxyProfile(record);
       } catch (error) {
         child.kill?.('SIGTERM');
         proxies.delete(request.id);
@@ -249,9 +261,56 @@ export function createProxyManager(options = {}) {
       proxy.rules = nextRules;
       proxy.updatedAt = nextRules.updatedAt;
       await writeManagedRuleFiles({ storageDir: proxy.storageDir, rules: nextRules });
+      await writeProxyProfile(proxy);
       return { ok: true, proxy: stripChild(proxy) };
     },
+    async startProxy(id) {
+      await ensureProfilesLoaded();
+      const stored = proxies.get(id);
+      if (!stored) throw httpError(404, `Unknown managed proxy: ${id}`);
+      if (stored.running) return { ok: true, proxy: stripChild(stored), alreadyRunning: true };
+      proxies.delete(id);
+      try {
+        const started = await this.createProxy({
+          id: stored.id,
+          name: stored.name,
+          appId: stored.appId,
+          taskId: stored.taskId,
+          owner: stored.owner,
+          purpose: stored.purpose,
+          labels: stored.labels,
+          ruleset: stored.rules?.defaultRuleset ?? '',
+          proxyPort: stored.proxyPort,
+          uiPort: stored.uiPort,
+          storageDir: stored.storageDir,
+        });
+        if (!stored.rules?.overrideRuleset) return started;
+        return this.replaceProxyRules(id, {
+          baseVersion: started.proxy.rules.version,
+          defaultRuleset: started.proxy.rules.defaultRuleset,
+          overrideRuleset: stored.rules.overrideRuleset,
+        });
+      } catch (error) {
+        proxies.set(id, stored);
+        throw error;
+      }
+    },
+    async stopProxy(id) {
+      await ensureProfilesLoaded();
+      const proxy = proxies.get(id);
+      if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
+      if (!proxy.running) return { ok: true, proxy: stripChild(proxy), alreadyStopped: true };
+      proxy.child?.kill?.('SIGTERM');
+      markProxyStopped(proxy);
+      await registryClient.updateProxy(omitUndefined({ ...stripChild(proxy), managed: true }));
+      return { ok: true, proxy: stripChild(proxy) };
+    },
+    async restartProxy(id) {
+      await this.stopProxy(id);
+      return this.startProxy(id);
+    },
     async deleteProxy(id) {
+      await ensureProfilesLoaded();
       const proxy = proxies.get(id);
       if (!proxy) return { ok: true, proxy: { id, running: false }, alreadyStopped: true };
       proxy.child?.kill?.('SIGTERM');
@@ -260,6 +319,7 @@ export function createProxyManager(options = {}) {
       return { ok: true, proxy: { ...stripChild(proxy), running: false } };
     },
     async stopAll() {
+      await ensureProfilesLoaded();
       const stopped = await Promise.all(Array.from(proxies.keys()).map((id) => this.deleteProxy(id)));
       return { ok: true, proxies: stopped };
     },
@@ -380,8 +440,16 @@ async function handleProxyManagerRequest({ req, res, manager }) {
     writeMethodNotAllowed(res, 'PUT');
     return;
   }
+  if (req.method === 'POST' && parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'start') {
+    writeJson(res, 200, await manager.startProxy(decodeURIComponent(parts[2])));
+    return;
+  }
   if (req.method === 'POST' && parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'stop') {
-    writeJson(res, 200, await manager.deleteProxy(decodeURIComponent(parts[2])));
+    writeJson(res, 200, await manager.stopProxy(decodeURIComponent(parts[2])));
+    return;
+  }
+  if (req.method === 'POST' && parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'restart') {
+    writeJson(res, 200, await manager.restartProxy(decodeURIComponent(parts[2])));
     return;
   }
   if (req.method === 'POST' && parts.length === 2 && parts[1] === 'stop-all') {
@@ -538,6 +606,7 @@ function validateCreateProxyRequest(input) {
     proxyPort: input.proxyPort === undefined ? undefined : parsePort(input.proxyPort, 'proxyPort'),
     uiPort: input.uiPort === undefined ? undefined : parsePort(input.uiPort, 'uiPort'),
     uiPortRange: input.uiPortRange === undefined ? undefined : parsePortRange(input.uiPortRange, 'uiPortRange'),
+    storageDir: input.storageDir === undefined ? undefined : path.resolve(optionalString(input.storageDir, 'storageDir')),
   };
 }
 
@@ -609,6 +678,70 @@ async function writeManagedRuleFiles({ storageDir, rules }) {
     fs.writeFile(path.join(storageDir, 'override-ruleset.txt'), rules.overrideRuleset),
     fs.writeFile(path.join(storageDir, 'effective-ruleset.txt'), rules.effectiveRuleset),
   ]);
+}
+
+const PROXY_PROFILE_FILE = 'pw-dev-proxy.json';
+
+async function writeProxyProfile(record) {
+  const profile = omitUndefined({
+    version: 1,
+    id: record.id,
+    kind: record.kind,
+    name: record.name,
+    appId: record.appId,
+    taskId: record.taskId,
+    owner: record.owner,
+    purpose: record.purpose,
+    labels: record.labels,
+    proxyPort: record.proxyPort,
+    uiPort: record.uiPort,
+    proxyUrl: record.proxyUrl,
+    guiUrl: record.guiUrl,
+    rulesetFile: record.rulesetFile,
+    rules: record.rules,
+  });
+  await fs.writeFile(path.join(record.storageDir, PROXY_PROFILE_FILE), `${JSON.stringify(profile, null, 2)}\n`);
+}
+
+async function loadProxyProfiles(root, whistle, quiet) {
+  let entries;
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    if (!quiet) console.error(`proxy profile discovery failed: ${error.message}`);
+    return [];
+  }
+  const records = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const storageDir = path.join(root, entry.name);
+    try {
+      const profile = JSON.parse(await fs.readFile(path.join(storageDir, PROXY_PROFILE_FILE), 'utf8'));
+      if (!profile?.id || !profile.rules) continue;
+      const record = makeProcessRecord({
+        ...profile,
+        command: whistle.command,
+        args: whistle.argsPrefix,
+        storageDir,
+        whistleRuleName: makeWhistleRuleName(profile.id),
+      });
+      record.running = false;
+      record.pid = undefined;
+      record.startedAt = undefined;
+      records.push(record);
+    } catch {
+      // A non-pw-dev Whistle profile is not managed by this service.
+    }
+  }
+  return records;
+}
+
+function markProxyStopped(record) {
+  record.child = undefined;
+  record.pid = undefined;
+  record.running = false;
+  record.updatedAt = new Date().toISOString();
 }
 
 function createManagedRuleState({ defaultRuleset, overrideRuleset, previousVersion }) {

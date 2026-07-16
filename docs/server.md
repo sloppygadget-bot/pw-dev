@@ -43,6 +43,20 @@ Use `--broker-url` only when the broker runs somewhere else. If the default or
 configured broker is not reachable, `GET /_pwdev/status` reports
 `reachable: false` and browser lifecycle routes return `503`.
 
+The app registry persists in `<worktree>/.pw-dev/apps.json` by default. Pass
+`--app-registry-file <file>` to place it elsewhere. Browser sessions are
+broker-owned runtime state and are intentionally not restored after a server
+restart.
+
+Network definitions persist in `<worktree>/.pw-dev/networks.json`; when a
+broker is reachable, the server restores those definitions before a network is
+used for a browser start.
+
+Managed proxy configuration and rules are stored in each proxy's Whistle
+profile directory. The proxy manager reloads those profiles as stopped proxies
+after restart; use the server-proxied lifecycle endpoints to start them again:
+`POST /_pwdev/proxy/proxies/:id/start`, `.../:id/stop`, and `.../:id/restart`.
+
 `pw-dev server` starts the proxy manager lazily on the first proxy operation
 and stops it on shutdown. The local manager listens on
 `http://127.0.0.1:9697` and is proxied under `/_pwdev/proxy/*`. It creates
@@ -232,6 +246,7 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
     "worktree": "/home/me/work/fortisase",
     "branch": "main",
     "appUrl": "https://dev.fortisase-sovereign.com",
+    "readme": "Run npm run dev before testing. Copy .env.example to .env.local.",
     "accounts": {
       "login": {
         "usr": "xxx",
@@ -243,7 +258,12 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
 ```
 
 `POST /_pwdev/apps` is an upsert. Re-posting the same `id` updates app
-metadata. `accounts` is metadata for non-production test accounts only. Do not register
+metadata. Use `readme` for concise, app-specific agent instructions: how to
+operate devserver(s), required environment or local setup, test-data limits,
+and task precautions. For a proxy-enabled app, also include the proxy-rule
+template path, how to compose or compile the ruleset, its required inputs, and
+how to apply the finished rules through the server-proxied proxy API.
+`accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 
 ## Browser Lifecycle
@@ -544,7 +564,7 @@ Reachable broker:
 
 - `startPwDevServer`: starts the HTTP server, builds the root manifest, pairs the broker, and installs the broker WebSocket proxy.
 - `handlePwDevRequest`: dispatches all `/_pwdev/*` HTTP routes.
-- `createAppRegistry`: process-local app registry with list/get/upsert/update/delete.
+- `createAppRegistry`: app registry with list/get/upsert/update/delete; the server persists it by default.
 - `createProxyRegistry`: process-local reusable proxy registry with list/get/upsert/delete.
 - `buildManifest`: builds the default root manifest.
 - `serveStatic` and `resolveStaticPath`: static file serving and root-safe path resolution.

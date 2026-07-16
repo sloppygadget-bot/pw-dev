@@ -10,7 +10,7 @@
  */
 
 import fs from 'node:fs/promises';
-import { existsSync, readdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 import net from 'node:net';
@@ -58,6 +58,9 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} proxyId Optional proxy registry id for the app.
  * @property {string=} proxyForwardId Optional broker-managed proxy forward id, for example a Whistle tunnel.
  * @property {string=} proxyServer Optional Chrome proxy server URL.
+ * @property {string=} appRegistryFile Durable app registry JSON path. Defaults to `<worktree>/.pw-dev/apps.json`.
+ * @property {string=} networkRegistryFile Durable broker network JSON path. Defaults to `<worktree>/.pw-dev/networks.json`.
+ * @property {string=} proxyRegistryFile Durable proxy registry JSON path. Defaults to `<worktree>/.pw-dev/proxies.json`.
  * @property {boolean=} registerDefaultApp Register the root manifest in `/_pwdev/apps`. Defaults to false.
  */
 
@@ -78,6 +81,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} worktree Local worktree path.
  * @property {string=} branch Source branch name.
  * @property {string=} appUrl URL agents should navigate to.
+ * @property {string=} readme App-specific agent instructions, such as devserver operation and environment requirements.
  * @property {Record<string, PwDevAccountCredentials>=} accounts Named credentials for agent-assisted login.
  * @property {string=} brokerUrl Advanced per-app broker override. Normal app registration should not set this.
  * @property {string=} cdpUrl Playwright CDP URL for direct browser attachment.
@@ -271,15 +275,33 @@ export async function startPwDevServer(options = {}) {
   const startedAt = new Date().toISOString();
   const broker = createBrokerPairing({ brokerUrl: options.brokerUrl });
   const proxyManagerUrl = normalizeHttpUrl(options.proxyManagerUrl ?? DEFAULT_PROXY_MANAGER_URL, 'proxyManagerUrl');
-  const apps = createAppRegistry();
-  const proxies = createProxyRegistry();
+  const appRegistryFile = path.resolve(options.appRegistryFile ?? path.join(worktree, '.pw-dev', 'apps.json'));
+  const apps = createAppRegistry(loadPersistedApps(appRegistryFile), {
+    persist: (registeredApps) => persistApps(appRegistryFile, registeredApps),
+  });
+  const networkRegistryFile = path.resolve(options.networkRegistryFile ?? path.join(worktree, '.pw-dev', 'networks.json'));
+  const networks = createNetworkRegistry(loadPersistedNetworks(networkRegistryFile), {
+    persist: (registeredNetworks) => persistNetworks(networkRegistryFile, registeredNetworks),
+  });
+  const proxyRegistryFile = path.resolve(options.proxyRegistryFile ?? path.join(worktree, '.pw-dev', 'proxies.json'));
+  const proxies = createProxyRegistry(loadPersistedProxies(proxyRegistryFile), {
+    persist: (registeredProxies) => persistProxies(proxyRegistryFile, registeredProxies),
+  });
   const sessions = createSessionRegistry();
+  let networksRestored = false;
+  const restoreNetworks = async () => {
+    if (networksRestored) return;
+    for (const network of networks.list()) {
+      await brokerJson(broker.summary().url, '/_broker/networks', { method: 'POST', body: network });
+    }
+    networksRestored = true;
+  };
   let origin;
 
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, networks, restoreNetworks, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -314,6 +336,7 @@ export async function startPwDevServer(options = {}) {
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : port;
   origin = `http://${host}:${actualPort}`;
+  void restoreNetworks().catch(() => {});
   if (options.registerDefaultApp) {
     apps.upsert(buildManifest({ root, worktree, origin, metadata }));
   }
@@ -366,7 +389,7 @@ export async function startPwDevServer(options = {}) {
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, networks, restoreNetworks, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -378,6 +401,21 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname === '/_pwdev/networks' || requestUrl.pathname.startsWith('/_pwdev/networks/')) {
+    await restoreNetworks();
+    if (req.method === 'POST' && requestUrl.pathname === '/_pwdev/networks') {
+      const payload = await readJsonBody(req);
+      const result = await brokerJson(broker.summary().url, '/_broker/networks', { method: 'POST', body: payload });
+      networks.upsert(result.network);
+      writeJson(res, 200, result);
+      return;
+    }
+    const networkId = /^\/_pwdev\/networks\/([^/]+)$/.exec(requestUrl.pathname)?.[1];
+    if (req.method === 'DELETE' && networkId) {
+      const result = await brokerJson(broker.summary().url, `/_broker/networks/${encodeURIComponent(decodeURIComponent(networkId))}`, { method: 'DELETE' });
+      networks.delete(decodeURIComponent(networkId));
+      writeJson(res, 200, result);
+      return;
+    }
     await proxyBrokerHttpRequest({ req, res, requestUrl, broker, brokerPath: proxyBrokerNetworksPath(requestUrl) });
     return;
   }
@@ -389,6 +427,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/apps')) {
+    if (requestUrl.pathname.endsWith('/browser/start')) await restoreNetworks();
     await handleAppsRequest({ req, res, requestUrl, apps, proxies, sessions, broker, serverUrl, writeBody });
     return;
   }
@@ -502,17 +541,16 @@ export function buildManifest({ root, worktree, origin, metadata }) {
 }
 
 /**
- * Create an in-memory app registry.
- *
- * This registry is intentionally process-local. It is suitable for a dev
- * daemon that tracks currently running branches and broker sessions; persistence
- * can be layered behind this interface later without changing route handlers.
+ * Create an app registry. It is in-memory by default; callers can supply a
+ * persistence callback for durable app metadata.
  *
  * @param {Record<string, unknown>[]=} initialApps Initial app entries to seed.
+ * @param {{ persist?: (apps: PwDevAppManifest[]) => void }=} options
  * @returns {PwDevAppRegistry}
  */
-export function createAppRegistry(initialApps = []) {
+export function createAppRegistry(initialApps = [], options = {}) {
   const apps = new Map();
+  const persist = () => options.persist?.(Array.from(apps.values()).map(persistedApp));
   const registry = {
     list() {
       return Array.from(apps.values())
@@ -535,6 +573,7 @@ export function createAppRegistry(initialApps = []) {
       if (!saved.name) saved.name = saved.id;
       if (!existing?.createdAt) saved.createdAt = saved.updatedAt;
       apps.set(saved.id, saved);
+      persist();
       return cloneApp(saved);
     },
     update(id, patch) {
@@ -550,15 +589,154 @@ export function createAppRegistry(initialApps = []) {
       }
       saved.updatedAt = new Date().toISOString();
       apps.set(id, saved);
+      persist();
       return cloneApp(saved);
     },
     delete(id) {
-      return apps.delete(id);
+      const deleted = apps.delete(id);
+      if (deleted) persist();
+      return deleted;
     },
   };
 
-  for (const app of initialApps) registry.upsert(app);
+  for (const rawApp of initialApps) {
+    const app = validateAppRegistration(rawApp);
+    const saved = { ...app };
+    if (!saved.name) saved.name = saved.id;
+    apps.set(saved.id, saved);
+  }
   return registry;
+}
+
+/**
+ * Load app metadata from the durable server registry. Runtime browser state is
+ * deliberately discarded: broker sessions are owned by the broker and cannot
+ * be valid after a server restart.
+ *
+ * @param {string} appRegistryFile
+ * @returns {Record<string, unknown>[]}
+ */
+function loadPersistedApps(appRegistryFile) {
+  if (!existsSync(appRegistryFile)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(appRegistryFile, 'utf8'));
+    if (!parsed || !Array.isArray(parsed.apps)) {
+      throw new Error('expected an object with an apps array');
+    }
+    return parsed.apps.map(persistedApp);
+  } catch (error) {
+    throw new Error(`Could not load app registry ${appRegistryFile}: ${error.message}`);
+  }
+}
+
+/**
+ * Atomically persist durable app metadata with owner-only permissions because
+ * registrations may contain non-production test credentials.
+ *
+ * @param {string} appRegistryFile
+ * @param {PwDevAppManifest[]} registeredApps
+ */
+function persistApps(appRegistryFile, registeredApps) {
+  persistRegistryFile(appRegistryFile, { version: 1, apps: registeredApps });
+}
+
+/**
+ * Remove fields that describe a live browser or a specific server process.
+ * Also drops retired registration fields so a registry created by an older
+ * pw-dev release migrates forward on its next write.
+ *
+ * @param {Record<string, unknown>} app
+ * @returns {Record<string, unknown>}
+ */
+function persistedApp(app) {
+  const {
+    browserInstanceId: _browserInstanceId,
+    browserStartedAt: _browserStartedAt,
+    activeTask: _activeTask,
+    browserSessions: _browserSessions,
+    cdpUrl: _cdpUrl,
+    serverUrl: _serverUrl,
+    profile: _profile,
+    devserver: _devserver,
+    servers: _servers,
+    engine: _engine,
+    ...persistent
+  } = app;
+  return persistent;
+}
+
+function createNetworkRegistry(initialNetworks = [], options = {}) {
+  const networks = new Map(initialNetworks.map((network) => [network.id, persistedNetwork(network)]));
+  const persist = () => options.persist?.(Array.from(networks.values()));
+  return {
+    list() {
+      return Array.from(networks.values()).sort((a, b) => a.id.localeCompare(b.id)).map(persistedNetwork);
+    },
+    upsert(network) {
+      const saved = persistedNetwork(network);
+      if (typeof saved.id !== 'string' || saved.id.trim() === '') throw new Error('network id must be a non-empty string');
+      networks.set(saved.id, saved);
+      persist();
+      return persistedNetwork(saved);
+    },
+    delete(id) {
+      const deleted = networks.delete(id);
+      if (deleted) persist();
+      return deleted;
+    },
+  };
+}
+
+function loadPersistedNetworks(networkRegistryFile) {
+  if (!existsSync(networkRegistryFile)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(networkRegistryFile, 'utf8'));
+    if (!parsed || !Array.isArray(parsed.networks)) throw new Error('expected an object with a networks array');
+    return parsed.networks.map(persistedNetwork);
+  } catch (error) {
+    throw new Error(`Could not load network registry ${networkRegistryFile}: ${error.message}`);
+  }
+}
+
+function persistNetworks(networkRegistryFile, networks) {
+  persistRegistryFile(networkRegistryFile, { version: 1, networks });
+}
+
+function persistedNetwork(network) {
+  const { resolved: _resolved, createdAt: _createdAt, updatedAt: _updatedAt, inUseBy: _inUseBy, ...persistent } = network;
+  return persistent;
+}
+
+/** @param {string} proxyRegistryFile @returns {Record<string, unknown>[]} */
+function loadPersistedProxies(proxyRegistryFile) {
+  if (!existsSync(proxyRegistryFile)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(proxyRegistryFile, 'utf8'));
+    if (!parsed || !Array.isArray(parsed.proxies)) throw new Error('expected an object with a proxies array');
+    return parsed.proxies.map(persistedProxy);
+  } catch (error) {
+    throw new Error(`Could not load proxy registry ${proxyRegistryFile}: ${error.message}`);
+  }
+}
+
+/** @param {string} proxyRegistryFile @param {PwDevProxyRecord[]} registeredProxies */
+function persistProxies(proxyRegistryFile, registeredProxies) {
+  persistRegistryFile(proxyRegistryFile, { version: 1, proxies: registeredProxies });
+}
+
+function persistRegistryFile(file, content) {
+  const directory = path.dirname(file);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporaryFile = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporaryFile, `${JSON.stringify(content, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporaryFile, file);
+  chmodSync(file, 0o600);
+}
+
+/** @param {Record<string, unknown>} proxy @returns {Record<string, unknown>} */
+function persistedProxy(proxy) {
+  const { pid: _pid, ...persistent } = proxy;
+  return persistent;
 }
 
 function cloneApp(app) {
@@ -649,8 +827,9 @@ export function createSessionRegistry(initialSessions = []) {
  * @param {Record<string, unknown>[]=} initialProxies Initial proxy entries to seed.
  * @returns {PwDevProxyRegistry}
  */
-export function createProxyRegistry(initialProxies = []) {
+export function createProxyRegistry(initialProxies = [], options = {}) {
   const proxies = new Map();
+  const persist = () => options.persist?.(Array.from(proxies.values()).map(persistedProxy));
   const registry = {
     list() {
       return Array.from(proxies.values())
@@ -671,14 +850,20 @@ export function createProxyRegistry(initialProxies = []) {
       };
       if (!existing?.createdAt) saved.createdAt = saved.updatedAt;
       proxies.set(saved.id, saved);
+      persist();
       return { ...saved };
     },
     delete(id) {
-      return proxies.delete(id);
+      const deleted = proxies.delete(id);
+      if (deleted) persist();
+      return deleted;
     },
   };
 
-  for (const proxy of initialProxies) registry.upsert(proxy);
+  for (const rawProxy of initialProxies) {
+    const proxy = validateProxyRegistration(rawProxy);
+    proxies.set(proxy.id, proxy);
+  }
   return registry;
 }
 
@@ -968,8 +1153,8 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
 /**
  * Handle central app registry routes under `/_pwdev/apps`.
  *
- * `POST /_pwdev/apps` is an upsert. Re-posting the same app id updates branch
- * devserver URLs, profile names, proxy metadata, and CDP endpoints in place.
+ * `POST /_pwdev/apps` is an upsert. Re-posting the same app id updates its
+ * app URL, worktree, branch, agent instructions, and network/proxy metadata in place.
  *
  * @param {{
  *   req: http.IncomingMessage,
@@ -1815,6 +2000,7 @@ function validateAppRegistration(rawApp) {
     worktree: optionalPath(rawApp.worktree, 'worktree'),
     branch: optionalString(rawApp.branch, 'branch'),
     appUrl: optionalString(rawApp.appUrl, 'appUrl'),
+    readme: optionalString(rawApp.readme, 'readme'),
     accounts: rawApp.accounts === undefined ? undefined : validateAccounts(rawApp.accounts),
     brokerUrl: optionalString(rawApp.brokerUrl, 'brokerUrl'),
     cdpUrl: optionalString(rawApp.cdpUrl, 'cdpUrl'),
@@ -2397,20 +2583,26 @@ await fetch('${serverUrl}/_pwdev/apps', {
   body: JSON.stringify({
     id: 'fortisase-dev',
     appUrl: 'https://dev.fortisase-sovereign.com',
+    readme: 'Run npm run dev before testing. Copy .env.example to .env.local; ask before changing shared staging data.',
     accounts: {
       login: {
         usr: 'xxx',
         pwd: 'xxx',
       },
     },
-    profile: 'fortisase-dev',
     proxyId: 'whistle-main',
   }),
 });
 \`\`\`
 
-Only register non-production test accounts in \`accounts\`. Do not put
-production accounts, personal credentials, or sensitive tokens in app metadata.
+Use \`readme\` for concise app-specific agent instructions: how to start or
+stop devserver(s), required environment variables or local setup, test-data
+constraints, and task precautions. When the app uses a managed proxy, include
+the proxy-rule template path, the command or method that composes/compiles the
+ruleset, its required inputs, and how to apply the result through the
+server-proxied proxy API. Only register non-production test accounts in
+\`accounts\`. Do not put production accounts, personal credentials, or
+sensitive tokens in app metadata.
 
 ## Branch/app lifecycle guidelines
 
@@ -2587,6 +2779,12 @@ const proxiedStart = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/
 
 const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
   .then((response) => response.json());
+
+// Managed proxy configuration is retained in its Whistle profile. Stop,
+// start, or restart it through pw-dev; never use the manager port directly.
+await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle/restart', {
+  method: 'POST',
+});
 
 const currentProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle')
   .then((response) => response.json());

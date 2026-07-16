@@ -242,6 +242,7 @@ test('server registers and exposes multiple apps', async () => {
       worktree: root,
       branch: 'feature/tax',
       appUrl: 'http://127.0.0.1:5174',
+      readme: 'Run npm run dev with API_URL=http://127.0.0.1:3100.',
       accounts: {
         login: {
           usr: 'xxx',
@@ -254,6 +255,7 @@ test('server registers and exposes multiple apps', async () => {
     assert.equal(created.statusCode, 200);
     assert.equal(created.body.app.id, 'checkout-tax');
     assert.equal(created.body.app.proxyForwardId, 'whistle');
+    assert.equal(created.body.app.readme, 'Run npm run dev with API_URL=http://127.0.0.1:3100.');
     assert.deepEqual(created.body.app.accounts, {
       login: {
         usr: 'xxx',
@@ -286,6 +288,39 @@ test('server registers and exposes multiple apps', async () => {
     assert.equal(missing.statusCode, 404);
   } finally {
     await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server persists app metadata but not browser runtime state across restart', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const first = await startPwDevServer({ root, port: 0 });
+  try {
+    const created = await postJson(`${first.origin}/_pwdev/apps`, {
+      id: 'checkout-tax',
+      appUrl: 'http://127.0.0.1:5174',
+      readme: 'Start with npm run dev. Build proxy rules from proxy/dev.rules.template.',
+      accounts: { test: { usr: 'agent', pwd: 'test-only' } },
+      proxyId: 'checkout-tax-whistle',
+      browserInstanceId: 'must-not-persist',
+    });
+    assert.equal(created.statusCode, 200);
+  } finally {
+    await first.close();
+  }
+
+  const registryFile = path.join(root, '.pw-dev', 'apps.json');
+  assert.equal(fs.existsSync(registryFile), true);
+  const second = await startPwDevServer({ root, port: 0 });
+  try {
+    const restored = await getJson(`${second.origin}/_pwdev/apps/checkout-tax`);
+    assert.equal(restored.statusCode, 200);
+    assert.equal(restored.body.app.readme, 'Start with npm run dev. Build proxy rules from proxy/dev.rules.template.');
+    assert.equal(restored.body.app.proxyId, 'checkout-tax-whistle');
+    assert.deepEqual(restored.body.app.accounts, { test: { usr: 'agent', pwd: 'test-only' } });
+    assert.equal(restored.body.app.browserInstanceId, undefined);
+  } finally {
+    await second.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

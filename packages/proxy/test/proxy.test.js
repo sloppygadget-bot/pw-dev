@@ -426,12 +426,14 @@ test('manager replaces managed proxy rules without restarting Whistle', async ()
 
 test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
   const spawned = [];
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-'));
   const manager = createProxyManager({
     applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
     portAvailable: async () => true,
+    w2StorageRoot,
   });
   const server = await startProxyManagerServer({ manager, port: 0 });
   try {
@@ -455,6 +457,18 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     assert.equal(replaced.body.proxy.rules.version, 2);
     assert.equal(replaced.body.proxy.rules.overrideRuleset, 'c d');
 
+    const stopped = await postJson(`${server.origin}/_proxy/proxies/whistle-main/stop`, {});
+    assert.equal(stopped.statusCode, 200);
+    assert.equal(stopped.body.proxy.running, false);
+
+    const started = await postJson(`${server.origin}/_proxy/proxies/whistle-main/start`, {});
+    assert.equal(started.statusCode, 200);
+    assert.equal(started.body.proxy.running, true);
+
+    const restarted = await postJson(`${server.origin}/_proxy/proxies/whistle-main/restart`, {});
+    assert.equal(restarted.statusCode, 200);
+    assert.equal(restarted.body.proxy.running, true);
+
     const status = await getJson(`${server.origin}/_proxy/status`);
     assert.equal(status.statusCode, 200);
     assert.deepEqual(status.body.proxies.map((record) => record.id), ['whistle-main']);
@@ -464,6 +478,7 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     assert.equal(deleted.body.proxy.running, false);
   } finally {
     await server.close();
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
   }
 });
 

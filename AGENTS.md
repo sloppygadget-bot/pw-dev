@@ -156,6 +156,12 @@ curl "$PW_DEV_URL/_pwdev/instructions"
 running server. Do not rely on stale hardcoded API assumptions when the server
 can provide current instructions.
 
+Each selected app can include a `readme` field with its operating guidance.
+Follow it for devserver commands, environment prerequisites, test-data limits,
+and proxy setup. For proxy-enabled apps, it should identify the proxy-rule
+template, its composition/compile method and inputs, and the server-proxied API
+used to apply the resulting ruleset.
+
 Use the server-origin APIs under `$PW_DEV_URL/_pwdev/*`. Do not connect to
 internal broker or proxy-manager ports directly.
 
