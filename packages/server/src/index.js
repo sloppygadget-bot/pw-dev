@@ -10,9 +10,14 @@
  */
 
 import fs from 'node:fs/promises';
+import { existsSync, readdirSync } from 'node:fs';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
+
+const require = createRequire(import.meta.url);
 
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -364,6 +369,7 @@ export async function startPwDevServer(options = {}) {
  * Public routes handled here:
  * - `GET /_pwdev/manifest`
  * - `GET /_pwdev/status`
+ * - `GET /_pwdev/env`
  * - `GET /_pwdev/instructions`
  * - `GET /_pwdev/client.js`
  * - `ANY /_pwdev/broker/*`
@@ -455,6 +461,25 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
       proxies: proxies.list(),
       manifest,
     }, writeBody);
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/env') {
+    const env = pwDevEnv({
+      serverUrl,
+      root,
+      worktree,
+      brokerUrl: broker.summary().url,
+      proxyManagerUrl,
+    });
+    const wantsSh =
+      requestUrl.searchParams.get('format') === 'sh' ||
+      (req.headers.accept ?? '').includes('text/x-shellscript');
+    if (wantsSh) {
+      writeTypedText(res, 200, 'text/x-shellscript; charset=utf-8', renderEnvSh(env), writeBody);
+    } else {
+      writeJson(res, 200, env, writeBody);
+    }
     return;
   }
 
@@ -2199,11 +2224,193 @@ function requestBaseUrl(req) {
   return `${encrypted ? 'https' : 'http'}://${host}`;
 }
 
+/**
+ * Best-effort resolution of the Playwright-managed Chromium executable.
+ *
+ * Honors `PLAYWRIGHT_BROWSERS_PATH`, otherwise uses the per-platform default
+ * cache dir. Picks the highest-numbered `chromium-<n>` build and the
+ * platform-correct executable within it. Returns `undefined` when nothing is
+ * installed so callers can omit the key rather than emit a bogus path.
+ *
+ * @returns {string | undefined}
+ */
+function resolveChromiumExecutable() {
+  const override = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  let cacheDir;
+  if (override && override !== '0') {
+    cacheDir = override;
+  } else if (process.platform === 'darwin') {
+    cacheDir = path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright');
+  } else if (process.platform === 'win32') {
+    cacheDir = path.join(process.env.LOCALAPPDATA ?? os.homedir(), 'ms-playwright');
+  } else {
+    cacheDir = path.join(os.homedir(), '.cache', 'ms-playwright');
+  }
+
+  let builds;
+  try {
+    builds = readdirSync(cacheDir)
+      .map((name) => /^chromium-(\d+)$/.exec(name))
+      .filter(Boolean)
+      .map((match) => ({ name: match[0], version: Number(match[1]) }))
+      .sort((a, b) => b.version - a.version);
+  } catch {
+    return undefined;
+  }
+
+  // Newer builds ship the Chrome-for-Testing layout (chrome-linux64/…); older
+  // ones use the classic Playwright layout (chrome-linux/…). Try both, newest
+  // first, so we never fall back to an older build just because of the folder.
+  const relatives =
+    process.platform === 'darwin'
+      ? [
+          path.join('chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+          path.join('chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+          path.join('chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+        ]
+      : process.platform === 'win32'
+        ? [path.join('chrome-win64', 'chrome.exe'), path.join('chrome-win', 'chrome.exe')]
+        : [path.join('chrome-linux64', 'chrome'), path.join('chrome-linux', 'chrome')];
+
+  for (const build of builds) {
+    for (const relative of relatives) {
+      const candidate = path.join(cacheDir, build.name, relative);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve a file from an installed package without assuming the workspace
+ * checkout or node_modules location.
+ *
+ * @param {string} packageName
+ * @param {string} relativePath
+ * @returns {string | undefined}
+ */
+function resolvePackageFile(packageName, relativePath) {
+  try {
+    const packageJson = require.resolve(`${packageName}/package.json`);
+    const candidate = path.join(path.dirname(packageJson), relativePath);
+    return existsSync(candidate) ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve a package binary from the node_modules/.bin directory containing it.
+ *
+ * @param {string} packageName
+ * @param {string} binaryName
+ * @returns {string | undefined}
+ */
+function resolvePackageBinary(packageName, binaryName) {
+  try {
+    const packageJson = require.resolve(`${packageName}/package.json`);
+    const binName = process.platform === 'win32' ? `${binaryName}.cmd` : binaryName;
+    const candidate = path.resolve(path.dirname(packageJson), '..', '..', '.bin', binName);
+    return existsSync(candidate) ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Build the pw-dev environment constants an external (non-Node) script needs to
+ * reference the running server, its broker, and the bundled Playwright assets.
+ *
+ * Computed per request so values track the live server; keys with no resolvable
+ * value are omitted rather than emitted empty.
+ *
+ * @param {{ serverUrl: string, root: string, worktree: string, brokerUrl?: string, proxyManagerUrl: string }} context
+ * @returns {Record<string, string>}
+ */
+function pwDevEnv({ serverUrl, root, worktree, brokerUrl, proxyManagerUrl }) {
+  const skillDir = path.join(process.cwd(), '.claude', 'skills', 'playwright-cli');
+  const skillPath = path.join(skillDir, 'SKILL.md');
+  const chromium = resolveChromiumExecutable();
+  const playwrightModule = resolvePackageFile('playwright', 'index.mjs');
+  const playwrightCli = resolvePackageBinary('@playwright/cli', 'playwright-cli');
+  /** @type {Record<string, string | undefined>} */
+  const env = {
+    PW_DEV_URL: serverUrl,
+    PW_DEV_ROOT: root,
+    PW_DEV_WORKTREE: worktree,
+    // Prefer the server-proxied broker path; agents should not hit the broker port directly.
+    PW_DEV_BROKER_PROXY: `${serverUrl}/_pwdev/broker`,
+    PW_DEV_BROKER_URL: brokerUrl,
+    PW_DEV_PROXY_MANAGER_URL: proxyManagerUrl,
+    PW_DEV_PLAYWRIGHT: playwrightModule,
+    PW_DEV_PLAYWRIGHT_CLI: playwrightCli,
+    PW_SKILL_PATH: existsSync(skillPath) ? skillPath : undefined,
+    PW_SKILL_DIR: existsSync(skillDir) ? skillDir : undefined,
+    PW_CHROMIUM_PATH: chromium,
+  };
+  return Object.fromEntries(Object.entries(env).filter(([, value]) => value != null));
+}
+
+/**
+ * Render pw-dev env constants as sourceable `export KEY='value'` lines for
+ * `eval "$(curl -s $PW_DEV_URL/_pwdev/env?format=sh)"`. Single-quote-escaped so
+ * arbitrary path/URL characters survive the shell.
+ *
+ * @param {Record<string, string>} env
+ * @returns {string}
+ */
+function renderEnvSh(env) {
+  return (
+    Object.entries(env)
+      .map(([key, value]) => `export ${key}='${String(value).replace(/'/g, `'\\''`)}'`)
+      .join('\n') + '\n'
+  );
+}
+
 function pwDevInstructions(serverUrl) {
+  const skillPath = path.join(process.cwd(), '.claude', 'skills', 'playwright-cli', 'SKILL.md');
+  const skillSection = existsSync(skillPath)
+    ? `## Browser-automation command reference (read this file)
+
+The bundled \`playwright-cli\` skill is a plain-text command reference. Read it
+directly for the full command set (open/goto/click/snapshot/network/tracing/…);
+you do not need it registered as a skill to use it:
+
+\`\`\`text
+${skillPath}
+\`\`\`
+
+Its \`references/\` directory (same folder) holds deeper guides. Drive the
+browser via the \`playwright-cli\` binary as documented there.
+
+`
+    : `## Browser-automation command reference
+
+The bundled \`playwright-cli\` skill is not installed in this workspace. To get
+the plain-text command reference at
+\`${skillPath}\`, run \`npm run install:playwright\`.
+
+`;
   return `# pw-dev agent instructions
 
 Use this server as the control plane for app discovery, browser lifecycle, and
 broker-proxied CDP. Agents should not need the broker URL directly.
+
+${skillSection}## Environment constants (external / shell scripts)
+
+\`GET /_pwdev/env\` returns the live constants (server URL, broker proxy path,
+bundled skill path, resolved Chromium executable) as JSON. Node clients can just
+fetch it; non-Node/shell consumers should request the shell-export form and
+\`eval\` it — the values track the running server, so re-run it after a restart:
+
+\`\`\`bash
+eval "$(curl -s '${serverUrl}/_pwdev/env?format=sh')"
+# now $PW_DEV_URL, $PW_DEV_BROKER_PROXY, $PW_DEV_PLAYWRIGHT,
+# $PW_DEV_PLAYWRIGHT_CLI, $PW_SKILL_PATH, $PW_CHROMIUM_PATH, … are set
+\`\`\`
+
+Do not persist these into a static file; fetch them from the running server so
+they never go stale or collide across concurrent server instances.
 
 ## Discover server and broker state
 
@@ -2326,8 +2533,8 @@ production accounts, personal credentials, or sensitive tokens in app metadata.
 There are two supported ways to run Playwright against a pw-dev browser:
 
 1. Use the Playwright package, CLI, and bundled skills installed in the pw-dev
-   workspace. Generated task code should live inside pw-dev and can use
-   \`npm run install:playwright\` when Playwright is not installed.
+   workspace. Generated task code should live inside pw-dev. They are installed
+   by \`npm install\`; run \`npm run install:playwright\` to repeat that setup.
 2. Use a Playwright installation owned by the client agent. The agent can run
    scripts from its own workspace and attach to the pw-dev broker session using
    the returned \`cdpUrl\`.
@@ -2601,6 +2808,7 @@ await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle', {
 
 \`\`\`text
 GET    /_pwdev/status
+GET    /_pwdev/env
 GET    /_pwdev/instructions
 GET    /_pwdev/client.js
 GET    /_pwdev/proxies
@@ -2814,7 +3022,7 @@ export function pwDevAgentTaskPaths(taskId, { root = '.agent/tasks' } = {}) {
 }
 
 export function pwDevPlaywrightImportHint() {
-  return "Run generated task scripts inside the pw-dev workspace and import { chromium } from 'playwright'. If missing, run: npm run install:playwright to enable the Playwright package, CLI, and bundled probing skills inside pw-dev.";
+  return "Run generated task scripts inside the pw-dev workspace and import { chromium } from 'playwright'. npm install enables the Playwright package, CLI, Chromium browser, and bundled probing skills; run npm run install:playwright to repeat that setup.";
 }
 
 export async function loadPwDevManifest({ serverUrl = '${serverUrl}', appId } = {}) {

@@ -44,8 +44,8 @@ start managed proxy instances without a global `w2`. System requirements are
 Node 18+, a Chromium-family browser for broker mode, and OpenSSH only when
 using SSH tunnel features.
 
-Playwright is intentionally optional. If the local environment should include a
-ready Playwright client and Chromium browser, run:
+The Playwright client, CLI, Chromium browser, and bundled probing skills are
+installed automatically by `npm install`. To repeat that setup explicitly, run:
 
 ```bash
 npm run install:playwright
@@ -137,6 +137,7 @@ Discovery endpoints:
 ```text
 GET /_pwdev/manifest
 GET /_pwdev/status
+GET /_pwdev/env
 GET /_pwdev/instructions
 GET /_pwdev/client.js
 ```

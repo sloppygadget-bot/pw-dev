@@ -196,6 +196,24 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /--proxy-manager-url/);
     assert.doesNotMatch(instructions.body, /If `pw-dev proxy` is running/);
 
+    const env = await getJson(`${server.origin}/_pwdev/env`);
+    assert.equal(env.statusCode, 200);
+    assert.equal(env.body.PW_DEV_URL, server.origin);
+    assert.equal(env.body.PW_DEV_ROOT, root);
+    assert.equal(env.body.PW_DEV_WORKTREE, root);
+    assert.equal(env.body.PW_DEV_BROKER_PROXY, `${server.origin}/_pwdev/broker`);
+    assert.equal(env.body.PW_DEV_BROKER_URL, 'http://127.0.0.1:18080');
+    assert.equal(env.body.PW_DEV_PROXY_MANAGER_URL, 'http://127.0.0.1:9697');
+    assert.match(env.body.PW_DEV_PLAYWRIGHT, /[\\/]node_modules[\\/]playwright[\\/]index\.mjs$/);
+    assert.match(env.body.PW_DEV_PLAYWRIGHT_CLI, /[\\/]node_modules[\\/]\.bin[\\/]playwright-cli(?:\.cmd)?$/);
+
+    const envShell = await get(`${server.origin}/_pwdev/env?format=sh`);
+    assert.equal(envShell.statusCode, 200);
+    assert.match(envShell.headers['content-type'], /text\/x-shellscript/);
+    assert.match(envShell.body, new RegExp(`export PW_DEV_URL='${escapeRegExp(server.origin)}'`));
+    assert.match(envShell.body, /export PW_DEV_BROKER_PROXY='.*\/_pwdev\/broker'/);
+    assert.match(envShell.body, /export PW_DEV_PLAYWRIGHT='.*[\\/]node_modules[\\/]playwright[\\/]index\.mjs'/);
+
     const client = await get(`${server.origin}/_pwdev/client.js`);
     assert.equal(client.statusCode, 200);
     assert.match(client.body, /loadPwDevStatus/);
@@ -1230,7 +1248,7 @@ function get(url) {
         body += chunk;
       });
       response.on('end', () => {
-        resolve({ statusCode: response.statusCode, body });
+        resolve({ statusCode: response.statusCode, headers: response.headers, body });
       });
     }).once('error', reject);
   });
@@ -1251,6 +1269,10 @@ function patchJson(url, payload) {
 
 function deleteJson(url) {
   return requestJson(url, 'DELETE');
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function requestJson(url, method, payload) {

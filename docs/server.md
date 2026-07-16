@@ -113,6 +113,7 @@ Given `PW_DEV_URL=http://127.0.0.1:9696`, the discovery sequence is:
 
 ```text
 GET /_pwdev/status
+GET /_pwdev/env
 GET /_pwdev/instructions
 GET /_pwdev/apps
 GET /_pwdev/apps/:id/manifest
@@ -120,7 +121,8 @@ GET /_pwdev/apps/:id/manifest
 
 Use `/_pwdev/status` first to verify that the server is healthy and the broker
 is configured/reachable. Use `/_pwdev/instructions` as the live usage guide for
-the current server. Use `/_pwdev/client.js` when an agent wants a small helper
+the current server. Use `/_pwdev/env` for live server, Playwright, CLI, skill,
+and Chromium paths. Use `/_pwdev/client.js` when an agent wants a small helper
 module instead of hand-writing manifest fetch and CDP attach logic.
 If the broker was started with `--ssh`, `status.broker.status.topology` reports
 `{ "mode": "ssh", "remote": true }` plus SSH details. Agents should use that as
@@ -137,8 +139,9 @@ to `/_pwdev/apps`. Register apps explicitly with `POST /_pwdev/apps`; use
 app.
 
 Generated Playwright task code should live inside the pw-dev workspace so it
-uses the Playwright package shipped with pw-dev. If Playwright is missing, run
-`npm run install:playwright`. Use:
+uses the Playwright package shipped with pw-dev. The Playwright package, CLI,
+Chromium browser, and bundled probing skills are installed by `npm install`.
+To repeat that setup explicitly, run `npm run install:playwright`. Use:
 
 That install step also makes the Playwright CLI and its bundled probing skills
 available inside pw-dev. Use the package, CLI, and bundled skills for browser
