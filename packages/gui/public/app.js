@@ -125,7 +125,6 @@ function normalizeSnapshot(raw) {
   const brokerNetworks = raw.broker.networks;
   const brokerForwards = raw.broker.proxyForwards;
   const proxyStatus = raw.proxyManager.status;
-  const appServerStatuses = raw.server.appServerStatuses ?? [];
   const proxyStatuses = raw.server.proxyStatuses ?? [];
   const brokerEntries = normalizeBrokerEntries(raw);
 
@@ -170,7 +169,6 @@ function normalizeSnapshot(raw) {
     brokers: brokerEntries,
     proxyStatus,
     apps: appList,
-    appServerStatuses,
     proxies: proxyList,
     networks: networkList,
     proxyForwards,
@@ -210,7 +208,6 @@ function sessionsForApp(app) {
       appId: app.id,
       sessionId: `${app.id}:default`,
       taskId: app.activeTask?.id,
-      profile: app.profile,
       cdpUrl: app.cdpUrl,
       browserInstanceId: app.browserInstanceId,
       browserStartedAt: app.browserStartedAt,
@@ -247,7 +244,6 @@ function computeRelationships({ apps, sessions, proxies, networks, proxyForwards
     add('network', app.networkId, `apps: ${app.id}`);
     add('proxy', app.proxyId, `apps: ${app.id}`);
     add('proxyForward', app.proxyForwardId, `apps: ${app.id}`);
-    add('profile', app.profile, `apps: ${app.id}`);
   }
 
   for (const session of sessions) {
@@ -324,7 +320,7 @@ async function render(snapshot) {
 
   await renderTopology(snapshot, token);
   if (token !== state.renderToken) return;
-  renderApps(snapshot.apps, snapshot.relationships, snapshot.appServerStatuses);
+  renderApps(snapshot.apps, snapshot.relationships);
   renderBroker(snapshot);
   renderSessions(snapshot.sessions, snapshot.relationships);
   renderNetworks(snapshot.networks, snapshot.relationships);
@@ -420,7 +416,7 @@ async function renderTopology(snapshot, token) {
   await renderMarkdown(els.topologyContext, buildSnapshotMarkdown(snapshot), token);
 }
 
-function renderApps(apps, relationships, appServerStatuses) {
+function renderApps(apps, relationships) {
   renderCards(els.apps, apps.map((app) => ({
     appId: app.id,
     title: app.name ?? app.id,
@@ -428,9 +424,7 @@ function renderApps(apps, relationships, appServerStatuses) {
     badge: app.cdpUrl || app.browserSessions ? badge('Browser', 'good') : badge('Registered', 'neutral'),
     rows: {
       URL: app.appUrl,
-      Servers: formatAppServers(app.servers, app.id, appServerStatuses),
       Branch: app.branch,
-      Profile: app.profile,
       Network: app.networkId,
       Proxy: app.proxyId,
       Sessions: related(relationships, 'app', app.id),
@@ -478,6 +472,7 @@ function renderSessions(sessions, relationships) {
       Profile: session.profile,
       Network: session.networkId,
       Proxy: session.proxyId,
+      'SSH proxy mapping': session.proxyForwardId ? 'active' : undefined,
       'Proxy forward': session.proxyForwardId,
       Instance: session.browserInstanceId,
       Started: formatDate(session.browserStartedAt),
@@ -583,15 +578,6 @@ function renderProxies(proxies, relationships) {
       Updated: formatDate(proxy.updatedAt),
     },
   })));
-}
-
-function formatAppServers(servers, appId, statuses) {
-  if (!Array.isArray(servers) || !servers.length) return undefined;
-  const statusByKey = new Map((statuses ?? []).map((status) => [`${status.appId}:${status.name}:${status.port}`, status]));
-  return servers.map((server) => {
-    const status = statusByKey.get(`${appId}:${server.name}:${server.port}`);
-    return `${server.name}:${server.port} (${status?.running ? 'running' : 'stopped'})`;
-  }).join(', ');
 }
 
 async function loadVisualizers() {
@@ -774,16 +760,6 @@ function buildTopologyGraph(snapshot, context) {
 
   const app = context.app;
   const appNode = addNode('app', canonicalAppKey(app), formatAppNodeLabel(app, context.sessions), 'app-node');
-  if (app.devserver) {
-    const devNode = addNode(
-      'dev',
-      canonicalDevserverKey(app.devserver),
-      formatDevserverNodeLabel(app, snapshot.appServerStatuses),
-      'dev-node'
-    );
-    addEdge(devNode, appNode, 'serves', devserverIsRunning(app, snapshot.appServerStatuses) ? 'solid' : 'dotted');
-  }
-
   for (const proxy of context.proxies) {
     addNode(
       'proxy',
@@ -1204,9 +1180,7 @@ function proxyMatchesNetwork(proxy, network) {
 
 function summarizeFlow({ app, session, network, proxies }) {
   const parts = [];
-  if (app?.devserver) {
-    parts.push(`devserver ${formatDevserver(app.devserver)}`);
-  } else if (app) {
+  if (app) {
     parts.push(`app ${app.id}`);
   }
   if (proxies.length) {
@@ -1226,33 +1200,14 @@ function topologyFlowCount(snapshot) {
 }
 
 function formatAppNodeLabel(app, sessions = []) {
-  const servers = Array.isArray(app.servers) && app.servers.length
-    ? app.servers.map((server) => `${server.name}: ${server.port}`).join(' | ')
-    : app.appUrl ?? 'no app server';
+  const endpoint = app.appUrl ?? 'no app URL';
   const sessionLabel = sessions.length ? `\nSession: app ⇔ browser` : '';
-  return `App\n${app.id}\n${servers}${sessionLabel}`;
-}
-
-function formatDevserverNodeLabel(app, statuses) {
-  const running = devserverIsRunning(app, statuses);
-  const stateLabel = running === true ? 'running' : running === false ? 'stopped' : 'unknown';
-  return `Devserver\n${formatDevserver(app.devserver)}\n${stateLabel}`;
-}
-
-function devserverIsRunning(app, statuses) {
-  const appStatuses = (statuses ?? []).filter((status) => status.appId === app.id);
-  if (!appStatuses.length) return undefined;
-  return appStatuses.some((status) => status.running) ? true : false;
+  return `App\n${app.id}\n${endpoint}${sessionLabel}`;
 }
 
 function formatProxyNodeLabel(proxy) {
   const stateLabel = proxy.running === true ? 'running' : proxy.running === false ? 'stopped' : 'unknown';
   return `Proxy\n${proxy.id}\n${proxy.proxyUrl ?? proxy.brokerProxyForwardId ?? 'no proxyUrl'}\n${stateLabel}`;
-}
-
-function formatDevserver(devserver) {
-  const command = [devserver.command, ...(devserver.args ?? [])].filter(Boolean).join(' ');
-  return devserver.cwd ? `${command} @ ${devserver.cwd}` : command;
 }
 
 function formatNetworkLabel(network) {
@@ -1296,10 +1251,6 @@ function canonicalAppKey(app) {
     return `app:${app?.appUrl ?? ''}:${app?.worktree ?? ''}:${app?.profile ?? ''}`;
   }
   return `id:${app?.id ?? ''}`;
-}
-
-function canonicalDevserverKey(devserver) {
-  return `dev:${formatDevserver(devserver)}`;
 }
 
 function canonicalProxyKey(proxy) {

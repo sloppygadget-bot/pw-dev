@@ -123,8 +123,6 @@ export function parseArgs(argv) {
       options.startProxyManager = false;
     } else if (arg === '--cdp-url') {
       options.cdpUrl = readValue(argv, ++i, arg);
-    } else if (arg === '--profile') {
-      options.profile = readValue(argv, ++i, arg);
     } else if (arg === '--proxy-forward-id') {
       options.proxyForwardId = readValue(argv, ++i, arg);
     } else if (arg === '--proxy-server') {
@@ -177,7 +175,6 @@ Options:
   --no-proxy-manager
                   Disable automatic proxy-manager startup and shutdown
   --cdp-url <url>  CDP URL for browser automation
-  --profile <name> Broker profile for browser automation
   --proxy-forward-id <id>
                   Broker proxy-forward id for proxied app sessions
   --proxy-server <url>

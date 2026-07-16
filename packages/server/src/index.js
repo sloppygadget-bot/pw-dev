@@ -54,7 +54,6 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} proxyManagerUrl Optional proxy manager base URL proxied under `/_pwdev/proxy/*`. Defaults to `http://127.0.0.1:9697`.
  * @property {() => Promise<unknown>=} ensureProxyManager Lazily starts a server-owned proxy manager before proxy-manager requests.
  * @property {string=} cdpUrl Optional Playwright CDP URL for direct browser attachment.
- * @property {string=} profile Optional broker profile name for the app.
  * @property {string=} networkId Optional broker network id for browser sessions.
  * @property {string=} proxyId Optional proxy registry id for the app.
  * @property {string=} proxyForwardId Optional broker-managed proxy forward id, for example a Whistle tunnel.
@@ -79,13 +78,9 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} worktree Local worktree path.
  * @property {string=} branch Source branch name.
  * @property {string=} appUrl URL agents should navigate to.
- * @property {PwDevDevserverCommand=} devserver Command metadata for starting the app GUI devserver.
- * @property {PwDevAppServer[]=} servers Local servers that belong to this app and can be monitored by the GUI.
- * @property {PwDevAppEngine=} engine Runtime engine metadata for the app.
  * @property {Record<string, PwDevAccountCredentials>=} accounts Named credentials for agent-assisted login.
  * @property {string=} brokerUrl Advanced per-app broker override. Normal app registration should not set this.
  * @property {string=} cdpUrl Playwright CDP URL for direct browser attachment.
- * @property {string=} profile Broker profile name associated with this app.
  * @property {string=} networkId Broker network id associated with this app.
  * @property {string=} proxyId Reusable proxy registry id associated with this app.
  * @property {string=} proxyForwardId Broker proxy-forward id associated with this app.
@@ -163,35 +158,6 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  */
 
 /**
- * Command metadata for starting an app devserver.
- *
- * pw-dev records this for agents/humans but does not execute it yet.
- *
- * @typedef {object} PwDevDevserverCommand
- * @property {string} command Base command, for example `npm`.
- * @property {string[]=} args Command arguments, for example `["run", "dev"]`.
- * @property {string=} cwd Working directory. Defaults to app worktree when omitted.
- * @property {Record<string, string>=} env Environment variables needed by the devserver.
- */
-
-/**
- * A locally reachable process associated with an app.
- *
- * @typedef {object} PwDevAppServer
- * @property {string} name Human-readable server name, for example `react`.
- * @property {number} port Local TCP port to probe.
- */
-
-/**
- * Runtime engine metadata for the app.
- *
- * @typedef {object} PwDevAppEngine
- * @property {string=} name Engine name, for example `node`.
- * @property {string=} version Exact detected version, for example `v22.16.0`.
- * @property {string=} requirement Declared requirement, for example `>=18`.
- */
-
-/**
  * Agent/user task metadata attached to an active app browser session.
  *
  * This lives at the server layer because it explains why a browser exists. The
@@ -263,7 +229,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  *
  * @typedef {object} PwDevBrowserStartOptions
  * @property {string=} brokerUrl Advanced broker base URL override. Defaults to server-level broker pairing.
- * @property {string=} profile Broker profile override. Defaults to the app profile, then app id.
+ * @property {string=} profile Broker profile override. Defaults to the app id for a default session and `<app-id>__<task-id>` for a task session.
  * @property {string=} networkId Broker network id. Mutually exclusive with proxy options.
  * @property {string=} proxyId Reusable proxy registry id. Defaults to app `proxyId`.
  * @property {string=} proxyForwardId Broker proxy-forward id for proxied apps.
@@ -297,7 +263,6 @@ export async function startPwDevServer(options = {}) {
     branch: options.branch,
     appUrl: options.appUrl,
     cdpUrl: options.cdpUrl,
-    profile: options.profile,
     networkId: options.networkId,
     proxyId: options.proxyId,
     proxyForwardId: options.proxyForwardId,
@@ -528,7 +493,6 @@ export function buildManifest({ root, worktree, origin, metadata }) {
     appUrl: metadata.appUrl ?? origin,
     brokerUrl: metadata.brokerUrl,
     cdpUrl: metadata.cdpUrl,
-    profile: metadata.profile,
     networkId: metadata.networkId,
     proxyId: metadata.proxyId,
     proxyForwardId: metadata.proxyForwardId,
@@ -562,8 +526,9 @@ export function createAppRegistry(initialApps = []) {
     upsert(rawApp) {
       const app = validateAppRegistration(rawApp);
       const existing = apps.get(app.id);
+      const { profile: _profile, devserver: _devserver, servers: _servers, engine: _engine, ...current } = existing ?? {};
       const saved = {
-        ...existing,
+        ...current,
         ...app,
         updatedAt: new Date().toISOString(),
       };
@@ -870,7 +835,7 @@ function buildAppResponse(app, sessions) {
   return omitUndefined({
     ...app,
     cdpUrl: defaultSession?.cdpUrl,
-    profile: defaultSession?.profile ?? app.profile,
+    profile: defaultSession?.profile,
     networkId: defaultSession?.networkId ?? app.networkId,
     proxyId: defaultSession?.proxyId ?? app.proxyId,
     proxyForwardId: defaultSession?.proxyForwardId ?? app.proxyForwardId,
@@ -1420,6 +1385,12 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, sessions, brok
       proxyForwardId: payload.proxyForwardId ?? app.proxyForwardId,
       proxyServer: payload.proxyServer ?? app.proxyServer,
     });
+    const brokerStatus = proxy.proxyId && proxy.proxyServer
+      ? await brokerJson(brokerUrl, '/_broker/status')
+      : undefined;
+    const proxyPeer = brokerStatus?.topology?.mode === 'ssh' && brokerStatus.topology.remote
+      ? 'ssh-peer'
+      : undefined;
     const start = await brokerJson(brokerUrl, '/_broker/start', {
       method: 'POST',
       body: omitUndefined({
@@ -1427,6 +1398,8 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, sessions, brok
         networkId: network.networkId,
         proxyForwardId: proxy.proxyForwardId,
         proxyServer: proxy.proxyServer,
+        proxyPeer,
+        proxyName: proxyPeer ? proxy.proxyId : undefined,
         proxyBypassList: payload.proxyBypassList,
         ignoreSslErrors: payload.ignoreSslErrors,
         headless: payload.headless,
@@ -1492,7 +1465,7 @@ function resolveBrowserSessionSlot({ app, payload, task }) {
     ? requiredString(payload.profile, 'profile')
     : task
       ? composeBrowserSessionId(app.id, task.id)
-      : app.profile ?? app.id;
+      : app.id;
   validateBrowserProfileName(profile, 'profile');
   return {
     taskId: task?.id,
@@ -1813,9 +1786,8 @@ function validateMetadata(metadata) {
 /**
  * Validate and normalize a registry app payload.
  *
- * Registration is deliberately metadata-only: pw-dev does not start the app
- * devserver here. Browser ownership is handled later through app-scoped browser
- * endpoints that call the broker.
+ * Registration is deliberately metadata-only. Browser ownership is handled
+ * later through app-scoped browser endpoints that call the broker.
  *
  * @param {Record<string, unknown>} rawApp App registration body.
  * @returns {PwDevAppManifest}
@@ -1829,6 +1801,11 @@ function validateAppRegistration(rawApp) {
   if (typeof id !== 'string' || id.trim() === '') {
     throw new Error('id must be a non-empty string');
   }
+  for (const field of ['profile', 'devserver', 'servers', 'engine']) {
+    if (Object.hasOwn(rawApp, field)) {
+      throwValidationError(`${field} is not supported in app registration`);
+    }
+  }
 
   const app = {
     ok: true,
@@ -1838,13 +1815,9 @@ function validateAppRegistration(rawApp) {
     worktree: optionalPath(rawApp.worktree, 'worktree'),
     branch: optionalString(rawApp.branch, 'branch'),
     appUrl: optionalString(rawApp.appUrl, 'appUrl'),
-    devserver: rawApp.devserver === undefined ? undefined : validateDevserverCommand(rawApp.devserver),
-    servers: rawApp.servers === undefined ? undefined : validateAppServers(rawApp.servers),
-    engine: rawApp.engine === undefined ? undefined : validateAppEngine(rawApp.engine),
     accounts: rawApp.accounts === undefined ? undefined : validateAccounts(rawApp.accounts),
     brokerUrl: optionalString(rawApp.brokerUrl, 'brokerUrl'),
     cdpUrl: optionalString(rawApp.cdpUrl, 'cdpUrl'),
-    profile: optionalString(rawApp.profile, 'profile'),
     networkId: optionalString(rawApp.networkId, 'networkId'),
     proxyId: optionalString(rawApp.proxyId, 'proxyId'),
     proxyForwardId: optionalString(rawApp.proxyForwardId, 'proxyForwardId'),
@@ -2004,60 +1977,6 @@ function validateAccounts(rawAccounts) {
     });
   }
   return accounts;
-}
-
-/**
- * Validate app devserver command metadata.
- *
- * @param {unknown} rawDevserver Devserver metadata payload.
- * @returns {PwDevDevserverCommand}
- */
-function validateDevserverCommand(rawDevserver) {
-  if (!rawDevserver || typeof rawDevserver !== 'object') {
-    throwValidationError('devserver must be an object');
-  }
-  return omitUndefined({
-    command: requiredString(rawDevserver.command, 'devserver.command'),
-    args: rawDevserver.args === undefined ? undefined : validateStringArray(rawDevserver.args, 'devserver.args'),
-    cwd: optionalPath(rawDevserver.cwd, 'devserver.cwd'),
-    env: rawDevserver.env === undefined ? undefined : validateStringRecord(rawDevserver.env, 'devserver.env'),
-  });
-}
-
-function validateAppServers(rawServers) {
-  if (!Array.isArray(rawServers)) {
-    throwValidationError('servers must be an array');
-  }
-  return rawServers.map((server, index) => {
-    if (!server || typeof server !== 'object' || Array.isArray(server)) {
-      throwValidationError(`servers[${index}] must be an object`);
-    }
-    const port = server.port;
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      throwValidationError(`servers[${index}].port must be an integer between 1 and 65535`);
-    }
-    return {
-      name: requiredString(server.name, `servers[${index}].name`),
-      port,
-    };
-  });
-}
-
-/**
- * Validate app runtime engine metadata.
- *
- * @param {unknown} rawEngine Engine metadata payload.
- * @returns {PwDevAppEngine}
- */
-function validateAppEngine(rawEngine) {
-  if (!rawEngine || typeof rawEngine !== 'object') {
-    throwValidationError('engine must be an object');
-  }
-  return omitUndefined({
-    name: optionalString(rawEngine.name, 'engine.name'),
-    version: optionalString(rawEngine.version, 'engine.version'),
-    requirement: optionalString(rawEngine.requirement, 'engine.requirement'),
-  });
 }
 
 /**
@@ -2427,12 +2346,8 @@ if (status.broker.reachable === false) {
 }
 
 if (status.broker.status?.topology?.remote && status.broker.status.topology.mode === 'ssh') {
-  // Broker was started with --ssh; the SSH peer is the broker's remote network side.
-  // A mapped proxy is generally needed when the remote browser must reach
-  // agent-local debugging tools. If the browser should use a Whistle proxy on
-  // the agent machine, create a broker network with proxy.mode: "ssh-peer" so
-  // the broker maps the remote port to that local proxy instead of pointing
-  // Chrome at localhost.
+  // A selected proxyId is mapped by the broker automatically. Agents must not
+  // create or choose proxy forwards/ports.
 }
 \`\`\`
 
@@ -2482,16 +2397,6 @@ await fetch('${serverUrl}/_pwdev/apps', {
   body: JSON.stringify({
     id: 'fortisase-dev',
     appUrl: 'https://dev.fortisase-sovereign.com',
-    devserver: {
-      command: 'npm',
-      args: ['run', 'dev'],
-      cwd: '/home/me/work/fortisase',
-    },
-    engine: {
-      name: 'node',
-      version: process.version,
-      requirement: '>=18',
-    },
     accounts: {
       login: {
         usr: 'xxx',
@@ -2510,8 +2415,8 @@ production accounts, personal credentials, or sensitive tokens in app metadata.
 ## Branch/app lifecycle guidelines
 
 - Treat each development branch or app registration as its own lifecycle
-  boundary. Register an app whose \`devserver.cwd\` points at that branch's
-  worktree, and use that app id for all tasks against that branch.
+  boundary. Register an app with that branch's \`worktree\`, and use that app id
+  for all tasks against that branch.
 - Before starting a browser for an existing broker session identity, check for
   and stop the previous broker instance for the same default profile or
   \`appId + taskId\` session. Do this before calling
@@ -2702,6 +2607,11 @@ const updatedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax
 
 Networks are broker-owned browser routing profiles. Use \`networkId\` in browser
 start requests instead of creating proxy forwards directly.
+
+For normal managed-proxy starts, use \`proxyId\` instead. If the selected broker
+reports SSH remote topology, it automatically creates or reuses the SSH mapping
+to that proxy on its peer. \`proxyForwardId\` and mapped ports are broker
+internals, exposed only on the resulting session for diagnostics.
 
 When the broker topology reports \`remote: true\` with \`mode: "ssh"\`, prefer a
 mapped proxy network for agent-local debugging traffic. Typical flow:

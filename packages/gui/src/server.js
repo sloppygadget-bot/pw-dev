@@ -111,10 +111,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   const brokerUrls = discoverBrokerUrls({ brokerUrl, serverStatus, apps, sessions });
   const brokers = await Promise.all(brokerUrls.map((url) => collectBrokerSnapshot(url)));
   const primaryBroker = brokers.find((broker) => broker.url === brokerUrl) ?? brokers[0];
-  const [appServerStatuses, proxyStatuses] = await Promise.all([
-    collectAppServerStatuses(apps.body?.apps),
-    collectProxyStatuses(serverProxies.body?.proxies, proxyStatus.body?.proxies),
-  ]);
+  const proxyStatuses = await collectProxyStatuses(serverProxies.body?.proxies, proxyStatus.body?.proxies);
 
   return {
     ok: true,
@@ -124,7 +121,6 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
       status: serverStatus,
       apps,
       sessions,
-      appServerStatuses,
       proxies: serverProxies,
       proxyStatuses,
       networks: serverNetworks,
@@ -170,17 +166,6 @@ async function collectBrokerSnapshot(url) {
     fetchJsonFrom(`${url}/_broker/proxy-forwards`),
   ]);
   return { url, status, networks, proxyForwards };
-}
-
-async function collectAppServerStatuses(apps) {
-  return Promise.all((Array.isArray(apps) ? apps : []).flatMap((app) =>
-    (Array.isArray(app.servers) ? app.servers : []).map(async (server) => ({
-      appId: app.id,
-      name: server.name,
-      port: server.port,
-      running: await probeLocalPort(server.port),
-    }))
-  ));
 }
 
 async function collectProxyStatuses(proxies, managedProxies) {

@@ -137,8 +137,7 @@ To serve or register a specific app, include app metadata:
 npm start -- server \
   --root examples/static-site \
   --app-url http://127.0.0.1:5173 \
-  --id checkout-main \
-  --profile checkout-main
+  --id checkout-main
 ```
 
 ## Basic Agent Usage

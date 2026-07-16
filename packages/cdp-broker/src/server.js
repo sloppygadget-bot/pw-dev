@@ -202,7 +202,7 @@ async function handleControlRequest({ req, res, browserManager, proxyForwardMana
       return;
     }
     const options = await readJsonBody(req);
-    const instance = await browserManager.start(resolveStartOptions({
+    const instance = await browserManager.start(await resolveStartOptions({
       options,
       proxyForwardManager,
       networkManager,
@@ -246,7 +246,7 @@ function normalizeBrokerTopology(topology) {
   };
 }
 
-function resolveStartOptions({ options, proxyForwardManager, networkManager, instances }) {
+async function resolveStartOptions({ options, proxyForwardManager, networkManager, instances }) {
   if (options.networkId && (options.proxyServer || options.proxyForwardId)) {
     const error = new Error('networkId is mutually exclusive with proxyServer and proxyForwardId');
     error.statusCode = 400;
@@ -272,6 +272,29 @@ function resolveStartOptions({ options, proxyForwardManager, networkManager, ins
       ignoreSslErrors: options.ignoreSslErrors ?? network.ignoreSslErrors,
     });
   }
+  if (options.proxyPeer === 'ssh-peer') {
+    if (options.proxyForwardId || !options.proxyServer) {
+      const error = new Error('ssh-peer proxy resolution requires proxyServer without proxyForwardId');
+      error.statusCode = 400;
+      throw error;
+    }
+    const remotePort = proxyPort(options.proxyServer);
+    const forward = await proxyForwardManager?.ensure?.({
+      remotePort,
+      name: options.proxyName,
+    });
+    if (!forward) {
+      const error = new Error('ssh-peer proxy resolution requires broker --ssh');
+      error.statusCode = 400;
+      throw error;
+    }
+    const { proxyPeer: _proxyPeer, proxyName: _proxyName, ...launchOptions } = options;
+    return {
+      ...launchOptions,
+      proxyForwardId: forward.forwardId,
+      proxyServer: forward.proxyServer,
+    };
+  }
   if (!options.proxyForwardId) return options;
   const forward = proxyForwardManager?.get?.(options.proxyForwardId, instances);
   if (!forward) {
@@ -283,6 +306,24 @@ function resolveStartOptions({ options, proxyForwardManager, networkManager, ins
     ...options,
     proxyServer: forward.proxyServer,
   };
+}
+
+function proxyPort(proxyServer) {
+  let url;
+  try {
+    url = new URL(proxyServer);
+  } catch {
+    const error = new Error('proxyServer must be an absolute URL for ssh-peer proxy resolution');
+    error.statusCode = 400;
+    throw error;
+  }
+  const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    const error = new Error('proxyServer must include a valid TCP port for ssh-peer proxy resolution');
+    error.statusCode = 400;
+    throw error;
+  }
+  return port;
 }
 
 function omitUndefined(value) {

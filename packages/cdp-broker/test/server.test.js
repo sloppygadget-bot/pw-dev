@@ -159,6 +159,45 @@ test('start control route resolves proxyForwardId to proxyServer', async () => {
   }
 });
 
+test('start control route creates an SSH-peer mapping for a server-side proxy', async () => {
+  const starts = [];
+  const ensures = [];
+  const server = createBrokerServer({
+    browserManager: {
+      activeInstance: () => undefined,
+      listInstances: () => [],
+      start: async (options) => {
+        starts.push(options);
+        return {
+          id: 'bkr_ssh', profile: options.profile, chromeHost: '127.0.0.1', chromePort: 9333,
+          proxyForwardId: options.proxyForwardId, proxyServer: options.proxyServer, pid: 123,
+          startedAt: '2026-06-16T00:00:00.000Z',
+        };
+      },
+    },
+    proxyForwardManager: {
+      ensure: async (options) => {
+        ensures.push(options);
+        return { forwardId: 'pf_ssh', proxyServer: 'http://127.0.0.1:18899' };
+      },
+    },
+  });
+  const { port, close } = await listen(server);
+  try {
+    const response = await requestJson({
+      port, method: 'POST', path: '/_broker/start',
+      body: { profile: 'work-okta', proxyServer: 'http://127.0.0.1:8899', proxyPeer: 'ssh-peer', proxyName: 'whistle-main' },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(ensures, [{ remotePort: 8899, name: 'whistle-main' }]);
+    assert.deepEqual(starts, [{
+      profile: 'work-okta', proxyForwardId: 'pf_ssh', proxyServer: 'http://127.0.0.1:18899',
+    }]);
+  } finally {
+    await close();
+  }
+});
+
 test('start control route rejects proxyServer with proxyForwardId', async () => {
   const server = createBrokerServer({
     browserManager: {

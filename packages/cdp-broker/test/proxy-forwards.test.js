@@ -88,6 +88,23 @@ test('allocates local port when omitted', async () => {
   assert.equal(forward.proxyServer, 'http://127.0.0.1:19000');
 });
 
+test('reuses a broker-owned forward for the same SSH-peer proxy port', async () => {
+  const manager = createProxyForwardManager({
+    sshTarget: 'user@code-server',
+    controlPersist: '24h',
+    controlPath: '/tmp/control-%C',
+    spawnImpl: () => fakeChild(),
+    getFreePortImpl: async () => 19001,
+    quiet: true,
+  });
+
+  const first = await manager.ensure({ remotePort: 8899, name: 'whistle-main' });
+  const second = await manager.ensure({ remotePort: 8899, name: 'whistle-main' });
+
+  assert.equal(second.forwardId, first.forwardId);
+  assert.equal(manager.list().length, 1);
+});
+
 test('rejects create without SSH target', async () => {
   const manager = createProxyForwardManager({ quiet: true });
 

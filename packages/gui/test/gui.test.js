@@ -89,8 +89,6 @@ test('gui proxies a managed Whistle GUI under a same-origin route', async () => 
 });
 
 test('gui snapshot collects from server, broker, and proxy manager', async () => {
-  const appServer = await startJsonServer({ '/healthz': { ok: true } });
-  const appServerPort = Number(new URL(appServer.origin).port);
   const pwdev = await startJsonServer({
     '/_pwdev/status': {
       ok: true,
@@ -100,7 +98,7 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     },
     '/_pwdev/apps': {
       ok: true,
-      apps: [{ id: 'main', networkId: 'agent-whistle', servers: [{ name: 'react', port: appServerPort }] }],
+      apps: [{ id: 'main', networkId: 'agent-whistle' }],
     },
     '/_pwdev/proxies': { ok: true, proxies: [{ id: 'proxy-main' }] },
     '/_pwdev/networks': { ok: true, networks: [{ id: 'agent-whistle' }] },
@@ -131,7 +129,6 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     assert.equal(snapshot.statusCode, 200);
     assert.equal(snapshot.body.ok, true);
     assert.equal(snapshot.body.server.apps.body.apps[0].id, 'main');
-    assert.deepEqual(snapshot.body.server.appServerStatuses, [{ appId: 'main', name: 'react', port: appServerPort, running: true }]);
     assert.deepEqual(snapshot.body.server.proxyStatuses, [{ id: 'proxy-main', running: true }]);
     assert.equal(snapshot.body.broker.status.body.state, 'active');
     assert.equal(snapshot.body.broker.status.body.instanceCount, 1);
@@ -141,7 +138,6 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     await pwdev.close();
     await broker.close();
     await proxy.close();
-    await appServer.close();
   }
 });
 

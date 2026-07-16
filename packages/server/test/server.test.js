@@ -22,7 +22,6 @@ test('parseArgs reads server options', () => {
     '--broker-url', 'http://127.0.0.1:18080',
     '--proxy-manager-url', 'http://127.0.0.1:9697',
     '--cdp-url', 'http://127.0.0.1:18080/_broker/instances/checkout-main',
-    '--profile', 'checkout-main',
     '--proxy-forward-id', 'whistle',
     '--proxy-server', 'http://127.0.0.1:8899',
     '--register-default-app',
@@ -38,7 +37,6 @@ test('parseArgs reads server options', () => {
   assert.equal(options.brokerUrl, 'http://127.0.0.1:18080');
   assert.equal(options.proxyManagerUrl, 'http://127.0.0.1:9697');
   assert.equal(options.cdpUrl, 'http://127.0.0.1:18080/_broker/instances/checkout-main');
-  assert.equal(options.profile, 'checkout-main');
   assert.equal(options.proxyForwardId, 'whistle');
   assert.equal(options.proxyServer, 'http://127.0.0.1:8899');
   assert.equal(options.registerDefaultApp, true);
@@ -97,7 +95,6 @@ test('server exposes pw-dev manifest and status endpoints', async () => {
     appUrl: 'http://127.0.0.1:5173',
     brokerUrl: 'http://127.0.0.1:18080',
     cdpUrl: 'http://127.0.0.1:18080/_broker/instances/checkout-main',
-    profile: 'checkout-main',
   });
   try {
     const manifestResponse = await get(`${server.origin}/_pwdev/manifest`);
@@ -112,7 +109,6 @@ test('server exposes pw-dev manifest and status endpoints', async () => {
       branch: 'main',
       appUrl: 'http://127.0.0.1:5173',
       cdpUrl: 'http://127.0.0.1:18080/_broker/instances/checkout-main',
-      profile: 'checkout-main',
       serverUrl: server.origin,
     });
 
@@ -182,8 +178,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /stop the previous broker instance/);
     assert.match(instructions.body, /\/_pwdev\/networks/);
     assert.match(instructions.body, /networkId/);
-    assert.match(instructions.body, /\/_pwdev\/broker\/proxy-forwards/);
-    assert.match(instructions.body, /brokerProxyForwardId/);
+    assert.match(instructions.body, /automatically creates or reuses the SSH mapping/);
     assert.match(instructions.body, /\/_pwdev\/sessions/);
     assert.match(instructions.body, /Playwright package, CLI/);
     assert.match(instructions.body, /bundled skills/);
@@ -247,23 +242,6 @@ test('server registers and exposes multiple apps', async () => {
       worktree: root,
       branch: 'feature/tax',
       appUrl: 'http://127.0.0.1:5174',
-      servers: [
-        { name: 'react', port: 5174 },
-        { name: 'api', port: 3100 },
-      ],
-      devserver: {
-        command: 'npm',
-        args: ['run', 'dev'],
-        cwd: root,
-        env: {
-          PORT: '5174',
-        },
-      },
-      engine: {
-        name: 'node',
-        version: process.version,
-        requirement: '>=18',
-      },
       accounts: {
         login: {
           usr: 'xxx',
@@ -271,29 +249,11 @@ test('server registers and exposes multiple apps', async () => {
         },
       },
       cdpUrl: 'http://127.0.0.1:18080/_broker/instances/checkout-tax',
-      profile: 'checkout-tax',
       proxyForwardId: 'whistle',
     });
     assert.equal(created.statusCode, 200);
     assert.equal(created.body.app.id, 'checkout-tax');
     assert.equal(created.body.app.proxyForwardId, 'whistle');
-    assert.deepEqual(created.body.app.servers, [
-      { name: 'react', port: 5174 },
-      { name: 'api', port: 3100 },
-    ]);
-    assert.deepEqual(created.body.app.devserver, {
-      command: 'npm',
-      args: ['run', 'dev'],
-      cwd: root,
-      env: {
-        PORT: '5174',
-      },
-    });
-    assert.deepEqual(created.body.app.engine, {
-      name: 'node',
-      version: process.version,
-      requirement: '>=18',
-    });
     assert.deepEqual(created.body.app.accounts, {
       login: {
         usr: 'xxx',
@@ -317,7 +277,6 @@ test('server registers and exposes multiple apps', async () => {
     assert.equal(manifest.statusCode, 200);
     assert.equal(manifest.body.id, 'checkout-tax');
     assert.equal(manifest.body.appUrl, 'http://127.0.0.1:5175');
-    assert.equal(manifest.body.devserver.command, 'npm');
 
     const deleted = await deleteJson(`${server.origin}/_pwdev/apps/checkout-tax`);
     assert.equal(deleted.statusCode, 200);
@@ -325,37 +284,6 @@ test('server registers and exposes multiple apps', async () => {
 
     const missing = await getJson(`${server.origin}/_pwdev/apps/checkout-tax`);
     assert.equal(missing.statusCode, 404);
-  } finally {
-    await server.close();
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('server validates app devserver metadata', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
-  const server = await startPwDevServer({
-    root,
-    port: 0,
-    id: 'checkout-main',
-  });
-  try {
-    const created = await postJson(`${server.origin}/_pwdev/apps`, {
-      id: 'checkout-tax',
-      appUrl: 'http://127.0.0.1:5174',
-      devserver: {
-        command: 'npm',
-        args: ['run', 123],
-      },
-    });
-    assert.equal(created.statusCode, 400);
-    assert.match(created.body.error, /devserver\.args\[1\] must be a non-empty string/);
-
-    const invalidServer = await postJson(`${server.origin}/_pwdev/apps`, {
-      id: 'checkout-tax',
-      servers: [{ name: 'react', port: 70000 }],
-    });
-    assert.equal(invalidServer.statusCode, 400);
-    assert.match(invalidServer.body.error, /servers\[0\]\.port must be an integer between 1 and 65535/);
   } finally {
     await server.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -581,7 +509,6 @@ test('server manages app browser sessions through broker', async () => {
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
       proxyForwardId: 'whistle',
     });
 
@@ -668,7 +595,6 @@ test('server resolves app proxyId to proxy server for browser start', async () =
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
       proxyId: 'whistle-main',
     });
 
@@ -676,7 +602,7 @@ test('server resolves app proxyId to proxy server for browser start', async () =
     assert.equal(started.statusCode, 200);
     assert.equal(started.body.app.proxyId, 'whistle-main');
     assert.equal(started.body.app.proxyServer, 'http://127.0.0.1:8899');
-    assert.deepEqual(broker.requests[0], {
+    assert.deepEqual(broker.requests[1], {
       method: 'POST',
       path: '/_broker/start',
       body: {
@@ -684,6 +610,36 @@ test('server resolves app proxyId to proxy server for browser start', async () =
         proxyServer: 'http://127.0.0.1:8899',
       },
     });
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server asks an SSH broker to map a registered server-side proxy', async () => {
+  const broker = await startMockBroker({ topology: { mode: 'ssh', remote: true } });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0, id: 'checkout-main', brokerUrl: broker.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'whistle-main', kind: 'whistle', proxyUrl: 'http://127.0.0.1:8899',
+    });
+    await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'checkout-tax', appUrl: 'http://127.0.0.1:5174', proxyId: 'whistle-main',
+    });
+
+    const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {});
+    assert.equal(started.statusCode, 200);
+    assert.deepEqual(broker.requests, [
+      { method: 'GET', path: '/_broker/status', body: {} },
+      {
+        method: 'POST', path: '/_broker/start', body: {
+          profile: 'checkout-tax', proxyServer: 'http://127.0.0.1:8899',
+          proxyPeer: 'ssh-peer', proxyName: 'whistle-main',
+        },
+      },
+    ]);
   } finally {
     await server.close();
     await broker.close();
@@ -709,7 +665,6 @@ test('server resolves broker proxy-forward registrations for browser start', asy
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
       proxyId: 'whistle-forward',
     });
 
@@ -745,7 +700,6 @@ test('server passes networkId to broker browser start', async () => {
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
       networkId: 'shared-whistle',
     });
 
@@ -781,7 +735,6 @@ test('server rejects browser start with networkId mixed with proxy options', asy
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
     });
 
     const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {
@@ -811,7 +764,6 @@ test('server rejects unknown app proxyId on browser start', async () => {
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
       proxyId: 'missing-proxy',
     });
 
@@ -833,7 +785,6 @@ test('server probes default broker URL when broker-url is omitted', async () => 
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
     });
 
     const status = await getJson(`${server.origin}/_pwdev/status`);
@@ -891,7 +842,6 @@ test('server validates browser task metadata', async () => {
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
     });
 
     const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {
@@ -921,7 +871,6 @@ test('server rejects duplicate browser start while task is active', async () => 
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
     });
 
     const first = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {
@@ -990,7 +939,6 @@ test('server starts parallel task browser sessions for one app', async () => {
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'main',
       appUrl: 'http://127.0.0.1:5173',
-      profile: 'main',
     });
 
     const first = await postJson(`${server.origin}/_pwdev/apps/main/browser/start`, {
@@ -1042,7 +990,6 @@ test('server exposes first-class session routes and can stop by session id', asy
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
     });
 
     await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {});
@@ -1096,7 +1043,6 @@ test('server automatically removes stale sessions from session and app reads', a
     await postJson(`${server.origin}/_pwdev/apps`, {
       id: 'checkout-tax',
       appUrl: 'http://127.0.0.1:5174',
-      profile: 'checkout-tax',
     });
 
     const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {
@@ -1302,7 +1248,7 @@ function requestJson(url, method, payload) {
   });
 }
 
-function startMockBroker() {
+function startMockBroker({ topology } = {}) {
   const requests = [];
   const upgrades = [];
   const instances = new Map();
@@ -1333,6 +1279,7 @@ function startMockBroker() {
         state: instances.size > 0 ? 'active' : 'idle',
         instanceCount: instances.size,
         instances: [...instances.values()],
+        topology,
       });
       return;
     }

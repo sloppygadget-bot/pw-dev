@@ -96,8 +96,7 @@ Expose app metadata for agents:
 ```bash
 npm start -- server \
   --root examples/static-site \
-  --app-url http://127.0.0.1:5173 \
-  --profile checkout-main
+  --app-url http://127.0.0.1:5173
 ```
 
 By default the server probes the broker at `http://127.0.0.1:18080`. Use
@@ -173,27 +172,12 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
     "worktree": "/home/me/work/fortisase",
     "branch": "main",
     "appUrl": "https://dev.fortisase-sovereign.com",
-    "servers": [
-      { "name": "react", "port": 5173 },
-      { "name": "api", "port": 3100 }
-    ],
-    "devserver": {
-      "command": "npm",
-      "args": ["run", "dev"],
-      "cwd": "/home/me/work/fortisase"
-    },
-    "engine": {
-      "name": "node",
-      "version": "v22.16.0",
-      "requirement": ">=18"
-    },
     "accounts": {
       "login": {
         "usr": "xxx",
         "pwd": "xxx"
       }
     },
-    "profile": "fortisase-dev",
     "proxyId": "whistle-main"
   }'
 ```
@@ -236,9 +220,9 @@ at the pw-dev server instead of exposing the broker port.
 
 Proxy registrations are reusable metadata only. They have no runner or status;
 update a proxy port by re-posting the same proxy `id` with a new `proxyUrl`.
-Networks are broker-owned browser routing profiles. Prefer `networkId` for new
-browser-start workflows; the broker resolves it to Chrome launch options and
-owns any SSH proxy forward needed for `ssh-peer` networks.
+When a broker reports SSH remote topology, selecting a registered proxy by
+`proxyId` automatically creates or reuses a broker-owned SSH mapping. Agents do
+not need proxy-forward IDs or mapped ports.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 

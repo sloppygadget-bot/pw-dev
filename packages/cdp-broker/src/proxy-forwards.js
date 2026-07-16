@@ -75,6 +75,17 @@ class ProxyForwardManager {
     return describeForward(forward);
   }
 
+  /**
+   * Return the broker-owned mapping for a proxy on the SSH peer, creating it
+   * only when no mapping for that peer port already exists.
+   */
+  async ensure({ remotePort, name } = {}) {
+    const normalizedRemotePort = normalizePort(remotePort, 'remotePort');
+    const existing = [...this.forwards.values()].find((forward) => forward.remotePort === normalizedRemotePort);
+    if (existing) return describeForward(existing);
+    return this.create({ remotePort: normalizedRemotePort, name });
+  }
+
   list(instances = []) {
     return [...this.forwards.values()].map((forward) =>
       describeForward(forward, inUseBy(forward.forwardId, instances))

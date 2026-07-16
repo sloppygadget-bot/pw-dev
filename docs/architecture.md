@@ -57,7 +57,7 @@ sequenceDiagram
   Human->>Chrome: complete login/MFA if needed
 
   Human->>Server: GET /_pwdev/apps/:id/manifest
-  Server-->>Human: appUrl, proxied cdpUrl, profile, worktree metadata
+  Server-->>Human: appUrl, proxied cdpUrl, worktree metadata
 
   Human->>Server: connectOverCDP(cdpUrl)
   Server->>Broker: proxy CDP HTTP/WebSocket
@@ -168,7 +168,6 @@ The manifest is the main agent contract:
     }
   },
   "cdpUrl": "http://127.0.0.1:9696/_pwdev/broker/instances/bkr_feature_tax",
-  "profile": "checkout-feature-tax",
   "proxyId": "whistle-main"
 }
 ```
@@ -195,9 +194,8 @@ await page.goto(manifest.appUrl);
 - CLI starts and stops things for humans.
 - API exposes structured discovery and control for agents.
 - The server does not import Playwright by default.
-- The server records app, proxy, devserver, engine, and account metadata; it is
-  not an app runner or proxy runner. Account metadata is for non-production
-  test accounts only.
+- The server records app, proxy, and account metadata; it is not an app runner
+  or proxy runner. Account metadata is for non-production test accounts only.
 - `proxy` is the optional runner for managed Whistle proxies. It accepts
   external-agent rulesets, allocates separate proxy and GUI ports, registers
   the proxy, and can attach it to an app.
