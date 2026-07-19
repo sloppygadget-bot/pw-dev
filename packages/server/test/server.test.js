@@ -172,24 +172,16 @@ test('server exposes instructions and client helper source', async () => {
     const instructions = await get(`${server.origin}/_pwdev/instructions`);
     assert.equal(instructions.statusCode, 200);
     assert.match(instructions.body, /\/_pwdev\/status/);
-    assert.match(instructions.body, /\/_pwdev\/apps\/checkout-tax\/manifest/);
-    assert.match(instructions.body, /\/_pwdev\/broker\/\*/);
-    assert.match(instructions.body, /Branch\/app lifecycle guidelines/);
-    assert.match(instructions.body, /stop the previous broker instance/);
-    assert.match(instructions.body, /\/_pwdev\/networks/);
-    assert.match(instructions.body, /networkId/);
-    assert.match(instructions.body, /automatically creates or reuses the SSH mapping/);
+    assert.match(instructions.body, /\/_pwdev\/browsers\/docs-crawler/);
+    assert.match(instructions.body, /Use only this server/);
+    assert.match(instructions.body, /\/_pwdev\/browsers/);
+    assert.match(instructions.body, /create\/reuse the required mapping/);
     assert.match(instructions.body, /\/_pwdev\/sessions/);
-    assert.match(instructions.body, /Playwright package, CLI/);
-    assert.match(instructions.body, /bundled skills/);
-    assert.match(instructions.body, /Playwright installation owned by the client agent/);
-    assert.match(instructions.body, /attach to the pw-dev broker session/);
-    assert.match(instructions.body, /close\(\) disconnects this client/);
-    assert.match(instructions.body, /PUT \/_pwdev\/proxy\/proxies\/:id\/rules/);
-    assert.match(instructions.body, /complete rules state/);
-    assert.match(instructions.body, /starts the local proxy manager lazily/);
-    assert.match(instructions.body, /--proxy-manager-url/);
-    assert.doesNotMatch(instructions.body, /If `pw-dev proxy` is running/);
+    assert.match(instructions.body, /browser\.close\(\)/);
+    assert.match(instructions.body, /App-scoped/);
+    assert.match(instructions.body, /Example workflows/);
+    assert.match(instructions.body, /App-based/);
+    assert.match(instructions.body, /Standalone/);
 
     const env = await getJson(`${server.origin}/_pwdev/env`);
     assert.equal(env.statusCode, 200);
@@ -219,8 +211,27 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(client.body, /createPwDevNetwork/);
     assert.match(client.body, /networkId/);
     assert.match(client.body, /loadPwDevManifest/);
+    assert.match(client.body, /upsertPwDevBrowser/);
+    assert.match(client.body, /loadPwDevBrowser/);
+    assert.match(client.body, /browserId/);
     assert.match(client.body, /connectPwDev/);
     assert.match(client.body, /replacePwDevManagedProxyRules/);
+  } finally {
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server exposes a machine-readable API reference', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0 });
+  try {
+    const api = await getJson(`${server.origin}/_pwdev/api`);
+    assert.equal(api.statusCode, 200);
+    assert.equal(api.body.ok, true);
+    assert.equal(api.body.entities.browsers.persistent, true);
+    assert.equal(api.body.entities.sessions.sourceOfTruth, 'broker');
+    assert.equal(api.body.endpoints.some((endpoint) => endpoint.path === '/_pwdev/browsers/:id/start'), true);
   } finally {
     await server.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -338,7 +349,58 @@ test('server persists browser templates and rematerializes their network before 
     assert.equal(created.statusCode, 200);
     const started = await postJson(`${server.origin}/_pwdev/browsers/checkout-tax-browser/start`, {});
     assert.equal(started.statusCode, 200);
-    assert.equal(started.body.browser.runtime.instanceId, 'bkr_checkout-tax-browser');
+    assert.equal(started.body.browser.runtime.browserInstanceId, 'bkr_checkout-tax-browser');
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server starts a standalone browser template without an app', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const broker = await startMockBroker();
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
+  try {
+    const created = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'docs-crawler', targetUrl: 'https://example.com/docs', headless: true,
+    });
+    assert.equal(created.statusCode, 200);
+    assert.equal(created.body.browser.appId, undefined);
+    const started = await postJson(`${server.origin}/_pwdev/browsers/docs-crawler/start`, {});
+    assert.equal(started.statusCode, 200);
+    assert.equal(started.body.browser.targetUrl, 'https://example.com/docs');
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server starts and stops isolated named sessions from one browser template', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const broker = await startMockBroker();
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/browsers`, { id: 'checkout-worker', headless: true });
+    const first = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker/start`, { sessionId: 'shard-1' });
+    const second = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker/start`, { sessionId: 'shard-2' });
+    assert.equal(first.statusCode, 200);
+    assert.equal(second.statusCode, 200);
+    assert.equal(first.body.session.sessionId, 'checkout-worker__shard-1');
+    assert.equal(first.body.session.profile, 'checkout-worker__shard-1');
+    assert.equal(second.body.session.profile, 'checkout-worker__shard-2');
+
+    const listed = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.deepEqual(listed.body.sessions.map((session) => session.sessionId), [
+      'checkout-worker__shard-1',
+      'checkout-worker__shard-2',
+    ]);
+
+    const stopped = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker/stop`, { sessionId: 'shard-1' });
+    assert.equal(stopped.statusCode, 200);
+    const remaining = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.deepEqual(remaining.body.sessions.map((session) => session.sessionId), ['checkout-worker__shard-2']);
   } finally {
     await server.close();
     await broker.close();
@@ -552,88 +614,23 @@ test('server validates proxy and account registrations', async () => {
   }
 });
 
-test('server manages app browser sessions through broker', async () => {
-  const broker = await startMockBroker();
+test('server retires app-scoped browser lifecycle routes', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
     root,
     port: 0,
-    id: 'checkout-main',
-    brokerUrl: broker.origin,
   });
   try {
-    await postJson(`${server.origin}/_pwdev/apps`, {
-      id: 'checkout-tax',
-      appUrl: 'http://127.0.0.1:5174',
-      proxyForwardId: 'whistle',
-    });
-
-    const started = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {
-      ignoreSslErrors: true,
-      task: {
-        id: 'smoke-login-20260629',
-        label: 'Smoke login flow',
-        owner: 'codex',
-      },
-    });
-    assert.equal(started.statusCode, 200);
-    assert.equal(started.body.session.sessionId, 'checkout-tax__smoke-login-20260629');
-    assert.equal(started.body.session.browserInstanceId, 'bkr_checkout-tax__smoke-login-20260629');
-    assert.equal(started.body.session.profile, 'checkout-tax__smoke-login-20260629');
-    assert.equal(started.body.session.cdpUrl, `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629`);
-    assert.equal(started.body.browser.cdpUrl, `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629`);
-    assert.equal(started.body.session.proxyForwardId, 'whistle');
-    assert.deepEqual(
-      omitStartedAt(started.body.session.activeTask),
-      {
-        id: 'smoke-login-20260629',
-        label: 'Smoke login flow',
-        owner: 'codex',
-      }
-    );
-    assert.match(started.body.session.activeTask.startedAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(
-      started.body.app.browserSessions['checkout-tax__smoke-login-20260629'].cdpUrl,
-      `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629`
-    );
-    assert.equal(started.body.app.cdpUrl, undefined);
-    assert.deepEqual(broker.requests[0], {
-      method: 'POST',
-      path: '/_broker/start',
-      body: {
-        profile: 'checkout-tax__smoke-login-20260629',
-        proxyForwardId: 'whistle',
-        ignoreSslErrors: true,
-      },
-    });
-
-    const manifest = await getJson(`${server.origin}/_pwdev/apps/checkout-tax/manifest`);
-    assert.equal(manifest.statusCode, 200);
-    assert.equal(manifest.body.browserSessions['checkout-tax__smoke-login-20260629'].activeTask.id, 'smoke-login-20260629');
-
-    const status = await getJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/status`);
-    assert.equal(status.statusCode, 200);
-    assert.equal(status.body.broker.state, 'active');
-    assert.equal(status.body.broker.instanceCount, 1);
-    assert.equal(status.body.app.browserSessions['checkout-tax__smoke-login-20260629'].activeTask.owner, 'codex');
-
-    const stopped = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/stop`, {
-      taskId: 'smoke-login-20260629',
-    });
-    assert.equal(stopped.statusCode, 200);
-    assert.equal(stopped.body.browser.stopped, 'bkr_checkout-tax__smoke-login-20260629');
-    assert.equal(stopped.body.app.cdpUrl, undefined);
-    assert.equal(stopped.body.app.browserInstanceId, undefined);
-    assert.equal(stopped.body.app.activeTask, undefined);
-    assert.equal(stopped.body.app.browserSessions, undefined);
+    const response = await postJson(`${server.origin}/_pwdev/apps/checkout-tax/browser/start`, {});
+    assert.equal(response.statusCode, 410);
+    assert.match(response.body.error, /retired/i);
   } finally {
     await server.close();
-    await broker.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('server resolves app proxyId to proxy server for browser start', async () => {
+test.skip('retired: server resolves app proxyId to proxy server for browser start', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -673,7 +670,7 @@ test('server resolves app proxyId to proxy server for browser start', async () =
   }
 });
 
-test('server asks an SSH broker to map a registered server-side proxy', async () => {
+test.skip('retired: server asks an SSH broker to map a registered server-side proxy', async () => {
   const broker = await startMockBroker({ topology: { mode: 'ssh', remote: true } });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({ root, port: 0, id: 'checkout-main', brokerUrl: broker.origin });
@@ -703,7 +700,7 @@ test('server asks an SSH broker to map a registered server-side proxy', async ()
   }
 });
 
-test('server resolves broker proxy-forward registrations for browser start', async () => {
+test.skip('retired: server resolves broker proxy-forward registrations for browser start', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -743,7 +740,7 @@ test('server resolves broker proxy-forward registrations for browser start', asy
   }
 });
 
-test('server passes networkId to broker browser start', async () => {
+test.skip('retired: server passes networkId to broker browser start', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -778,7 +775,7 @@ test('server passes networkId to broker browser start', async () => {
   }
 });
 
-test('server rejects browser start with networkId mixed with proxy options', async () => {
+test.skip('retired: server rejects browser start with networkId mixed with proxy options', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -807,7 +804,7 @@ test('server rejects browser start with networkId mixed with proxy options', asy
   }
 });
 
-test('server rejects unknown app proxyId on browser start', async () => {
+test.skip('retired: server rejects unknown app proxyId on browser start', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -885,7 +882,7 @@ test('server broker probing does not require global fetch', async () => {
   }
 });
 
-test('server validates browser task metadata', async () => {
+test.skip('retired: server validates browser task metadata', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -914,7 +911,7 @@ test('server validates browser task metadata', async () => {
   }
 });
 
-test('server rejects duplicate browser start while task is active', async () => {
+test.skip('retired: server rejects duplicate browser start while task is active', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -961,7 +958,7 @@ test('server rejects duplicate browser start while task is active', async () => 
   }
 });
 
-test('server clears stale app sessions after a broker restart before retrying start', async () => {
+test.skip('retired: server clears stale app sessions after a broker restart before retrying start', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
@@ -982,7 +979,7 @@ test('server clears stale app sessions after a broker restart before retrying st
   }
 });
 
-test('server starts parallel task browser sessions for one app', async () => {
+test.skip('retired: server starts parallel task browser sessions for one app', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -1034,7 +1031,7 @@ test('server starts parallel task browser sessions for one app', async () => {
   }
 });
 
-test('server exposes first-class session routes and can stop by session id', async () => {
+test.skip('retired: server exposes first-class session routes and can stop by session id', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -1087,7 +1084,7 @@ test('server exposes first-class session routes and can stop by session id', asy
   }
 });
 
-test('server automatically removes stale sessions from session and app reads', async () => {
+test.skip('retired: server automatically removes stale sessions from session and app reads', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({

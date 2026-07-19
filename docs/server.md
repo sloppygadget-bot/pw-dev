@@ -53,8 +53,10 @@ broker is reachable, the server restores those definitions before a network is
 used for a browser start.
 
 Browser templates persist in `<worktree>/.pw-dev/browsers.json`. A template
-contains `id`, `appId`, optional `profile`, `networkId`, `proxyId`, broker
-override, and browser launch options. Its live broker instance is transient:
+contains `id`, optional `appId` and `targetUrl`, optional `profile`,
+`networkId`, `proxyId`, broker override, and browser launch options. `appId`
+links an app's instructions/accounts/defaults when applicable; omit it for a
+standalone crawler or generic automation browser. Its live broker instance is transient:
 after a broker restart, start the same template again rather than recreating
 its configuration.
 
@@ -242,9 +244,10 @@ managed proxy by `proxyId` when starting the browser. The broker maps the proxy
 on its SSH peer automatically and reuses that mapping for later starts.
 
 ```bash
-curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/start \
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
   -H 'content-type: application/json' \
-  -d '{"proxyId":"whistle-main","ignoreSslErrors":true}'
+  -d '{"id":"checkout-tax","appId":"checkout-tax","proxyId":"whistle-main","ignoreSslErrors":true}'
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start
 ```
 
 Use `networkId` only for a named routing policy that is distinct from a managed
@@ -259,7 +262,6 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
     "name": "FortisASE dev",
     "worktree": "/home/me/work/fortisase",
     "branch": "main",
-    "appUrl": "https://dev.fortisase-sovereign.com",
     "readme": "Run npm run dev before testing. Copy .env.example to .env.local.",
     "accounts": {
       "login": {
@@ -280,193 +282,42 @@ how to apply the finished rules through the server-proxied proxy API.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 
-## Browser Lifecycle
+## Browser templates and sessions
 
-Start the app browser:
+Create a persisted browser template, then start it without a launch payload:
 
 ```bash
-curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/start \
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
   -H 'content-type: application/json' \
-  -d '{
-    "ignoreSslErrors": true,
-    "task": {
-      "id": "smoke-login-20260629",
-      "label": "Smoke login flow",
-      "owner": "codex"
-    }
-  }'
+  -d '{"id":"checkout-tax","appId":"checkout-tax","targetUrl":"http://127.0.0.1:5174","profile":"checkout-tax","ignoreSslErrors":true}'
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start
 ```
 
-The server calls broker `POST /_broker/start`. With `task.id`, it starts a
-task-scoped browser session using session id and profile `<app id>__<task id>`
-by default. Sessions are first-class server resources under `/_pwdev/sessions`;
-app reads still project task sessions under `browserSessions[sessionId]` for
-convenience:
-
-```json
-{
-  "ok": true,
-  "session": {
-    "sessionId": "checkout-tax__smoke-login-20260629",
-    "taskId": "smoke-login-20260629",
-    "profile": "checkout-tax__smoke-login-20260629",
-    "browserInstanceId": "bkr_checkout-tax__smoke-login-20260629",
-    "cdpUrl": "http://127.0.0.1:9696/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629",
-    "activeTask": {
-      "id": "smoke-login-20260629",
-      "label": "Smoke login flow",
-      "owner": "codex",
-      "startedAt": "2026-06-29T10:16:05.000Z"
-    }
-  },
-  "app": {
-    "id": "checkout-tax",
-    "appUrl": "http://127.0.0.1:5174",
-    "proxyForwardId": "whistle",
-    "browserSessions": {
-      "checkout-tax__smoke-login-20260629": {
-        "sessionId": "checkout-tax__smoke-login-20260629",
-        "taskId": "smoke-login-20260629",
-        "profile": "checkout-tax__smoke-login-20260629",
-        "cdpUrl": "http://127.0.0.1:9696/_pwdev/broker/instances/bkr_checkout-tax__smoke-login-20260629"
-      }
-    }
-  }
-}
-```
-
-Starting without `task.id` creates the app's default session. App reads project
-that default session back onto `cdpUrl`, `browserInstanceId`, and
-`activeTask`.
-
-List sessions directly:
+The response contains a transient session with its `cdpUrl`. Attach Playwright
+to that URL and navigate to `browser.targetUrl` when present. Sessions are the
+server's reconciled view of live broker instances; broker status remains the
+source of truth. Stop the template or its session explicitly:
 
 ```bash
-curl http://127.0.0.1:9696/_pwdev/sessions
-curl http://127.0.0.1:9696/_pwdev/sessions/checkout-tax__smoke-login-20260629
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop
+curl -X POST http://127.0.0.1:9696/_pwdev/sessions/checkout-tax__default/stop
 ```
 
-The default task profile can be overridden with an explicit `profile` in the
-browser start body. Profile names must contain only letters, numbers, dot,
-underscore, and dash.
-
-Duplicate starts are rejected per slot. A second start for the same task id
-returns `409 Conflict`:
-
-```json
-{
-  "ok": false,
-  "error": "App already has an active browser session for task",
-  "appId": "checkout-tax",
-  "sessionId": "checkout-tax__smoke-login-20260629",
-  "taskId": "smoke-login-20260629",
-  "profile": "checkout-tax__smoke-login-20260629",
-  "browserInstanceId": "bkr_checkout-tax__smoke-login-20260629",
-  "activeTask": {
-    "id": "smoke-login-20260629",
-    "label": "Smoke login flow",
-    "owner": "codex",
-    "startedAt": "2026-06-29T10:16:05.000Z"
-  }
-}
-```
-
-Attach from Playwright:
-
-```js
-import { chromium } from 'playwright';
-
-const started = await fetch('http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/start', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    proxyId: 'smoke-login-proxy',
-    task: { id: 'smoke-login-20260629', owner: 'codex' },
-  }),
-}).then((response) => response.json());
-
-const manifest = await fetch('http://127.0.0.1:9696/_pwdev/apps/checkout-tax/manifest')
-  .then((response) => response.json());
-
-const cdpUrl = started.session?.cdpUrl ?? manifest.cdpUrl;
-const browser = await chromium.connectOverCDP(cdpUrl);
-const context = browser.contexts()[0];
-const page = context.pages()[0] ?? await context.newPage();
-
-await page.goto(manifest.appUrl);
-```
-
-Check browser/broker status:
+For parallel isolated instances from one template, pass a `sessionId`. pw-dev
+derives a separate persistent profile (`<template-id>__<session-id>`) unless a
+different `profile` is supplied:
 
 ```bash
-curl http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/status
-```
-
-Stop the app browser:
-
-```bash
-curl -X POST http://127.0.0.1:9696/_pwdev/apps/checkout-tax/browser/stop \
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start \
   -H 'content-type: application/json' \
-  -d '{"taskId":"smoke-login-20260629"}'
-```
-
-Stopping with `taskId` removes that task session from `browserSessions`.
-Stopping the default slot removes `cdpUrl`, `browserInstanceId`,
-`browserStartedAt`, and `activeTask` from the app record. The app registration
-remains for later reuse.
-
-Stop by session id directly:
-
-```bash
-curl -X POST \
-  http://127.0.0.1:9696/_pwdev/sessions/checkout-tax__smoke-login-20260629/stop
-```
-
-## Cleanup Policy
-
-Agents should clean up explicitly when a task is complete:
-
-```text
-1. Detach Playwright with browser.close().
-2. POST /_pwdev/apps/:id/browser/stop with `taskId` for task sessions.
-3. DELETE /_pwdev/proxy/proxies/:id for task-scoped managed proxies.
-4. Keep the app registration for later tasks.
-5. Keep the persistent profile unless a separate reset/clear action is requested.
-```
-
-The server does not automatically stop active browser tasks. Automatic cleanup
-can interrupt manual login, debugging, or recovery. Session liveness is still
-reconciled automatically on app/session reads and browser lifecycle operations:
-if broker status no longer reports an instance, the stale server session record
-is removed without requiring a manual cleanup call.
-
-## Parallel Verification
-
-An app id has one default browser slot plus task-scoped browser sessions. To
-verify multiple fixes on the same branch in parallel, register one app id for
-the real app:
-
-```bash
-curl -X POST http://127.0.0.1:9696/_pwdev/apps \
+  -d '{"sessionId":"shard-1"}'
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop \
   -H 'content-type: application/json' \
-  -d '{
-    "id": "main",
-    "name": "main",
-    "appUrl": "http://127.0.0.1:5173",
-  }'
+  -d '{"sessionId":"shard-1"}'
 ```
 
-Then start separate task sessions against that app. Each task gets its own
-profile by default:
-
-```text
-POST /_pwdev/apps/main/browser/start { "task": { "id": "task-a" } }
-POST /_pwdev/apps/main/browser/start { "task": { "id": "task-b" } }
-```
-
-Those requests use profiles `main__task-a` and `main__task-b`. Reusing a profile
-across concurrent browser instances returns `409 Conflict` or can collide at
-the broker/profile-directory layer.
+Apps no longer own browser lifecycle. The retired
+`/_pwdev/apps/:id/browser/*` routes return `410 Gone`.
 
 ## Endpoints
 
@@ -496,9 +347,12 @@ GET    /_pwdev/apps/:id
 DELETE /_pwdev/apps/:id
 GET    /_pwdev/apps/:id/manifest
 
-GET    /_pwdev/apps/:id/browser/status
-POST   /_pwdev/apps/:id/browser/start
-POST   /_pwdev/apps/:id/browser/stop
+GET    /_pwdev/browsers
+POST   /_pwdev/browsers
+GET    /_pwdev/browsers/:id
+DELETE /_pwdev/browsers/:id
+POST   /_pwdev/browsers/:id/start
+POST   /_pwdev/browsers/:id/stop
 
 ANY    /_pwdev/broker/*
 WS     /_pwdev/broker/*

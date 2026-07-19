@@ -119,6 +119,7 @@ async function refresh() {
 function normalizeSnapshot(raw) {
   const status = raw.server.status;
   const apps = raw.server.apps;
+  const serverBrowsers = raw.server.browsers;
   const serverSessions = raw.server.sessions;
   const proxies = raw.server.proxies;
   const serverNetworks = raw.server.networks;
@@ -135,6 +136,9 @@ function normalizeSnapshot(raw) {
     : status.body?.manifest
       ? [status.body.manifest]
       : [];
+  const browserTemplates = serverBrowsers.ok && serverBrowsers.body?.browsers
+    ? serverBrowsers.body.browsers
+    : [];
   const proxyStatusById = new Map(proxyStatuses.map((status) => [status.id, status]));
   const proxyList = (proxies.ok && proxies.body?.proxies
     ? proxies.body.proxies
@@ -159,15 +163,8 @@ function normalizeSnapshot(raw) {
       ...session,
       slot: session.scope,
     }))
-    : appList.flatMap((app) => sessionsForApp(app));
-  const relationships = computeRelationships({ apps: appList, sessions, proxies: proxyList, networks: networkList, proxyForwards, brokerStatus });
-  const browsers = brokerEntries.flatMap((entry, brokerIndex) =>
-    (entry.status?.instances ?? []).map((instance) => ({
-      ...instance,
-      brokerUrl: entry.url,
-      brokerIndex: brokerIndex + 1,
-    }))
-  );
+    : [];
+  const relationships = computeRelationships({ apps: appList, browsers: browserTemplates, sessions, proxies: proxyList, networks: networkList, proxyForwards, brokerStatus });
 
   return {
     serverOk,
@@ -175,7 +172,7 @@ function normalizeSnapshot(raw) {
     broker: status.body?.broker,
     brokerStatus,
     brokers: brokerEntries,
-    browsers,
+    browsers: browserTemplates,
     proxyStatus,
     apps: appList,
     proxies: proxyList,
@@ -183,7 +180,7 @@ function normalizeSnapshot(raw) {
     proxyForwards,
     sessions,
     relationships,
-    errors: [status, apps, serverSessions, proxies, serverNetworks, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
+    errors: [status, apps, serverBrowsers, serverSessions, proxies, serverNetworks, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
     updatedAt: new Date(raw.collectedAt),
   };
 }
@@ -210,36 +207,7 @@ function normalizeBrokerEntries(raw) {
   }));
 }
 
-function sessionsForApp(app) {
-  const sessions = [];
-  if (app.browserInstanceId || app.cdpUrl) {
-    sessions.push({
-      appId: app.id,
-      sessionId: `${app.id}:default`,
-      taskId: app.activeTask?.id,
-      cdpUrl: app.cdpUrl,
-      browserInstanceId: app.browserInstanceId,
-      browserStartedAt: app.browserStartedAt,
-      networkId: app.networkId,
-      proxyId: app.proxyId,
-      proxyForwardId: app.proxyForwardId,
-      proxyServer: app.proxyServer,
-      activeTask: app.activeTask,
-      slot: 'default',
-    });
-  }
-  for (const [sessionId, session] of Object.entries(app.browserSessions ?? {})) {
-    sessions.push({
-      appId: app.id,
-      sessionId,
-      ...session,
-      slot: 'task',
-    });
-  }
-  return sessions;
-}
-
-function computeRelationships({ apps, sessions, proxies, networks, proxyForwards, brokerStatus }) {
+function computeRelationships({ apps, browsers, sessions, proxies, networks, proxyForwards, brokerStatus }) {
   const relationships = new Map();
   const add = (type, id, label) => {
     if (!id || !label) return;
@@ -255,8 +223,18 @@ function computeRelationships({ apps, sessions, proxies, networks, proxyForwards
     add('proxyForward', app.proxyForwardId, `apps: ${app.id}`);
   }
 
+  for (const browser of browsers) {
+    add('browser', browser.id, browser.appId ? `app: ${browser.appId}` : undefined);
+    add('app', browser.appId, `browsers: ${browser.id}`);
+    add('network', browser.networkId, `browsers: ${browser.id}`);
+    add('proxy', browser.proxyId, `browsers: ${browser.id}`);
+    add('profile', browser.profile, `browsers: ${browser.id}`);
+  }
+
   for (const session of sessions) {
     add('session', session.sessionId, `src app: ${session.appId}`);
+    add('session', session.sessionId, `browser: ${session.browserId}`);
+    add('browser', session.browserId, `sessions: ${session.sessionId}`);
     add('network', session.networkId, `sessions: ${session.sessionId}`);
     add('proxy', session.proxyId, `sessions: ${session.sessionId}`);
     add('proxyForward', session.proxyForwardId, `sessions: ${session.sessionId}`);
@@ -432,7 +410,7 @@ function renderApps(apps, relationships) {
     appId: app.id,
     title: app.name ?? app.id,
     subtitle: app.id,
-    badge: app.cdpUrl || app.browserSessions ? badge('Browser', 'good') : badge('Registered', 'neutral'),
+    badge: related(relationships, 'app', app.id) ? badge('Configured', 'good') : badge('Registered', 'neutral'),
     rows: {
       URL: app.appUrl,
       Branch: app.branch,
@@ -440,7 +418,6 @@ function renderApps(apps, relationships) {
       Proxy: app.proxyId,
       README: app.readme ? copyableText(app.readme) : undefined,
       Sessions: related(relationships, 'app', app.id),
-      CDP: app.cdpUrl,
       Worktree: app.worktree,
     },
   })));
@@ -474,19 +451,23 @@ function renderBroker(snapshot) {
 
 function renderBrowsers(browsers, sessions) {
   renderCards(els.browsers, browsers.map((browser) => {
-    const relatedSessions = sessions.filter((session) => session.browserInstanceId === browser.id);
+    const relatedSessions = sessions.filter((session) => session.browserId === browser.id);
+    const runtime = browser.runtime ?? relatedSessions[0];
     return {
       title: browser.id,
-      subtitle: `BROKER${browser.brokerIndex}`,
-      badge: badge('Running', 'good'),
+      subtitle: browser.appId ?? 'Standalone',
+      badge: badge(runtime ? 'Running' : 'Stopped', runtime ? 'good' : 'neutral'),
       rows: {
-        Profile: browser.profile,
+        App: appLink(browser.appId),
+        Target: browser.targetUrl,
+        Broker: browser.brokerUrl,
+        Profile: browser.profile ?? browser.id,
         Network: browser.networkId,
-        'Proxy server': browser.proxyServer,
-        'SSH proxy mapping': browser.proxyForwardId ? 'active' : undefined,
-        'Proxy forward': browser.proxyForwardId,
+        Proxy: browser.proxyId,
         Sessions: relatedSessions.map((session) => session.sessionId).join(', ') || undefined,
-        Started: formatDate(browser.startedAt),
+        Instance: runtime?.browserInstanceId,
+        Started: formatDate(runtime?.browserStartedAt),
+        Updated: formatDate(browser.updatedAt),
       },
     };
   }));
@@ -495,10 +476,11 @@ function renderBrowsers(browsers, sessions) {
 function renderSessions(sessions, relationships) {
   renderCards(els.sessions, sessions.map((session) => ({
     title: session.sessionId,
-    subtitle: session.appId,
+    subtitle: session.browserId ?? session.appId ?? 'Standalone',
     badge: session.slot === 'task' ? badge('Task', 'neutral') : badge('Default', 'good'),
     rows: {
       Task: session.taskId,
+      Browser: session.browserId,
       'Related src app': appLink(session.appId),
       Owner: session.activeTask?.owner,
       Profile: session.profile,
@@ -515,6 +497,7 @@ function renderSessions(sessions, relationships) {
 }
 
 function appLink(appId) {
+  if (!appId) return undefined;
   return {
     link: true,
     text: appId,

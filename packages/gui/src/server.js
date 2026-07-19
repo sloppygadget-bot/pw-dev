@@ -90,6 +90,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   const [
     serverStatus,
     apps,
+    browsers,
     sessions,
     serverProxies,
     serverNetworks,
@@ -100,6 +101,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   ] = await Promise.all([
     fetchJsonFrom(`${pwDevUrl}/_pwdev/status`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/apps`),
+    fetchJsonFrom(`${pwDevUrl}/_pwdev/browsers`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/sessions`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/proxies`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/networks`),
@@ -108,7 +110,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
     fetchJsonFrom(`${brokerUrl}/_broker/proxy-forwards`),
     fetchJsonFrom(`${proxyManagerUrl}/_proxy/status`),
   ]);
-  const brokerUrls = discoverBrokerUrls({ brokerUrl, serverStatus, apps, sessions });
+  const brokerUrls = discoverBrokerUrls({ brokerUrl, serverStatus, browsers, sessions });
   const brokers = await Promise.all(brokerUrls.map((url) => collectBrokerSnapshot(url)));
   const primaryBroker = brokers.find((broker) => broker.url === brokerUrl) ?? brokers[0];
   const proxyStatuses = await collectProxyStatuses(serverProxies.body?.proxies, proxyStatus.body?.proxies);
@@ -120,6 +122,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
     server: {
       status: serverStatus,
       apps,
+      browsers,
       sessions,
       proxies: serverProxies,
       proxyStatuses,
@@ -137,7 +140,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   };
 }
 
-function discoverBrokerUrls({ brokerUrl, serverStatus, apps, sessions }) {
+function discoverBrokerUrls({ brokerUrl, serverStatus, browsers, sessions }) {
   const urls = new Set();
   const add = (value) => {
     if (!value) return;
@@ -152,10 +155,7 @@ function discoverBrokerUrls({ brokerUrl, serverStatus, apps, sessions }) {
   add(brokerUrl);
   add(serverStatus.body?.broker?.url);
   for (const session of sessions.body?.sessions ?? []) add(session.brokerUrl);
-  for (const app of apps.body?.apps ?? []) {
-    add(app.brokerUrl);
-    for (const session of Object.values(app.browserSessions ?? {})) add(session?.brokerUrl);
-  }
+  for (const browser of browsers.body?.browsers ?? []) add(browser.brokerUrl);
   return [...urls];
 }
 

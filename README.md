@@ -208,9 +208,12 @@ POST   /_pwdev/apps
 GET    /_pwdev/apps/:id
 DELETE /_pwdev/apps/:id
 GET    /_pwdev/apps/:id/manifest
-GET    /_pwdev/apps/:id/browser/status
-POST   /_pwdev/apps/:id/browser/start
-POST   /_pwdev/apps/:id/browser/stop
+GET    /_pwdev/browsers
+POST   /_pwdev/browsers
+GET    /_pwdev/browsers/:id
+DELETE /_pwdev/browsers/:id
+POST   /_pwdev/browsers/:id/start
+POST   /_pwdev/browsers/:id/stop
 ANY    /_pwdev/broker/*
 GET    /_pwdev/proxy/status
 GET    /_pwdev/proxy/proxies
@@ -255,7 +258,7 @@ should attach to that URL, or to `app.cdpUrl` for a default no-task browser.
 
 Duplicate starts for the same default slot or same `task.id` return
 `409 Conflict`. Agents should end completed task sessions explicitly with
-`POST /_pwdev/apps/:id/browser/stop` and a `taskId` body; app registrations and
+`POST /_pwdev/browsers/:id/stop`; app registrations and
 persistent profiles remain available for later tasks.
 
 ## Tests

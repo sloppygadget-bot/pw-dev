@@ -100,6 +100,10 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
       ok: true,
       apps: [{ id: 'main', networkId: 'agent-whistle' }],
     },
+    '/_pwdev/browsers': {
+      ok: true,
+      browsers: [{ id: 'main-browser', appId: 'main', networkId: 'agent-whistle' }],
+    },
     '/_pwdev/proxies': { ok: true, proxies: [{ id: 'proxy-main' }] },
     '/_pwdev/networks': { ok: true, networks: [{ id: 'agent-whistle' }] },
   });
@@ -129,6 +133,7 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     assert.equal(snapshot.statusCode, 200);
     assert.equal(snapshot.body.ok, true);
     assert.equal(snapshot.body.server.apps.body.apps[0].id, 'main');
+    assert.equal(snapshot.body.server.browsers.body.browsers[0].id, 'main-browser');
     assert.deepEqual(snapshot.body.server.proxyStatuses, [{ id: 'proxy-main', running: true }]);
     assert.equal(snapshot.body.broker.status.body.state, 'active');
     assert.equal(snapshot.body.broker.status.body.instanceCount, 1);
@@ -163,6 +168,7 @@ test('gui snapshot keeps SSH topology reported through pw-dev server', async () 
       manifest: { ok: true, id: 'main' },
     },
     '/_pwdev/apps': { ok: true, apps: [] },
+    '/_pwdev/browsers': { ok: true, browsers: [] },
     '/_pwdev/proxies': { ok: true, proxies: [] },
     '/_pwdev/networks': { ok: true, networks: [] },
   });
@@ -223,6 +229,7 @@ test('gui snapshot discovers multiple brokers from server sessions', async () =>
       manifest: { ok: true, id: 'main' },
     },
     '/_pwdev/apps': { ok: true, apps: [] },
+    '/_pwdev/browsers': { ok: true, browsers: [] },
     '/_pwdev/sessions': {
       ok: true,
       sessions: [{ sessionId: 'session-2', brokerUrl: broker2.origin }],
