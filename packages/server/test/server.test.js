@@ -201,7 +201,13 @@ test('server exposes instructions and client helper source', async () => {
 
     const delegates = await getJson(`${server.origin}/_pwdev/delegates`);
     assert.equal(delegates.statusCode, 200);
-    assert.equal(delegates.body.delegates[0].id, 'proxy');
+    assert.equal(delegates.body.delegates.find((delegate) => delegate.id === 'proxy').available, true);
+    assert.equal(delegates.body.delegates.find((delegate) => delegate.id === 'broker').agentBaseUrl, `${server.origin}/_pwdev/broker`);
+
+    const brokerOpenapi = await getJson(`${server.origin}/_pwdev/delegates/broker/openapi.json`);
+    assert.equal(brokerOpenapi.statusCode, 200);
+    assert.equal(brokerOpenapi.body.servers[0].url, '/_pwdev/broker');
+    assert.ok(brokerOpenapi.body.paths['/start']);
 
     const proxyOpenapi = await getJson(`${server.origin}/_pwdev/delegates/proxy/openapi.json`);
     assert.equal(proxyOpenapi.statusCode, 200);

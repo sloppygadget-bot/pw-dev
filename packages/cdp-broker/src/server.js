@@ -1,6 +1,10 @@
+import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
-import { URL } from 'node:url';
+import path from 'node:path';
+import { fileURLToPath, URL } from 'node:url';
+
+const BROKER_PACKAGE_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 export function createBrokerServer({ browserManager, proxyForwardManager, networkManager, topology } = {}) {
   const brokerTopology = normalizeBrokerTopology(topology);
@@ -78,6 +82,12 @@ export function rewriteDebuggerUrls(value, brokerBaseUrl) {
 }
 
 async function handleControlRequest({ req, res, browserManager, proxyForwardManager, networkManager, brokerTopology }) {
+  if (req.url === '/_broker/openapi.json' && req.method === 'GET') {
+    const document = JSON.parse(await readFile(path.join(BROKER_PACKAGE_ROOT, 'openapi', 'root.json'), 'utf8'));
+    writeJson(res, 200, document);
+    return;
+  }
+
   if (
     (req.url === '/_broker/help' || req.url === '/_broker/instructions') &&
     req.method === 'GET'

@@ -454,6 +454,25 @@ test('serves remote Playwright help over broker endpoints', async () => {
   }
 });
 
+test('serves a broker-owned OpenAPI document', async () => {
+  const server = createBrokerServer({
+    browserManager: {
+      activeInstance: () => undefined,
+      listInstances: () => [],
+    },
+  });
+  const { port, close } = await listen(server);
+  try {
+    const response = await requestJson({ port, path: '/_broker/openapi.json' });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.openapi, '3.1.1');
+    assert.equal(response.body.servers[0].url, '/_broker');
+    assert.ok(response.body.paths['/start']);
+  } finally {
+    await close();
+  }
+});
+
 test('serves proxy forward lifecycle endpoints', async () => {
   const creates = [];
   const deletes = [];

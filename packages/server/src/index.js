@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const SERVER_PACKAGE_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const PROXY_PACKAGE_ROOT = path.resolve(SERVER_PACKAGE_ROOT, '..', 'proxy');
+const BROKER_PACKAGE_ROOT = path.resolve(SERVER_PACKAGE_ROOT, '..', 'cdp-broker');
 
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -416,7 +417,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname === '/_pwdev/delegates') {
-    writeJson(res, 200, pwDevDelegates(serverUrl, proxyManagerUrl), writeBody);
+    writeJson(res, 200, pwDevDelegates(serverUrl, proxyManagerUrl, broker.summary()), writeBody);
     return;
   }
 
@@ -425,8 +426,18 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
     return;
   }
 
+  if (requestUrl.pathname === '/_pwdev/delegates/broker/instructions') {
+    writeTypedText(res, 200, 'text/markdown; charset=utf-8', brokerDelegateInstructions(serverUrl), writeBody);
+    return;
+  }
+
   if (requestUrl.pathname === '/_pwdev/delegates/proxy/openapi.json' || requestUrl.pathname.startsWith('/_pwdev/delegates/proxy/openapi/')) {
     handleProxyDelegateOpenApiRequest({ req, res, requestUrl, serverUrl, writeBody });
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/delegates/broker/openapi.json') {
+    handleBrokerDelegateOpenApiRequest({ req, res, writeBody });
     return;
   }
 
@@ -2765,6 +2776,8 @@ const PROXY_OPENAPI_DOCUMENTS = new Map([
   ['/_pwdev/delegates/proxy/openapi/rulesets.json', 'rulesets.json'],
 ]);
 
+const BROKER_OPENAPI_DOCUMENT = 'root.json';
+
 /** Serve a small, independently-valid OpenAPI document for one control-plane domain. */
 function handleOpenApiRequest({ req, res, requestUrl, writeBody }) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -2806,15 +2819,35 @@ function handleProxyDelegateOpenApiRequest({ req, res, requestUrl, writeBody }) 
   writeJson(res, 200, document, writeBody);
 }
 
+function handleBrokerDelegateOpenApiRequest({ req, res, writeBody }) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { allow: 'GET, HEAD' });
+    res.end('Method Not Allowed');
+    return;
+  }
+  const document = readOpenApiDocument(BROKER_PACKAGE_ROOT, BROKER_OPENAPI_DOCUMENT);
+  document.servers = [{ url: '/_pwdev/broker', description: 'pw-dev server-proxied CDP broker' }];
+  writeJson(res, 200, document, writeBody);
+}
+
 function readOpenApiDocument(packageRoot, relativePath) {
   return JSON.parse(readFileSync(path.join(packageRoot, 'openapi', relativePath), 'utf8'));
 }
 
-function pwDevDelegates(serverUrl, proxyManagerUrl) {
+function pwDevDelegates(serverUrl, proxyManagerUrl, brokerSummary) {
   return {
     ok: true,
     serverUrl,
     delegates: [{
+      id: 'broker',
+      available: Boolean(brokerSummary?.configured),
+      componentUrl: brokerSummary?.url,
+      agentBaseUrl: `${serverUrl}/_pwdev/broker`,
+      openapiUrl: `${serverUrl}/_pwdev/delegates/broker/openapi.json`,
+      instructionsUrl: `${serverUrl}/_pwdev/delegates/broker/instructions`,
+      capabilities: ['instances', 'profiles', 'networks', 'proxy-forwards', 'cdp'],
+      whenToUse: 'Use advanced broker capabilities not covered by the server browser/session control plane. Prefer server browser and session operations for normal lifecycle work.',
+    }, {
       id: 'proxy',
       available: true,
       componentUrl: proxyManagerUrl,
@@ -2825,6 +2858,10 @@ function pwDevDelegates(serverUrl, proxyManagerUrl) {
       whenToUse: 'Create or manage a Whistle proxy, or replace its rules. Prefer the control-plane proxy records and traffic APIs for registered proxy metadata and captured traffic.',
     }],
   };
+}
+
+function brokerDelegateInstructions(serverUrl) {
+  return `# pw-dev broker delegate\n\nThis API is owned by the CDP broker and delivered through pw-dev. Use only\n\`${serverUrl}/_pwdev/broker/*\`; do not call the broker port directly.\n\nFetch \`${serverUrl}/_pwdev/delegates/broker/openapi.json\` for advanced instance,\nprofile, network, and proxy-forward operations. Prefer the server control-plane\nbrowser and session APIs for ordinary browser lifecycle work.\n`;
 }
 
 function proxyDelegateInstructions(serverUrl) {
