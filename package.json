@@ -30,5 +30,8 @@
   "devDependencies": {
     "@playwright/cli": "^0.1.15",
     "playwright": "^1.62.0-alpha-2026-06-29"
+  },
+  "dependencies": {
+    "swagger-ui-dist": "^5.32.9"
   }
 }

@@ -42,6 +42,15 @@ test('gui serves static app and read-only config', async () => {
     assert.match(index.body, /data-view="broker"/);
     assert.match(index.body, /Mermaid/);
     assert.match(index.body, /D3/);
+    assert.match(index.body, /href="\/api-docs"/);
+
+    const apiDocs = await get(`${server.origin}/api-docs/`);
+    assert.equal(apiDocs.statusCode, 200);
+    assert.match(apiDocs.body, /swagger-ui-bundle\.js/);
+
+    const swaggerBundle = await get(`${server.origin}/api-docs/swagger-ui/swagger-ui-bundle.js`);
+    assert.equal(swaggerBundle.statusCode, 200);
+    assert.match(swaggerBundle.headers['content-type'], /javascript/);
 
     const appScript = await get(`${server.origin}/app.js`);
     assert.equal(appScript.statusCode, 200);

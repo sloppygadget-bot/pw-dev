@@ -2,6 +2,7 @@
 
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import net from 'node:net';
 import path from 'node:path';
 
@@ -11,6 +12,9 @@ const DEFAULT_PWDEV_URL = 'http://127.0.0.1:9696';
 const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
 const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
 const PUBLIC_DIR = path.resolve(new URL('../public', import.meta.url).pathname);
+const require = createRequire(import.meta.url);
+const SWAGGER_UI_DIR = path.dirname(require.resolve('swagger-ui-dist/swagger-ui.css'));
+const SWAGGER_UI_ASSETS = new Set(['swagger-ui.css', 'swagger-ui-bundle.js', 'swagger-ui-standalone-preset.js']);
 
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -42,6 +46,24 @@ export async function startPwDevGuiServer(options = {}) {
         writeJson(res, 200, await collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }));
         return;
       }
+      if (requestUrl.pathname === '/api-docs') {
+        res.writeHead(302, { location: '/api-docs/' });
+        res.end();
+        return;
+      }
+      if (requestUrl.pathname === '/api-docs/') {
+        await serveStaticFile({ req, res, filePath: path.join(PUBLIC_DIR, 'api-docs.html'), contentType: 'text/html; charset=utf-8' });
+        return;
+      }
+      if (requestUrl.pathname.startsWith('/api-docs/swagger-ui/')) {
+        const asset = path.basename(requestUrl.pathname);
+        if (!SWAGGER_UI_ASSETS.has(asset)) {
+          writeText(res, 404, 'text/plain; charset=utf-8', 'Not Found');
+          return;
+        }
+        await serveStaticFile({ req, res, filePath: path.join(SWAGGER_UI_DIR, asset), contentType: MIME_TYPES.get(path.extname(asset)) || 'application/octet-stream' });
+        return;
+      }
       if (requestUrl.pathname.startsWith('/api/network-check/')) {
         await proxyNetworkCheck({ req, res, requestUrl, pwDevUrl });
         return;
@@ -51,6 +73,10 @@ export async function startPwDevGuiServer(options = {}) {
         return;
       }
       if (requestUrl.pathname === '/api/pwdev' || requestUrl.pathname.startsWith('/api/pwdev/')) {
+        await proxyPwDevRequest({ req, res, requestUrl, pwDevUrl });
+        return;
+      }
+      if (requestUrl.pathname === '/_pwdev' || requestUrl.pathname.startsWith('/_pwdev/')) {
         await proxyPwDevRequest({ req, res, requestUrl, pwDevUrl });
         return;
       }
@@ -253,8 +279,10 @@ async function proxyPwDevRequest({ req, res, requestUrl, pwDevUrl }) {
     return;
   }
 
-  const suffix = requestUrl.pathname.slice('/api/pwdev'.length);
-  const upstreamUrl = new URL(`/_pwdev${suffix || ''}${requestUrl.search}`, ensureTrailingSlash(pwDevUrl));
+  const isGuiApiPath = requestUrl.pathname === '/api/pwdev' || requestUrl.pathname.startsWith('/api/pwdev/');
+  const suffix = isGuiApiPath ? requestUrl.pathname.slice('/api/pwdev'.length) : requestUrl.pathname;
+  const upstreamPath = isGuiApiPath ? `/_pwdev${suffix || ''}` : suffix;
+  const upstreamUrl = new URL(`${upstreamPath}${requestUrl.search}`, ensureTrailingSlash(pwDevUrl));
   const upstream = http.request(upstreamUrl, {
     method: req.method,
     headers: { accept: req.headers.accept || 'application/json' },
@@ -274,6 +302,21 @@ async function proxyPwDevRequest({ req, res, requestUrl, pwDevUrl }) {
     });
   });
   upstream.end();
+}
+
+async function serveStaticFile({ req, res, filePath, contentType }) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { allow: 'GET, HEAD' });
+    res.end('Method Not Allowed');
+    return;
+  }
+  try {
+    const body = req.method === 'HEAD' ? undefined : await fs.readFile(filePath);
+    res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-store' });
+    res.end(body);
+  } catch {
+    writeText(res, 404, 'text/plain; charset=utf-8', 'Not Found');
+  }
 }
 
 async function proxyNetworkCheck({ req, res, requestUrl, pwDevUrl }) {

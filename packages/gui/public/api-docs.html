@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>pw-dev API Docs</title>
+    <link rel="stylesheet" href="/api-docs/swagger-ui/swagger-ui.css">
+    <style>body { margin: 0; } .docs-bar { align-items: center; background: #151719; color: #fff; display: flex; gap: 12px; padding: 10px 20px; } .docs-bar a { color: #b9dcff; } .docs-bar label { margin-left: auto; } .docs-bar select { margin-left: 6px; max-width: 360px; }</style>
+  </head>
+  <body>
+    <header class="docs-bar"><strong>pw-dev API Docs</strong><a href="/">Status</a><label>Document <select id="document"><option>Loading…</option></select></label></header>
+    <div id="swagger-ui"></div>
+    <script src="/api-docs/swagger-ui/swagger-ui-bundle.js"></script>
+    <script src="/api-docs/swagger-ui/swagger-ui-standalone-preset.js"></script>
+    <script type="module">
+      const select = document.querySelector('#document');
+      const toGuiUrl = (url) => {
+        const path = new URL(url, window.location.origin).pathname;
+        return `/api/pwdev${path.replace(/^\/_pwdev/, '')}`;
+      };
+      const render = (url) => SwaggerUIBundle({
+        url,
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        supportedSubmitMethods: ['get'],
+      });
+      const addOption = (label, url) => {
+        const option = new Option(label, toGuiUrl(url));
+        select.add(option);
+      };
+      try {
+        const rootUrl = '/api/pwdev/openapi.json';
+        const root = await fetch(rootUrl).then((response) => response.json());
+        select.replaceChildren(new Option('Control-plane catalog', rootUrl));
+        for (const document of root['x-pwdev-documents'] ?? []) addOption(document.id, document.url);
+        const delegates = await fetch('/api/pwdev/delegates').then((response) => response.json());
+        for (const delegate of delegates.delegates ?? []) addOption(`${delegate.id} delegate`, delegate.openapiUrl);
+        select.addEventListener('change', () => render(select.value));
+        render(rootUrl);
+      } catch (error) {
+        select.replaceChildren(new Option('Unable to load API catalog'));
+        document.querySelector('#swagger-ui').textContent = `Unable to load pw-dev API catalog: ${error.message}`;
+      }
+    </script>
+  </body>
+</html>
