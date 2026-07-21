@@ -43,6 +43,7 @@ test('gui serves static app and read-only config', async () => {
     assert.match(index.body, /Mermaid/);
     assert.match(index.body, /D3/);
     assert.match(index.body, /href="\/api-docs"/);
+    assert.doesNotMatch(index.body, /data-view="networks"/);
 
     const apiDocs = await get(`${server.origin}/api-docs/`);
     assert.equal(apiDocs.statusCode, 200);

@@ -24,7 +24,6 @@ const els = {
   broker: document.querySelector('#broker-list'),
   browsers: document.querySelector('#browsers-list'),
   sessions: document.querySelector('#sessions-list'),
-  networks: document.querySelector('#networks-list'),
   proxies: document.querySelector('#proxies-list'),
   rendererButtons: [...document.querySelectorAll('.toggle-btn')],
 };
@@ -303,7 +302,6 @@ async function render(snapshot) {
   setCount('broker', snapshot.brokers.length);
   setCount('browsers', snapshot.browsers.length);
   setCount('sessions', snapshot.sessions.length);
-  setCount('networks', snapshot.networks.length);
   setCount('proxies', snapshot.proxies.length);
 
   await renderTopology(snapshot, token);
@@ -312,7 +310,6 @@ async function render(snapshot) {
   renderBroker(snapshot);
   renderBrowsers(snapshot.browsers, snapshot.sessions);
   renderSessions(snapshot.sessions, snapshot.relationships);
-  renderNetworks(snapshot.networks, snapshot.relationships);
   renderProxies(snapshot.proxies, snapshot.relationships);
 }
 

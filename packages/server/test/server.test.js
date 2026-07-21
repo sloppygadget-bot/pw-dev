@@ -178,9 +178,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /create\/reuse the required mapping/);
     assert.match(instructions.body, /\/_pwdev\/sessions/);
     assert.match(instructions.body, /browser\.close\(\)/);
-    assert.match(instructions.body, /Inspect managed-proxy traffic/);
-    assert.match(instructions.body, /\/_pwdev\/proxies\/:id\/traffic/);
-    assert.match(instructions.body, /openapi\/proxies\/traffic\.json/);
+    assert.doesNotMatch(instructions.body, /Inspect managed-proxy traffic/);
     assert.match(instructions.body, /App-scoped/);
     assert.match(instructions.body, /Example workflows/);
     assert.match(instructions.body, /App-based/);

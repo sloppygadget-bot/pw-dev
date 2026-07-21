@@ -3009,15 +3009,6 @@ For managed-proxy lifecycle or rules, first fetch \`GET /_pwdev/delegates\` and
 then the proxy delegate's linked OpenAPI document. The server republishes that
 component-owned contract under \`/_pwdev/proxy/*\`; do not call its internal port.
 
-## Inspect managed-proxy traffic
-
-Traffic guidance is in \`/_pwdev/openapi/proxies/traffic.json\`. Fetch that leaf
-document directly when traffic is all that is needed:
-
-\`\`\`bash
-curl -sS "$PW_DEV_URL/_pwdev/openapi/proxies/traffic.json"
-\`\`\`
-
 ## Persisted entities
 
 - **app**: project metadata, \`readme\`, accounts, and worktree. An app can be
@@ -3030,9 +3021,9 @@ curl -sS "$PW_DEV_URL/_pwdev/openapi/proxies/traffic.json"
 
 ## Start and use a browser
 
-Create or update a template with \`POST /_pwdev/browsers\`. Start the default
-session without a payload, or start an isolated concurrent session with a
-\`sessionId\` (which receives its own profile by default):
+Create or update a persistent **browserTpl** with \`POST /_pwdev/browsers\`.
+Start its default session without a payload, or start an isolated concurrent
+session with a \`sessionId\` (which receives its own profile by default):
 
 \`\`\`js
 const started = await fetch('${serverUrl}/_pwdev/browsers/docs-crawler/start', {
@@ -3054,8 +3045,10 @@ Stop with \`POST /_pwdev/browsers/:id/stop\` or
 \`POST /_pwdev/sessions/:id/stop\`. Detach Playwright with \`browser.close()\`
 when automation ends; that disconnects the client without stopping the instance.
 
-For a remote SSH broker and a selected \`proxyId\`, pw-dev asks the broker to
-create/reuse the required mapping. Do not create proxy forwards yourself.
+For a remote SSH broker, when the selected \`proxyId\` resolves to a proxy URL,
+pw-dev asks the broker to create or reuse the required mapping. Do not create
+proxy forwards yourself; a proxy record that already has a broker forward uses
+that existing forward.
 
 ## Example workflows
 
@@ -3078,24 +3071,15 @@ create/reuse the required mapping. Do not create proxy forwards yourself.
 3. Start it with \`POST /_pwdev/browsers/:id/start\`; attach Playwright to the
    returned session \`cdpUrl\`.
 
-## API index
+## API documents
 
-\`\`\`text
-GET|POST /_pwdev/apps
-GET|DELETE /_pwdev/apps/:id
-GET|POST /_pwdev/browsers
-GET|DELETE /_pwdev/browsers/:id
-POST       /_pwdev/browsers/:id/start
-POST       /_pwdev/browsers/:id/stop
-GET        /_pwdev/sessions
-GET        /_pwdev/sessions/:id
-POST       /_pwdev/sessions/:id/stop
-GET|POST   /_pwdev/proxies
-GET|DELETE /_pwdev/proxies/:id
-GET        /_pwdev/proxies/:id/traffic
-ANY        /_pwdev/proxy/*
-ANY        /_pwdev/broker/*
-\`\`\`
+- [Control-plane catalog](${serverUrl}/_pwdev/openapi.json)
+- [Apps](${serverUrl}/_pwdev/openapi/apps.json)
+- [browserTpls](${serverUrl}/_pwdev/openapi/browsers.json)
+- [Sessions](${serverUrl}/_pwdev/openapi/sessions.json)
+- [Proxy records and traffic](${serverUrl}/_pwdev/openapi/proxies.json)
+- [Managed proxy delegate](${serverUrl}/_pwdev/delegates/proxy/openapi.json)
+- [Broker delegate](${serverUrl}/_pwdev/delegates/broker/openapi.json)
 
 App-scoped \`/_pwdev/apps/:id/browser/*\` routes are retired.
 `;
