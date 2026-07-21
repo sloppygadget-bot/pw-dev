@@ -195,6 +195,8 @@ test('server exposes instructions and client helper source', async () => {
 
     const proxyCatalog = await getJson(`${server.origin}/_pwdev/openapi/proxies.json`);
     assert.equal(proxyCatalog.statusCode, 200);
+    assert.ok(proxyCatalog.body.paths['/_pwdev/proxies']);
+    assert.ok(proxyCatalog.body.paths['/_pwdev/proxies/{id}/traffic']);
     assert.equal(proxyCatalog.body['x-pwdev-documents'].find((document) => document.id === 'manager').url, '/_pwdev/delegates/proxy/openapi.json');
 
     const delegates = await getJson(`${server.origin}/_pwdev/delegates`);
