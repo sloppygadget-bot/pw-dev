@@ -157,6 +157,7 @@ GET /_pwdev/proxies
 POST /_pwdev/proxies
 GET /_pwdev/proxies/:id
 DELETE /_pwdev/proxies/:id
+GET /_pwdev/proxies/:id/traffic
 GET /_pwdev/networks
 POST /_pwdev/networks
 GET /_pwdev/networks/:id

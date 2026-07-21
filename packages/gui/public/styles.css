@@ -151,6 +151,18 @@ main {
   font-size: 18px;
 }
 
+.metric-link {
+  align-self: flex-start;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.metric-link:hover {
+  text-decoration: underline;
+}
+
 .metric-stack {
   display: grid;
   gap: 2px;

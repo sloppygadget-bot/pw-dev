@@ -1,0 +1,12 @@
+{
+  "openapi": "3.1.1",
+  "info": { "title": "pw-dev managed proxy API", "version": "1.0.0", "description": "Proxy-manager-owned API. Native deployments serve it at /_proxy; pw-dev republishes it for agents at /_pwdev/proxy." },
+  "servers": [{ "url": "/_proxy" }],
+  "paths": {
+    "/status": { "get": { "operationId": "getManagedProxyStatus", "responses": { "200": { "description": "Manager and managed proxy status" } } } }
+  },
+  "x-pwdev-documents": [
+    { "id": "lifecycle", "url": "/_proxy/openapi/lifecycle.json", "whenToUse": "Create, start, stop, restart, or delete a managed proxy." },
+    { "id": "rulesets", "url": "/_proxy/openapi/rulesets.json", "whenToUse": "Replace a managed proxy's complete ruleset." }
+  ]
+}

@@ -156,6 +156,13 @@ broker was started with `--ssh`, broker status includes
 `topology.remote: true` and `topology.mode: "ssh"` so agents can treat the SSH
 peer as the broker's remote network side.
 
+`GET /_pwdev/openapi.json` is the compact progressive-discovery catalog. Read
+its `x-pwdev-documents` links and fetch only the relevant domain document, such
+as `GET /_pwdev/openapi/browsers.json` or `GET /_pwdev/openapi/proxies.json`.
+For proxy-manager lifecycle or rules, first read `GET /_pwdev/delegates`, then
+fetch the proxy delegate's linked OpenAPI document. Agents use its declared
+`/_pwdev/proxy/*` paths, never the proxy-manager port directly.
+
 Register reusable proxy metadata with the central server:
 
 ```bash
@@ -198,6 +205,7 @@ GET    /_pwdev/proxies
 POST   /_pwdev/proxies
 GET    /_pwdev/proxies/:id
 DELETE /_pwdev/proxies/:id
+GET    /_pwdev/proxies/:id/traffic
 GET    /_pwdev/networks
 POST   /_pwdev/networks
 GET    /_pwdev/networks/:id
@@ -224,6 +232,17 @@ DELETE /_pwdev/proxy/proxies/:id
 POST   /_pwdev/proxy/proxies/:id/stop
 POST   /_pwdev/proxy/stop-all
 ```
+
+Read a managed Whistle proxy's captured traffic through the pw-dev server:
+
+```bash
+curl 'http://127.0.0.1:9696/_pwdev/proxies/smoke-login-proxy/traffic?dumpCount=100&url=%2Fapi%2Forders'
+```
+
+The response contains Whistle's Network feed in `traffic`. `url`, `ip`, and
+up to six request-header filters (`name`/`value` through `name5`/`value5`) are
+supported; use `mtype=1` for exact header values. Use the returned
+`traffic.data.lastId` as `startTime` to poll for later entries.
 
 Agents attach through the app manifest's `cdpUrl`. They only need the app
 browser endpoints when asking `pw-dev` to start or stop broker sessions.

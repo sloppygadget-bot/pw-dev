@@ -402,6 +402,21 @@ async function handleProxyManagerRequest({ req, res, manager }) {
     return;
   }
 
+  if (req.method === 'GET' && parts.length >= 2 && (parts[1] === 'openapi' || parts[1] === 'openapi.json')) {
+    const relativePath = parts[1] === 'openapi.json' ? 'root.json' : (parts.length === 2 ? 'root.json' : `${parts.slice(2).join('/')}`);
+    if (!relativePath.endsWith('.json') || relativePath.includes('..')) {
+      writeJson(res, 404, { ok: false, error: 'Unknown proxy OpenAPI document' });
+      return;
+    }
+    try {
+      const body = await fs.readFile(path.join(PROXY_MANAGER_PACKAGE_ROOT, 'openapi', relativePath), 'utf8');
+      writeJson(res, 200, JSON.parse(body));
+    } catch {
+      writeJson(res, 404, { ok: false, error: 'Unknown proxy OpenAPI document' });
+    }
+    return;
+  }
+
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'status') {
     writeJson(res, 200, await manager.status());
     return;

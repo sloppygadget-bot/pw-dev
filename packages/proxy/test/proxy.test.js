@@ -437,6 +437,11 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
   });
   const server = await startProxyManagerServer({ manager, port: 0 });
   try {
+    const openapi = await getJson(`${server.origin}/_proxy/openapi.json`);
+    assert.equal(openapi.statusCode, 200);
+    assert.equal(openapi.body.openapi, '3.1.1');
+    assert.equal(openapi.body['x-pwdev-documents'][0].url, '/_proxy/openapi/lifecycle.json');
+
     const created = await postJson(`${server.origin}/_proxy/proxies`, {
       id: 'whistle-main',
       ruleset: 'a b',

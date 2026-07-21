@@ -16,8 +16,11 @@ import { createRequire } from 'node:module';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
+const SERVER_PACKAGE_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+const PROXY_PACKAGE_ROOT = path.resolve(SERVER_PACKAGE_ROOT, '..', 'proxy');
 
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -364,6 +367,10 @@ export async function startPwDevServer(options = {}) {
  * - `GET /_pwdev/status`
  * - `GET /_pwdev/env`
  * - `GET /_pwdev/instructions`
+ * - `GET /_pwdev/openapi.json`
+ * - `GET /_pwdev/openapi/*`
+ * - `GET /_pwdev/delegates`
+ * - `GET /_pwdev/delegates/proxy/openapi/*`
  * - `GET /_pwdev/api`
  * - `GET /_pwdev/client.js`
  * - `ANY /_pwdev/broker/*`
@@ -378,6 +385,7 @@ export async function startPwDevServer(options = {}) {
  * - `POST /_pwdev/browsers/:id/stop`
  * - `GET|POST /_pwdev/proxies`
  * - `GET|DELETE /_pwdev/proxies/:id`
+ * - `GET /_pwdev/proxies/:id/traffic`
  *
  * @param {{
  *   req: http.IncomingMessage,
@@ -401,6 +409,26 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
   const writeBody = req.method !== 'HEAD';
+
+  if (requestUrl.pathname === '/_pwdev/openapi.json' || requestUrl.pathname.startsWith('/_pwdev/openapi/')) {
+    handleOpenApiRequest({ req, res, requestUrl, serverUrl, writeBody });
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/delegates') {
+    writeJson(res, 200, pwDevDelegates(serverUrl, proxyManagerUrl), writeBody);
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/delegates/proxy/instructions') {
+    writeTypedText(res, 200, 'text/markdown; charset=utf-8', proxyDelegateInstructions(serverUrl), writeBody);
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/delegates/proxy/openapi.json' || requestUrl.pathname.startsWith('/_pwdev/delegates/proxy/openapi/')) {
+    handleProxyDelegateOpenApiRequest({ req, res, requestUrl, serverUrl, writeBody });
+    return;
+  }
 
   if (requestUrl.pathname.startsWith('/_pwdev/broker')) {
     await proxyBrokerHttpRequest({ req, res, requestUrl, broker });
@@ -451,6 +479,11 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
 
   if (requestUrl.pathname.startsWith('/_pwdev/proxies')) {
     await handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxyManagerUrl, writeBody });
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/api' || requestUrl.pathname.startsWith('/_pwdev/api/')) {
+    await handleApiRequest({ req, res, requestUrl, serverUrl, writeBody });
     return;
   }
 
@@ -507,11 +540,6 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
       pwDevInstructions(serverUrl),
       writeBody
     );
-    return;
-  }
-
-  if (requestUrl.pathname === '/_pwdev/api') {
-    writeJson(res, 200, pwDevApi(serverUrl), writeBody);
     return;
   }
 
@@ -1025,6 +1053,27 @@ async function handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxy
     return;
   }
 
+  const trafficId = pathParts[2] ? decodeURIComponent(pathParts[2]) : undefined;
+  if (pathParts.length === 4 && pathParts[0] === '_pwdev' && pathParts[1] === 'proxies' && pathParts[3] === 'traffic') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { allow: 'GET, HEAD' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    const proxy = trafficId && proxies.get(trafficId);
+    if (!proxy) {
+      writeJson(res, 404, { ok: false, error: `Unknown proxy: ${trafficId}` }, writeBody);
+      return;
+    }
+    if (!proxy.guiUrl) {
+      writeJson(res, 409, { ok: false, error: `Proxy ${trafficId} does not expose a Whistle GUI traffic feed` }, writeBody);
+      return;
+    }
+    const traffic = await getWhistleTraffic(proxy.guiUrl, requestUrl.searchParams);
+    writeJson(res, 200, { ok: true, proxyId: trafficId, traffic }, writeBody);
+    return;
+  }
+
   const id = pathParts[2] ? decodeURIComponent(pathParts[2]) : undefined;
   if (!id || pathParts[0] !== '_pwdev' || pathParts[1] !== 'proxies' || pathParts.length !== 3) {
     writeJson(res, 404, { ok: false, error: 'Unknown pw-dev proxies endpoint' }, writeBody);
@@ -1051,6 +1100,63 @@ async function handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxy
 
   res.writeHead(405, { allow: 'GET, HEAD, DELETE' });
   res.end('Method Not Allowed');
+}
+
+/**
+ * Read Whistle's internal Network feed through a stable pw-dev JSON route.
+ * Only Whistle's documented feed parameters are forwarded so this route cannot
+ * become a general-purpose GUI proxy.
+ *
+ * @param {string} guiUrl
+ * @param {URLSearchParams} searchParams
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function getWhistleTraffic(guiUrl, searchParams) {
+  const allowed = new Set([
+    'count', 'dumpCount', 'startTime', 'lastRowId', 'ids', 'status',
+    'url', 'ip', 'mtype', 'name', 'value',
+  ]);
+  for (let index = 1; index < 6; index += 1) {
+    allowed.add(`name${index}`);
+    allowed.add(`value${index}`);
+  }
+  const query = new URLSearchParams();
+  for (const [key, value] of searchParams) {
+    if (allowed.has(key)) query.append(key, value);
+  }
+  const upstreamUrl = new URL('/cgi-bin/get-data', ensureTrailingSlash(guiUrl));
+  upstreamUrl.search = query.toString();
+  const { statusCode, text } = await new Promise((resolve, reject) => {
+    const request = http.request(upstreamUrl, {
+      method: 'GET',
+      headers: { accept: 'application/json', 'accept-encoding': 'identity' },
+    }, (response) => {
+      let responseText = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { responseText += chunk; });
+      response.on('end', () => resolve({ statusCode: response.statusCode || 0, text: responseText }));
+    });
+    request.once('error', (cause) => reject(cause));
+    request.end();
+  }).catch((cause) => {
+    const error = new Error(`Whistle GUI is unreachable at ${guiUrl}: ${cause?.message || 'request failed'}`);
+    error.statusCode = 502;
+    throw error;
+  });
+  let traffic;
+  try {
+    traffic = text ? JSON.parse(text) : {};
+  } catch {
+    const error = new Error(`Whistle GUI returned invalid traffic JSON at ${guiUrl}`);
+    error.statusCode = 502;
+    throw error;
+  }
+  if (statusCode < 200 || statusCode >= 300) {
+    const error = new Error(traffic.error || `Whistle traffic request failed: ${statusCode}`);
+    error.statusCode = statusCode || 502;
+    throw error;
+  }
+  return traffic;
 }
 
 function composeDefaultBrowserSessionId(appId) {
@@ -2642,6 +2748,89 @@ function renderEnvSh(env) {
   );
 }
 
+const SERVER_OPENAPI_DOCUMENTS = new Map([
+  ['/_pwdev/openapi.json', 'root.json'],
+  ['/_pwdev/openapi/apps.json', 'apps.json'],
+  ['/_pwdev/openapi/browsers.json', 'browsers.json'],
+  ['/_pwdev/openapi/sessions.json', 'sessions.json'],
+  ['/_pwdev/openapi/networks.json', 'networks.json'],
+  ['/_pwdev/openapi/proxies.json', 'proxies/index.json'],
+  ['/_pwdev/openapi/proxies/records.json', 'proxies/records.json'],
+  ['/_pwdev/openapi/proxies/traffic.json', 'proxies/traffic.json'],
+]);
+
+const PROXY_OPENAPI_DOCUMENTS = new Map([
+  ['/_pwdev/delegates/proxy/openapi.json', 'root.json'],
+  ['/_pwdev/delegates/proxy/openapi/lifecycle.json', 'lifecycle.json'],
+  ['/_pwdev/delegates/proxy/openapi/rulesets.json', 'rulesets.json'],
+]);
+
+/** Serve a small, independently-valid OpenAPI document for one control-plane domain. */
+function handleOpenApiRequest({ req, res, requestUrl, writeBody }) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { allow: 'GET, HEAD' });
+    res.end('Method Not Allowed');
+    return;
+  }
+  const relativePath = SERVER_OPENAPI_DOCUMENTS.get(requestUrl.pathname);
+  if (!relativePath) {
+    writeJson(res, 404, { ok: false, error: 'Unknown pw-dev OpenAPI document' }, writeBody);
+    return;
+  }
+  writeJson(res, 200, readOpenApiDocument(SERVER_PACKAGE_ROOT, relativePath), writeBody);
+}
+
+/** Serve the proxy-manager-owned OpenAPI documents through the agent-safe server origin. */
+function handleProxyDelegateOpenApiRequest({ req, res, requestUrl, writeBody }) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { allow: 'GET, HEAD' });
+    res.end('Method Not Allowed');
+    return;
+  }
+  const relativePath = PROXY_OPENAPI_DOCUMENTS.get(requestUrl.pathname);
+  if (!relativePath) {
+    writeJson(res, 404, { ok: false, error: 'Unknown proxy delegate OpenAPI document' }, writeBody);
+    return;
+  }
+  const document = readOpenApiDocument(PROXY_PACKAGE_ROOT, relativePath);
+  // The proxy manager owns this contract, but agents must use the server proxy.
+  document.servers = [{ url: '/_pwdev/proxy', description: 'pw-dev server-proxied proxy manager' }];
+  if (Array.isArray(document['x-pwdev-documents'])) {
+    document['x-pwdev-documents'] = document['x-pwdev-documents'].map((entry) => ({
+      ...entry,
+      url: typeof entry.url === 'string'
+        ? entry.url.replace('/_proxy/openapi/', '/_pwdev/delegates/proxy/openapi/')
+        : entry.url,
+    }));
+  }
+  writeJson(res, 200, document, writeBody);
+}
+
+function readOpenApiDocument(packageRoot, relativePath) {
+  return JSON.parse(readFileSync(path.join(packageRoot, 'openapi', relativePath), 'utf8'));
+}
+
+function pwDevDelegates(serverUrl, proxyManagerUrl) {
+  return {
+    ok: true,
+    serverUrl,
+    delegates: [{
+      id: 'proxy',
+      available: true,
+      componentUrl: proxyManagerUrl,
+      agentBaseUrl: `${serverUrl}/_pwdev/proxy`,
+      openapiUrl: `${serverUrl}/_pwdev/delegates/proxy/openapi.json`,
+      instructionsUrl: `${serverUrl}/_pwdev/delegates/proxy/instructions`,
+      capabilities: ['lifecycle', 'rulesets'],
+      whenToUse: 'Create or manage a Whistle proxy, or replace its rules. Prefer the control-plane proxy records and traffic APIs for registered proxy metadata and captured traffic.',
+    }],
+  };
+}
+
+function proxyDelegateInstructions(serverUrl) {
+  return `# pw-dev proxy delegate\n\nThis API is owned by the proxy manager but is delivered through pw-dev. Use only\n\`${serverUrl}/_pwdev/proxy/*\`; do not call the proxy-manager port directly.\n\nFetch \`${serverUrl}/_pwdev/delegates/proxy/openapi.json\` first. Then load only the\nlinked lifecycle or ruleset document needed for the next operation. Use the\ncontrol-plane \`/_pwdev/openapi/proxies.json\` document to register proxy metadata\nor read captured traffic for a registered proxy.\n`;
+}
+
 function pwDevApi(serverUrl) {
   return {
     ok: true,
@@ -2658,7 +2847,8 @@ function pwDevApi(serverUrl) {
       { method: 'GET', path: '/_pwdev/status', summary: 'Server and broker health' },
       { method: 'GET', path: '/_pwdev/env', summary: 'Live runtime constants' },
       { method: 'GET', path: '/_pwdev/instructions', summary: 'Concise workflow guide' },
-      { method: 'GET', path: '/_pwdev/api', summary: 'Detailed machine-readable API reference' },
+      { method: 'GET', path: '/_pwdev/api', summary: 'Compact API index; use a detail route or POST filter for usage' },
+      { method: 'POST', path: '/_pwdev/api', summary: 'Find one operation by JSON { method, path }' },
       { method: 'GET|POST', path: '/_pwdev/apps', summary: 'Manage app metadata' },
       { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or upsert browser templates', body: { required: ['id'], optional: ['appId', 'targetUrl', 'brokerUrl', 'profile', 'networkId', 'proxyId', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
       { method: 'GET|DELETE', path: '/_pwdev/browsers/:id', summary: 'Get or delete browser template' },
@@ -2669,10 +2859,152 @@ function pwDevApi(serverUrl) {
       { method: 'POST', path: '/_pwdev/sessions/:id/stop', summary: 'Stop live session' },
       { method: 'GET|POST|DELETE', path: '/_pwdev/networks[/:id]', summary: 'Manage persisted network templates' },
       { method: 'GET|POST|DELETE', path: '/_pwdev/proxies[/:id]', summary: 'Manage proxy records' },
+      { method: 'GET', path: '/_pwdev/proxies/:id/traffic', summary: 'Read a Whistle proxy traffic feed', query: ['count', 'dumpCount', 'startTime', 'lastRowId', 'ids', 'status', 'url', 'ip', 'name', 'value', 'name1/value1…name5/value5', 'mtype'] },
       { method: 'ANY', path: '/_pwdev/proxy/*', summary: 'Server-proxied managed proxy API' },
       { method: 'ANY', path: '/_pwdev/broker/*', summary: 'Server-proxied broker API' },
     ],
+    details: {
+      resources: ['apps', 'browsers', 'networks', 'proxies', 'sessions'],
+      routeTemplate: '/_pwdev/api/:resource',
+      lookup: {
+        method: 'POST',
+        path: '/_pwdev/api',
+        body: { required: ['method', 'path'] },
+        example: { method: 'POST', path: '/_pwdev/browsers/:id/start' },
+      },
+    },
     retired: ['/_pwdev/apps/:id/browser/*'],
+  };
+}
+
+/** Handle compact API discovery, resource detail, and exact-operation lookup. */
+async function handleApiRequest({ req, res, requestUrl, serverUrl, writeBody }) {
+  const prefix = '/_pwdev/api';
+  if (requestUrl.pathname === prefix) {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      writeJson(res, 200, pwDevApi(serverUrl), writeBody);
+      return;
+    }
+    if (req.method === 'POST') {
+      const filter = await readJsonBody(req);
+      const operation = findApiOperation(filter, serverUrl);
+      writeJson(res, 200, { ok: true, serverUrl, operation }, writeBody);
+      return;
+    }
+    res.writeHead(405, { allow: 'GET, HEAD, POST' });
+    res.end('Method Not Allowed');
+    return;
+  }
+
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { allow: 'GET, HEAD' });
+    res.end('Method Not Allowed');
+    return;
+  }
+  const resource = decodeURIComponent(requestUrl.pathname.slice(`${prefix}/`.length));
+  const detail = pwDevApiDetails(serverUrl)[resource];
+  if (!detail) {
+    writeJson(res, 404, { ok: false, error: `Unknown pw-dev API resource: ${resource}` }, writeBody);
+    return;
+  }
+  writeJson(res, 200, { ok: true, serverUrl, resource, ...detail }, writeBody);
+}
+
+function findApiOperation(filter, serverUrl) {
+  if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
+    throwValidationError('API lookup filter must be an object');
+  }
+  const method = requiredString(filter.method, 'method').toUpperCase();
+  const apiPath = requiredString(filter.path, 'path');
+  if (!apiPath.startsWith('/_pwdev/')) {
+    throwValidationError('path must start with /_pwdev/');
+  }
+  const operation = Object.values(pwDevApiDetails(serverUrl))
+    .flatMap((detail) => detail.operations)
+    .find((candidate) => candidate.method === method && candidate.path === apiPath);
+  if (!operation) {
+    const error = new Error(`No detailed API operation matches ${method} ${apiPath}`);
+    error.statusCode = 404;
+    throw error;
+  }
+  return operation;
+}
+
+function pwDevApiDetails(serverUrl) {
+  const operation = (method, apiPath, summary, usage, example, restrictions, response) => ({
+    method,
+    path: apiPath,
+    summary,
+    usage,
+    example,
+    restrictions,
+    response,
+  });
+  return {
+    apps: {
+      usage: 'Persisted project metadata. Register an app before linking it from a browser template.',
+      operations: [
+        operation('GET', '/_pwdev/apps', 'List registered apps', 'Fetch the central app registry.', { method: 'GET', path: '/_pwdev/apps' }, ['The root manifest is not an app unless explicitly registered.'], { fields: ['ok', 'apps'] }),
+        operation('POST', '/_pwdev/apps', 'Create or update an app', 'Send an app record; id is the stable upsert key.', { method: 'POST', path: '/_pwdev/apps', body: { id: 'checkout-main', appUrl: 'http://127.0.0.1:5173', readme: 'Run npm run dev first.' } }, ['Do not register production or personal credentials in accounts.'], { fields: ['ok', 'app'] }),
+        operation('GET', '/_pwdev/apps/:id', 'Get one app', 'Read metadata for one registered app.', { method: 'GET', path: '/_pwdev/apps/checkout-main' }, ['Returns 404 for an unknown id.'], { fields: ['ok', 'app'] }),
+        operation('GET', '/_pwdev/apps/:id/manifest', 'Get an app manifest', 'Read the app attach contract and operating metadata.', { method: 'GET', path: '/_pwdev/apps/checkout-main/manifest' }, ['A manifest does not itself start a browser.'], { fields: ['ok', 'id', 'appUrl', 'readme'] }),
+      ],
+    },
+    browsers: {
+      usage: 'Persistent browser templates hold launch configuration; starting one creates a transient broker-owned session.',
+      operations: [
+        operation('GET', '/_pwdev/browsers', 'List browser templates', 'Fetch all persisted templates.', { method: 'GET', path: '/_pwdev/browsers' }, [], { fields: ['ok', 'browsers'] }),
+        operation('POST', '/_pwdev/browsers', 'Create or update a browser template', 'Send id plus optional app, target, profile, network/proxy, and launch settings.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-tax', appId: 'checkout-main', targetUrl: 'http://127.0.0.1:5173', proxyId: 'checkout-whistle' } }, ['networkId cannot be combined with proxyId, proxyForwardId, or proxyServer.'], { fields: ['ok', 'browser'] }),
+        operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser session', 'Starts the template default session. Optionally supply sessionId for an isolated named session.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/start', body: { sessionId: 'smoke-1', ignoreSslErrors: true } }, ['Connect Playwright to response.session.cdpUrl; do not launch a separate browser.', 'sessionId uses a separate profile/runtime session.'], { fields: ['ok', 'browser', 'session'], session: ['sessionId', 'cdpUrl', 'browserInstanceId'] }),
+        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser session', 'Stops the default session, or the named session in sessionId.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/stop', body: { sessionId: 'smoke-1' } }, ['Stopping a session does not delete its browser template.'], { fields: ['ok', 'sessionId'] }),
+      ],
+    },
+    networks: {
+      usage: 'Persistent broker-owned routing templates, restored before browser start.',
+      operations: [
+        operation('GET', '/_pwdev/networks', 'List network templates', 'Fetch persisted network definitions.', { method: 'GET', path: '/_pwdev/networks' }, [], { fields: ['ok', 'networks'] }),
+        operation('POST', '/_pwdev/networks', 'Create or update a network template', 'Send a broker network definition.', { method: 'POST', path: '/_pwdev/networks', body: { id: 'staging-network' } }, ['Use a network when routing policy is distinct from a managed proxy.'], { fields: ['ok', 'network'] }),
+      ],
+    },
+    proxies: {
+      usage: 'Proxy records are reusable metadata. Managed Whistle proxies also expose rules, lifecycle, GUI, and traffic capture through pw-dev.',
+      operations: [
+        operation('GET', '/_pwdev/proxies', 'List proxy records', 'Fetch registered and reconciled proxy metadata.', { method: 'GET', path: '/_pwdev/proxies' }, [], { fields: ['ok', 'proxies'] }),
+        operation('POST', '/_pwdev/proxies', 'Create or update a proxy record', 'Send id and either proxyUrl or brokerProxyForwardId; guiUrl is optional metadata for Whistle.', { method: 'POST', path: '/_pwdev/proxies', body: { id: 'shared-whistle', kind: 'whistle', proxyUrl: 'http://127.0.0.1:8899' } }, ['proxyUrl and brokerProxyForwardId are mutually exclusive.', 'This does not start a proxy process.'], { fields: ['ok', 'proxy'] }),
+        operation('GET', '/_pwdev/proxies/:id/traffic', 'Read Whistle captured traffic', 'Use dumpCount for a recent bounded snapshot, or poll with the previous traffic.data.lastId as startTime. url, ip, and request-header predicates filter candidates.', { method: 'GET', path: '/_pwdev/proxies/checkout-whistle/traffic?dumpCount=100&url=%2Fapi%2Forders&name=content-type&value=application%2Fjson&mtype=1' }, ['Requires a proxy record with guiUrl; otherwise returns 409.', 'Supported query fields: count, dumpCount, startTime, lastRowId, ids, status, url, ip, name/value through name5/value5, mtype.', 'mtype=1 makes request-header value matching exact. Method, status, and body filtering must be done by the agent after reading the feed.'], {
+          fields: ['ok', 'proxyId', 'traffic'],
+          cursor: 'traffic.data.lastId',
+          example: {
+            ok: true,
+            proxyId: 'checkout-whistle',
+            traffic: {
+              ec: 0,
+              data: {
+                newIds: ['1720000000000-1'],
+                lastId: '1720000000000-1',
+                data: {
+                  '1720000000000-1': {
+                    id: '1720000000000-1',
+                    url: 'https://api.example.test/orders',
+                    method: 'POST',
+                    req: { method: 'POST', headers: { 'content-type': 'application/json' } },
+                    res: { statusCode: 201, headers: { 'content-type': 'application/json' } },
+                  },
+                },
+              },
+            },
+          },
+        }),
+        operation('POST', '/_pwdev/proxy/proxies', 'Create a managed Whistle proxy', 'Send a ruleset and id or appId. The server lazily starts its proxy manager.', { method: 'POST', path: '/_pwdev/proxy/proxies', body: { id: 'checkout-whistle', taskId: 'smoke-login', ruleset: 'example.com 127.0.0.1:3000' } }, ['Use /_pwdev/proxy/* rather than the proxy-manager port.', 'Delete task-scoped proxies after the task.'], { fields: ['ok', 'proxy'] }),
+      ],
+    },
+    sessions: {
+      usage: 'Live, broker-owned runtime records. They are removed after broker restart or explicit stop.',
+      operations: [
+        operation('GET', '/_pwdev/sessions', 'List live sessions', 'Fetch and reconcile active broker sessions.', { method: 'GET', path: '/_pwdev/sessions' }, [], { fields: ['ok', 'sessions'] }),
+        operation('POST', '/_pwdev/sessions/:id/stop', 'Stop a live session', 'Stop directly by session id when the originating template is not convenient.', { method: 'POST', path: '/_pwdev/sessions/checkout-tax__default/stop' }, ['Does not delete the persistent browser template.'], { fields: ['ok', 'sessionId'] }),
+      ],
+    },
   };
 }
 
@@ -2686,16 +3018,27 @@ ports directly.
 
 \`\`\`bash
 curl '${serverUrl}/_pwdev/status'
-curl '${serverUrl}/_pwdev/instructions'
-curl '${serverUrl}/_pwdev/env'
+curl '${serverUrl}/_pwdev/openapi.json'
 \`\`\`
 
-\`status\` reports broker reachability. \`env\` exposes live shell/runtime paths;
-fetch it again after a server restart.
+\`status\` reports broker reachability. The root OpenAPI document is a compact
+catalog: read its \`x-pwdev-documents\` list, then fetch only the domain document
+needed next (for example \`/_pwdev/openapi/browsers.json\` or
+\`/_pwdev/openapi/proxies.json\`). \`env\` is optional runtime-path discovery for
+shell/external tooling; fetch it again after a server restart.
 
-For detailed endpoint schemas and examples, probe \`GET /_pwdev/api\` when
-needed. It is optional during this transition; if it returns \`404\`, use this
-guide and the endpoint-specific responses as the current contract.
+For managed-proxy lifecycle or rules, first fetch \`GET /_pwdev/delegates\` and
+then the proxy delegate's linked OpenAPI document. The server republishes that
+component-owned contract under \`/_pwdev/proxy/*\`; do not call its internal port.
+
+## Inspect managed-proxy traffic
+
+Traffic guidance is in \`/_pwdev/openapi/proxies/traffic.json\`. Fetch that leaf
+document directly when traffic is all that is needed:
+
+\`\`\`bash
+curl -sS "$PW_DEV_URL/_pwdev/openapi/proxies/traffic.json"
+\`\`\`
 
 ## Persisted entities
 
@@ -2775,6 +3118,7 @@ GET|POST   /_pwdev/networks
 GET|DELETE /_pwdev/networks/:id
 GET|POST   /_pwdev/proxies
 GET|DELETE /_pwdev/proxies/:id
+GET        /_pwdev/proxies/:id/traffic
 ANY        /_pwdev/proxy/*
 ANY        /_pwdev/broker/*
 \`\`\`
@@ -3287,11 +3631,15 @@ await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle', {
 GET    /_pwdev/status
 GET    /_pwdev/env
 GET    /_pwdev/instructions
+GET    /_pwdev/api
+POST   /_pwdev/api
+GET    /_pwdev/api/:resource
 GET    /_pwdev/client.js
 GET    /_pwdev/proxies
 POST   /_pwdev/proxies
 GET    /_pwdev/proxies/:id
 DELETE /_pwdev/proxies/:id
+GET    /_pwdev/proxies/:id/traffic
 GET    /_pwdev/networks
 POST   /_pwdev/networks
 GET    /_pwdev/networks/:id

@@ -178,10 +178,33 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /create\/reuse the required mapping/);
     assert.match(instructions.body, /\/_pwdev\/sessions/);
     assert.match(instructions.body, /browser\.close\(\)/);
+    assert.match(instructions.body, /Inspect managed-proxy traffic/);
+    assert.match(instructions.body, /\/_pwdev\/proxies\/:id\/traffic/);
+    assert.match(instructions.body, /openapi\/proxies\/traffic\.json/);
     assert.match(instructions.body, /App-scoped/);
     assert.match(instructions.body, /Example workflows/);
     assert.match(instructions.body, /App-based/);
     assert.match(instructions.body, /Standalone/);
+    assert.match(instructions.body, /_pwdev\/openapi\.json/);
+    assert.match(instructions.body, /_pwdev\/delegates/);
+
+    const openapi = await getJson(`${server.origin}/_pwdev/openapi.json`);
+    assert.equal(openapi.statusCode, 200);
+    assert.equal(openapi.body.openapi, '3.1.1');
+    assert.equal(openapi.body['x-pwdev-documents'].find((document) => document.id === 'browsers').url, '/_pwdev/openapi/browsers.json');
+
+    const proxyCatalog = await getJson(`${server.origin}/_pwdev/openapi/proxies.json`);
+    assert.equal(proxyCatalog.statusCode, 200);
+    assert.equal(proxyCatalog.body['x-pwdev-documents'].find((document) => document.id === 'manager').url, '/_pwdev/delegates/proxy/openapi.json');
+
+    const delegates = await getJson(`${server.origin}/_pwdev/delegates`);
+    assert.equal(delegates.statusCode, 200);
+    assert.equal(delegates.body.delegates[0].id, 'proxy');
+
+    const proxyOpenapi = await getJson(`${server.origin}/_pwdev/delegates/proxy/openapi.json`);
+    assert.equal(proxyOpenapi.statusCode, 200);
+    assert.equal(proxyOpenapi.body.servers[0].url, '/_pwdev/proxy');
+    assert.equal(proxyOpenapi.body['x-pwdev-documents'][0].url, '/_pwdev/delegates/proxy/openapi/lifecycle.json');
 
     const env = await getJson(`${server.origin}/_pwdev/env`);
     assert.equal(env.statusCode, 200);
@@ -232,6 +255,29 @@ test('server exposes a machine-readable API reference', async () => {
     assert.equal(api.body.entities.browsers.persistent, true);
     assert.equal(api.body.entities.sessions.sourceOfTruth, 'broker');
     assert.equal(api.body.endpoints.some((endpoint) => endpoint.path === '/_pwdev/browsers/:id/start'), true);
+    assert.deepEqual(api.body.details.resources, ['apps', 'browsers', 'networks', 'proxies', 'sessions']);
+
+    const proxies = await getJson(`${server.origin}/_pwdev/api/proxies`);
+    assert.equal(proxies.statusCode, 200);
+    assert.equal(proxies.body.resource, 'proxies');
+    const traffic = proxies.body.operations.find((operation) => operation.path === '/_pwdev/proxies/:id/traffic');
+    assert.match(traffic.usage, /dumpCount/);
+    assert.match(traffic.restrictions.join(' '), /mtype=1/);
+    assert.equal(traffic.response.example.traffic.data.data['1720000000000-1'].res.statusCode, 201);
+
+    const operation = await postJson(`${server.origin}/_pwdev/api`, {
+      method: 'POST',
+      path: '/_pwdev/browsers/:id/start',
+    });
+    assert.equal(operation.statusCode, 200);
+    assert.equal(operation.body.operation.path, '/_pwdev/browsers/:id/start');
+    assert.match(operation.body.operation.usage, /named session/);
+
+    const missing = await postJson(`${server.origin}/_pwdev/api`, {
+      method: 'GET',
+      path: '/_pwdev/nope',
+    });
+    assert.equal(missing.statusCode, 404);
   } finally {
     await server.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -1214,6 +1260,54 @@ test('server proxies proxy HTTP APIs', async () => {
   }
 });
 
+test('server exposes a managed Whistle proxy traffic feed', async () => {
+  const whistle = await startMockWhistleGui();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0 });
+  try {
+    await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'checkout-traffic',
+      kind: 'whistle',
+      proxyUrl: 'http://127.0.0.1:8899',
+      guiUrl: whistle.origin,
+    });
+
+    const response = await getJson(`${server.origin}/_pwdev/proxies/checkout-traffic/traffic?dumpCount=25&url=%2Fapi%2Forders&name=content-type&value=application%2Fjson&mtype=1&ignored=nope`);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.proxyId, 'checkout-traffic');
+    assert.deepEqual(response.body.traffic, { ec: 0, data: { lastId: 'whistle-2' } });
+    assert.equal(whistle.requests.length, 1);
+    assert.equal(whistle.requests[0].method, 'GET');
+    assert.equal(whistle.requests[0].url, '/cgi-bin/get-data?dumpCount=25&url=%2Fapi%2Forders&name=content-type&value=application%2Fjson&mtype=1');
+
+    const missingFeed = await getJson(`${server.origin}/_pwdev/proxies/checkout-traffic/traffic?startTime=whistle-2`);
+    assert.equal(missingFeed.statusCode, 200);
+    assert.equal(whistle.requests[1].url, '/cgi-bin/get-data?startTime=whistle-2');
+  } finally {
+    await server.close();
+    await whistle.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server rejects traffic reads for proxies without a Whistle GUI', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0 });
+  try {
+    await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'plain-http',
+      proxyUrl: 'http://127.0.0.1:8899',
+    });
+    const response = await getJson(`${server.origin}/_pwdev/proxies/plain-http/traffic`);
+    assert.equal(response.statusCode, 409);
+    assert.match(response.body.error, /does not expose a Whistle GUI traffic feed/);
+  } finally {
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server proxies broker websocket upgrades', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
@@ -1419,6 +1513,34 @@ function startMockProxyManager(options = {}) {
         origin,
         requests,
         proxies,
+        close: () => new Promise((closeResolve, closeReject) => {
+          server.close((error) => error ? closeReject(error) : closeResolve());
+        }),
+      });
+    });
+  });
+}
+
+function startMockWhistleGui() {
+  const requests = [];
+  let origin;
+  const server = http.createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    if (req.method === 'GET' && req.url?.startsWith('/cgi-bin/get-data')) {
+      writeTestJson(res, 200, { ec: 0, data: { lastId: 'whistle-2' } });
+      return;
+    }
+    writeTestJson(res, 404, { ok: false, error: 'not found' });
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      const address = server.address();
+      origin = `http://127.0.0.1:${address.port}`;
+      resolve({
+        origin,
+        requests,
         close: () => new Promise((closeResolve, closeReject) => {
           server.close((error) => error ? closeReject(error) : closeResolve());
         }),

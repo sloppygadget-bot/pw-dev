@@ -143,15 +143,16 @@ Given `PW_DEV_URL=http://127.0.0.1:9696`, the discovery sequence is:
 
 ```text
 GET /_pwdev/status
-GET /_pwdev/env
+GET /_pwdev/openapi.json
 GET /_pwdev/instructions
 GET /_pwdev/apps
 GET /_pwdev/apps/:id/manifest
 ```
 
 Use `/_pwdev/status` first to verify that the server is healthy and the broker
-is configured/reachable. Use `/_pwdev/instructions` as the live usage guide for
-the current server. Use `/_pwdev/env` for live server, Playwright, CLI, skill,
+is configured/reachable. Then use `/_pwdev/openapi.json` as the compact catalog
+and follow only its relevant `x-pwdev-documents` link. Use
+`/_pwdev/instructions` as the live operational guide. Use `/_pwdev/env` for live server, Playwright, CLI, skill,
 and Chromium paths. Use `/_pwdev/client.js` when an agent wants a small helper
 module instead of hand-writing manifest fetch and CDP attach logic.
 If the broker was started with `--ssh`, `status.broker.status.topology` reports
@@ -330,6 +331,7 @@ GET    /_pwdev/proxies
 POST   /_pwdev/proxies
 GET    /_pwdev/proxies/:id
 DELETE /_pwdev/proxies/:id
+GET    /_pwdev/proxies/:id/traffic
 
 GET    /_pwdev/networks
 POST   /_pwdev/networks

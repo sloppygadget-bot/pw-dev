@@ -1,0 +1,13 @@
+{
+  "openapi": "3.1.1",
+  "info": { "title": "pw-dev browser API", "version": "1.0.0", "description": "Browser templates and lifecycle. Start returns a transient session; attach Playwright to session.cdpUrl instead of launching a browser." },
+  "servers": [{ "url": "/" }],
+  "paths": {
+    "/_pwdev/browsers": { "get": { "operationId": "listBrowserTemplates", "responses": { "200": { "description": "Browser templates" } } }, "post": { "operationId": "upsertBrowserTemplate", "responses": { "200": { "description": "Saved template" } } } },
+    "/_pwdev/browsers/{id}/start": { "post": { "operationId": "startBrowser", "summary": "Start a managed browser session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Started browser and session containing cdpUrl" } } } },
+    "/_pwdev/browsers/{id}/stop": { "post": { "operationId": "stopBrowser", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Stopped session" } } } }
+  },
+  "x-pwdev-documents": [
+    { "id": "sessions", "url": "/_pwdev/openapi/sessions.json", "whenToUse": "Inspect or stop a session directly." }
+  ]
+}
