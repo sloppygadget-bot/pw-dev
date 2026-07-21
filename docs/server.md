@@ -48,13 +48,9 @@ The app registry persists in `<worktree>/.pw-dev/apps.json` by default. Pass
 broker-owned runtime state and are intentionally not restored after a server
 restart.
 
-Network definitions persist in `<worktree>/.pw-dev/networks.json`; when a
-broker is reachable, the server restores those definitions before a network is
-used for a browser start.
-
 Browser templates persist in `<worktree>/.pw-dev/browsers.json`. A template
 contains `id`, optional `appId` and `targetUrl`, optional `profile`,
-`networkId`, `proxyId`, broker override, and browser launch options. `appId`
+`proxyId`, broker override, and browser launch options. `appId`
 links an app's instructions/accounts/defaults when applicable; omit it for a
 standalone crawler or generic automation browser. Its live broker instance is transient:
 after a broker restart, start the same template again rather than recreating
@@ -63,7 +59,7 @@ its configuration.
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
   -H 'content-type: application/json' \
-  -d '{"id":"checkout-tax","appId":"checkout-tax","networkId":"agent-whistle","ignoreSslErrors":true}'
+  -d '{"id":"checkout-tax","appId":"checkout-tax","proxyId":"whistle-main","ignoreSslErrors":true}'
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop
 ```
@@ -236,9 +232,9 @@ Update a proxy port by re-posting the same `id` with a different `proxyUrl`.
 Use `brokerProxyForwardId` instead of `proxyUrl` when the broker owns the
 forward, but do not set both fields.
 
-For new browser-start workflows, prefer broker networks. A network is a named
-browser routing profile owned by the broker. The server proxies these APIs to
-the broker under `/_pwdev/networks`.
+Networks and SSH-peer forwarding are broker-owned advanced capabilities. Discover
+them through the broker delegate at `/_pwdev/delegates/broker/openapi.json` and
+use its `/_pwdev/broker/*` paths; pw-dev/server does not persist or restore them.
 
 When the broker topology reports `remote: true` with `mode: "ssh"`, select the
 managed proxy by `proxyId` when starting the browser. The broker maps the proxy
@@ -251,8 +247,7 @@ curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start
 ```
 
-Use `networkId` only for a named routing policy that is distinct from a managed
-proxy. Do not create or pass `proxyForwardId` for normal browser starts; it is
+Do not create or pass `proxyForwardId` for normal browser starts; it is
 broker-internal diagnostic state.
 
 ```bash
@@ -333,12 +328,6 @@ GET    /_pwdev/proxies/:id
 DELETE /_pwdev/proxies/:id
 GET    /_pwdev/proxies/:id/traffic
 
-GET    /_pwdev/networks
-POST   /_pwdev/networks
-GET    /_pwdev/networks/:id
-DELETE /_pwdev/networks/:id
-POST   /_pwdev/networks/:id/check
-
 GET    /_pwdev/sessions
 GET    /_pwdev/sessions/:id
 POST   /_pwdev/sessions/:id/stop
@@ -373,20 +362,6 @@ POST   /_pwdev/proxy/stop-all
 CDP URLs, but it also leaves a raw broker API escape hatch for advanced tooling.
 `/_pwdev/proxy/*` maps to `proxy` `/_proxy/*`, so agents can create/delete
 managed Whistle instances without knowing the manager port.
-
-For an `ssh-peer` network, `POST /_pwdev/networks/:id/check` actively probes
-the broker-resolved local proxy forward with an HTTP `CONNECT` handshake. A
-response from the remote proxy confirms that the SSH tunnel reaches its peer.
-The optional JSON body accepts `host`, `port`, and `timeoutMs`:
-
-```bash
-curl -s -X POST http://127.0.0.1:9696/_pwdev/networks/agent-whistle/check \
-  -H 'content-type: application/json' \
-  -d '{"host":"example.com","port":80,"timeoutMs":3000}' | jq
-```
-
-The response includes `reachable`, `probe.statusCode`, `probe.latencyMs`, and
-an error string when the SSH forward or remote proxy cannot be reached.
 
 ## Broker Diagnostics
 

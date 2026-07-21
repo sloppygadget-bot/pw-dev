@@ -206,11 +206,6 @@ POST   /_pwdev/proxies
 GET    /_pwdev/proxies/:id
 DELETE /_pwdev/proxies/:id
 GET    /_pwdev/proxies/:id/traffic
-GET    /_pwdev/networks
-POST   /_pwdev/networks
-GET    /_pwdev/networks/:id
-DELETE /_pwdev/networks/:id
-POST   /_pwdev/networks/:id/check
 GET    /_pwdev/apps
 POST   /_pwdev/apps
 GET    /_pwdev/apps/:id

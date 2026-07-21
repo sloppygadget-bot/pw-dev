@@ -239,8 +239,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(client.body, /registerPwDevApp/);
     assert.match(client.body, /listPwDevSessions/);
     assert.match(client.body, /stopPwDevSession/);
-    assert.match(client.body, /createPwDevNetwork/);
-    assert.match(client.body, /networkId/);
+    assert.match(client.body, /createPwDevBrokerNetwork/);
+    assert.doesNotMatch(client.body, /createPwDevNetwork/);
     assert.match(client.body, /loadPwDevManifest/);
     assert.match(client.body, /upsertPwDevBrowser/);
     assert.match(client.body, /loadPwDevBrowser/);
@@ -260,10 +260,10 @@ test('server exposes a machine-readable API reference', async () => {
     const api = await getJson(`${server.origin}/_pwdev/api`);
     assert.equal(api.statusCode, 200);
     assert.equal(api.body.ok, true);
-    assert.equal(api.body.entities.browsers.persistent, true);
+    assert.equal(api.body.entities.browserTpls.persistent, true);
     assert.equal(api.body.entities.sessions.sourceOfTruth, 'broker');
     assert.equal(api.body.endpoints.some((endpoint) => endpoint.path === '/_pwdev/browsers/:id/start'), true);
-    assert.deepEqual(api.body.details.resources, ['apps', 'browsers', 'networks', 'proxies', 'sessions']);
+    assert.deepEqual(api.body.details.resources, ['apps', 'browsers', 'proxies', 'sessions']);
 
     const proxies = await getJson(`${server.origin}/_pwdev/api/proxies`);
     assert.equal(proxies.statusCode, 200);
@@ -390,15 +390,14 @@ test('server persists app metadata but not browser runtime state across restart'
   }
 });
 
-test('server persists browser templates and rematerializes their network before start', async () => {
+test('server persists browser templates without server-owned network state', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const broker = await startMockBroker();
   const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
   try {
     await postJson(`${server.origin}/_pwdev/apps`, { id: 'checkout-tax', appUrl: 'http://127.0.0.1:5174' });
-    await postJson(`${server.origin}/_pwdev/networks`, { id: 'agent-whistle', proxy: { mode: 'none' } });
     const created = await postJson(`${server.origin}/_pwdev/browsers`, {
-      id: 'checkout-tax-browser', appId: 'checkout-tax', networkId: 'agent-whistle', ignoreSslErrors: true,
+      id: 'checkout-tax-browser', appId: 'checkout-tax', ignoreSslErrors: true,
     });
     assert.equal(created.statusCode, 200);
     const started = await postJson(`${server.origin}/_pwdev/browsers/checkout-tax-browser/start`, {});
@@ -1203,7 +1202,7 @@ test('server proxies broker HTTP APIs', async () => {
   }
 });
 
-test('server proxies broker network APIs', async () => {
+test('server exposes broker network APIs only through the broker delegate path', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -1213,11 +1212,11 @@ test('server proxies broker network APIs', async () => {
     brokerUrl: broker.origin,
   });
   try {
-    const created = await postJson(`${server.origin}/_pwdev/networks`, {
+    const created = await postJson(`${server.origin}/_pwdev/broker/networks`, {
       id: 'shared-whistle',
       proxy: { mode: 'direct', server: 'http://proxy.internal:8899' },
     });
-    const list = await getJson(`${server.origin}/_pwdev/networks`);
+    const list = await getJson(`${server.origin}/_pwdev/broker/networks`);
     assert.equal(created.statusCode, 200);
     assert.equal(created.body.network.id, 'shared-whistle');
     assert.equal(list.statusCode, 200);

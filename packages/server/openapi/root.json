@@ -10,7 +10,6 @@
     { "id": "apps", "url": "/_pwdev/openapi/apps.json", "whenToUse": "List, register, or inspect apps." },
     { "id": "browsers", "url": "/_pwdev/openapi/browsers.json", "whenToUse": "Start or stop a managed browser and receive cdpUrl." },
     { "id": "sessions", "url": "/_pwdev/openapi/sessions.json", "whenToUse": "Inspect or stop a live browser session." },
-    { "id": "networks", "url": "/_pwdev/openapi/networks.json", "whenToUse": "Manage browser network templates." },
     { "id": "proxies", "url": "/_pwdev/openapi/proxies.json", "whenToUse": "Register proxy metadata or read captured proxy traffic." }
   ]
 }

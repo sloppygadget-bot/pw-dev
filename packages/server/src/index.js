@@ -58,12 +58,10 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} proxyManagerUrl Optional proxy manager base URL proxied under `/_pwdev/proxy/*`. Defaults to `http://127.0.0.1:9697`.
  * @property {() => Promise<unknown>=} ensureProxyManager Lazily starts a server-owned proxy manager before proxy-manager requests.
  * @property {string=} cdpUrl Optional Playwright CDP URL for direct browser attachment.
- * @property {string=} networkId Optional broker network id for browser sessions.
  * @property {string=} proxyId Optional proxy registry id for the app.
  * @property {string=} proxyForwardId Optional broker-managed proxy forward id, for example a Whistle tunnel.
  * @property {string=} proxyServer Optional Chrome proxy server URL.
  * @property {string=} appRegistryFile Durable app registry JSON path. Defaults to `<worktree>/.pw-dev/apps.json`.
- * @property {string=} networkRegistryFile Durable broker network JSON path. Defaults to `<worktree>/.pw-dev/networks.json`.
  * @property {string=} proxyRegistryFile Durable proxy registry JSON path. Defaults to `<worktree>/.pw-dev/proxies.json`.
  * @property {string=} browserRegistryFile Durable browser template JSON path. Defaults to `<worktree>/.pw-dev/browsers.json`.
  * @property {boolean=} registerDefaultApp Register the root manifest in `/_pwdev/apps`. Defaults to false.
@@ -272,7 +270,6 @@ export async function startPwDevServer(options = {}) {
     branch: options.branch,
     appUrl: options.appUrl,
     cdpUrl: options.cdpUrl,
-    networkId: options.networkId,
     proxyId: options.proxyId,
     proxyForwardId: options.proxyForwardId,
     proxyServer: options.proxyServer,
@@ -284,10 +281,6 @@ export async function startPwDevServer(options = {}) {
   const apps = createAppRegistry(loadPersistedApps(appRegistryFile), {
     persist: (registeredApps) => persistApps(appRegistryFile, registeredApps),
   });
-  const networkRegistryFile = path.resolve(options.networkRegistryFile ?? path.join(worktree, '.pw-dev', 'networks.json'));
-  const networks = createNetworkRegistry(loadPersistedNetworks(networkRegistryFile), {
-    persist: (registeredNetworks) => persistNetworks(networkRegistryFile, registeredNetworks),
-  });
   const browserRegistryFile = path.resolve(options.browserRegistryFile ?? path.join(worktree, '.pw-dev', 'browsers.json'));
   const browsers = createBrowserRegistry(loadPersistedBrowsers(browserRegistryFile), {
     persist: (registeredBrowsers) => persistRegistryFile(browserRegistryFile, { version: 1, browsers: registeredBrowsers }),
@@ -297,20 +290,12 @@ export async function startPwDevServer(options = {}) {
     persist: (registeredProxies) => persistProxies(proxyRegistryFile, registeredProxies),
   });
   const sessions = createSessionRegistry();
-  let networksRestored = false;
-  const restoreNetworks = async (force = false) => {
-    if (networksRestored && !force) return;
-    for (const network of networks.list()) {
-      await brokerJson(broker.summary().url, '/_broker/networks', { method: 'POST', body: network });
-    }
-    networksRestored = true;
-  };
   let origin;
 
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, networks, restoreNetworks, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -345,7 +330,6 @@ export async function startPwDevServer(options = {}) {
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : port;
   origin = `http://${host}:${actualPort}`;
-  void restoreNetworks().catch(() => {});
   if (options.registerDefaultApp) {
     apps.upsert(buildManifest({ root, worktree, origin, metadata }));
   }
@@ -375,7 +359,6 @@ export async function startPwDevServer(options = {}) {
  * - `GET /_pwdev/api`
  * - `GET /_pwdev/client.js`
  * - `ANY /_pwdev/broker/*`
- * - `ANY /_pwdev/networks/*`
  * - `ANY /_pwdev/proxy/*`
  * - `GET|POST /_pwdev/apps`
  * - `GET|DELETE /_pwdev/apps/:id`
@@ -405,7 +388,7 @@ export async function startPwDevServer(options = {}) {
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, networks, restoreNetworks, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -446,26 +429,6 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
     return;
   }
 
-  if (requestUrl.pathname === '/_pwdev/networks' || requestUrl.pathname.startsWith('/_pwdev/networks/')) {
-    await restoreNetworks();
-    if (req.method === 'POST' && requestUrl.pathname === '/_pwdev/networks') {
-      const payload = await readJsonBody(req);
-      const result = await brokerJson(broker.summary().url, '/_broker/networks', { method: 'POST', body: payload });
-      networks.upsert(result.network);
-      writeJson(res, 200, result);
-      return;
-    }
-    const networkId = /^\/_pwdev\/networks\/([^/]+)$/.exec(requestUrl.pathname)?.[1];
-    if (req.method === 'DELETE' && networkId) {
-      const result = await brokerJson(broker.summary().url, `/_broker/networks/${encodeURIComponent(decodeURIComponent(networkId))}`, { method: 'DELETE' });
-      networks.delete(decodeURIComponent(networkId));
-      writeJson(res, 200, result);
-      return;
-    }
-    await proxyBrokerHttpRequest({ req, res, requestUrl, broker, brokerPath: proxyBrokerNetworksPath(requestUrl) });
-    return;
-  }
-
   if (requestUrl.pathname.startsWith('/_pwdev/proxy')) {
     if (ensureProxyManager) await ensureProxyManager();
     await proxyProxyManagerHttpRequest({ req, res, requestUrl, proxyManagerUrl });
@@ -473,12 +436,11 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname === '/_pwdev/browsers' || requestUrl.pathname.startsWith('/_pwdev/browsers/')) {
-    await handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, serverUrl, restoreNetworks, writeBody });
+    await handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, serverUrl, writeBody });
     return;
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/apps')) {
-    if (requestUrl.pathname.endsWith('/browser/start')) await restoreNetworks(true);
     await handleAppsRequest({ req, res, requestUrl, apps, proxies, sessions, broker, serverUrl, writeBody });
     return;
   }
@@ -1343,7 +1305,7 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
  * }} options
  * @returns {Promise<void>}
  */
-async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, serverUrl, restoreNetworks, writeBody }) {
+async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, serverUrl, writeBody }) {
   const parts = requestUrl.pathname.split('/').filter(Boolean);
   await reconcileSessionsBestEffort({ sessions, broker });
   const withRuntime = (template) => ({ ...template, runtime: sessions.listByBrowser(template.id).find((session) => session.scope === 'default'), sessions: sessions.listByBrowser(template.id) });
@@ -1378,7 +1340,6 @@ async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, brows
     const payload = await readJsonBody(req);
     const app = template.appId ? apps.get(template.appId) : undefined;
     if (template.appId && !app) throwValidationError(`Unknown app for browser template: ${template.appId}`);
-    await restoreNetworks(true);
     const requestedSessionId = payload.sessionId === undefined ? undefined : requiredString(payload.sessionId, 'sessionId');
     if (requestedSessionId) validateBrowserProfileName(requestedSessionId, 'sessionId');
     const scope = requestedSessionId ? 'task' : 'default';
@@ -1393,15 +1354,14 @@ async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, brows
       return;
     }
     const brokerUrl = broker.resolve(template.brokerUrl ?? app?.brokerUrl);
-    const network = template.networkId ? { networkId: template.networkId } : {};
-    const proxy = network.networkId ? {} : resolveProxyForBrowserStart({ proxies, proxyId: template.proxyId ?? app?.proxyId });
+    const network = {};
+    const proxy = resolveProxyForBrowserStart({ proxies, proxyId: template.proxyId ?? app?.proxyId });
     const brokerStatus = proxy.proxyId && proxy.proxyServer ? await brokerJson(brokerUrl, '/_broker/status') : undefined;
     const proxyPeer = brokerStatus?.topology?.mode === 'ssh' && brokerStatus.topology.remote ? 'ssh-peer' : undefined;
     const start = await brokerJson(brokerUrl, '/_broker/start', {
       method: 'POST',
       body: omitUndefined({
         profile,
-        networkId: network.networkId,
         proxyServer: proxy.proxyServer,
         proxyForwardId: proxy.proxyForwardId,
         proxyPeer,
@@ -1821,11 +1781,8 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, sessions, brok
       writeJson(res, 409, conflict);
       return;
     }
-    const network = resolveNetworkForBrowserStart({
-      networkId: payload.networkId ?? app.networkId,
-      payload,
-    });
-    const proxy = network.networkId ? {} : resolveProxyForBrowserStart({
+    const network = {};
+    const proxy = resolveProxyForBrowserStart({
       proxies,
       proxyId: payload.proxyId ?? app.proxyId,
       proxyForwardId: payload.proxyForwardId ?? app.proxyForwardId,
@@ -1841,7 +1798,6 @@ async function handleAppBrowserRequest({ req, res, apps, proxies, sessions, brok
       method: 'POST',
       body: omitUndefined({
         profile: slot.profile,
-        networkId: network.networkId,
         proxyForwardId: proxy.proxyForwardId,
         proxyServer: proxy.proxyServer,
         proxyPeer,
@@ -2266,7 +2222,6 @@ function validateAppRegistration(rawApp) {
     accounts: rawApp.accounts === undefined ? undefined : validateAccounts(rawApp.accounts),
     brokerUrl: optionalString(rawApp.brokerUrl, 'brokerUrl'),
     cdpUrl: optionalString(rawApp.cdpUrl, 'cdpUrl'),
-    networkId: optionalString(rawApp.networkId, 'networkId'),
     proxyId: optionalString(rawApp.proxyId, 'proxyId'),
     proxyForwardId: optionalString(rawApp.proxyForwardId, 'proxyForwardId'),
     proxyServer: optionalString(rawApp.proxyServer, 'proxyServer'),
@@ -2296,7 +2251,6 @@ function validateBrowserTemplate(rawBrowser) {
     targetUrl: optionalString(rawBrowser.targetUrl, 'targetUrl'),
     profile,
     brokerUrl: optionalString(rawBrowser.brokerUrl, 'brokerUrl'),
-    networkId: optionalString(rawBrowser.networkId, 'networkId'),
     proxyId: optionalString(rawBrowser.proxyId, 'proxyId'),
     proxyBypassList: optionalString(rawBrowser.proxyBypassList, 'proxyBypassList'),
     ignoreSslErrors: rawBrowser.ignoreSslErrors === undefined ? undefined : Boolean(rawBrowser.ignoreSslErrors),
@@ -2309,14 +2263,11 @@ function validateAppPatch(rawPatch) {
   if (!rawPatch || typeof rawPatch !== 'object' || Array.isArray(rawPatch)) {
     throwValidationError('app patch must be an object');
   }
-  const allowed = new Set(['networkId', 'proxyId']);
+  const allowed = new Set(['proxyId']);
   for (const key of Object.keys(rawPatch)) {
     if (!allowed.has(key)) throwValidationError(`Unsupported app patch field: ${key}`);
   }
   const patch = {};
-  if (Object.hasOwn(rawPatch, 'networkId')) {
-    patch.networkId = rawPatch.networkId === null ? null : optionalString(rawPatch.networkId, 'networkId');
-  }
   if (Object.hasOwn(rawPatch, 'proxyId')) {
     patch.proxyId = rawPatch.proxyId === null ? null : optionalString(rawPatch.proxyId, 'proxyId');
   }
@@ -2764,7 +2715,6 @@ const SERVER_OPENAPI_DOCUMENTS = new Map([
   ['/_pwdev/openapi/apps.json', 'apps.json'],
   ['/_pwdev/openapi/browsers.json', 'browsers.json'],
   ['/_pwdev/openapi/sessions.json', 'sessions.json'],
-  ['/_pwdev/openapi/networks.json', 'networks.json'],
   ['/_pwdev/openapi/proxies.json', 'proxies/index.json'],
   ['/_pwdev/openapi/proxies/records.json', 'proxies/records.json'],
   ['/_pwdev/openapi/proxies/traffic.json', 'proxies/traffic.json'],
@@ -2875,9 +2825,8 @@ function pwDevApi(serverUrl) {
     serverUrl,
     entities: {
       apps: { persistent: true, fields: ['id', 'name', 'worktree', 'branch', 'readme', 'accounts'] },
-      networks: { persistent: true, fields: ['id', 'proxy', 'browser'] },
       proxies: { persistent: true, fields: ['id', 'appId', 'ruleset', 'proxyUrl'] },
-      browsers: { persistent: true, fields: ['id', 'appId?', 'targetUrl?', 'brokerUrl?', 'profile?', 'networkId?', 'proxyId?', 'ignoreSslErrors?', 'headless?'] },
+      browserTpls: { persistent: true, path: '/_pwdev/browsers', fields: ['id', 'appId?', 'targetUrl?', 'brokerUrl?', 'profile?', 'proxyId?', 'ignoreSslErrors?', 'proxyBypassList?', 'headless?'] },
       sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'appId?', 'browserInstanceId', 'cdpUrl'] },
     },
     endpoints: [
@@ -2887,21 +2836,20 @@ function pwDevApi(serverUrl) {
       { method: 'GET', path: '/_pwdev/api', summary: 'Compact API index; use a detail route or POST filter for usage' },
       { method: 'POST', path: '/_pwdev/api', summary: 'Find one operation by JSON { method, path }' },
       { method: 'GET|POST', path: '/_pwdev/apps', summary: 'Manage app metadata' },
-      { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or upsert browser templates', body: { required: ['id'], optional: ['appId', 'targetUrl', 'brokerUrl', 'profile', 'networkId', 'proxyId', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
+      { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or upsert browser templates', body: { required: ['id'], optional: ['appId', 'targetUrl', 'brokerUrl', 'profile', 'proxyId', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
       { method: 'GET|DELETE', path: '/_pwdev/browsers/:id', summary: 'Get or delete browser template' },
       { method: 'POST', path: '/_pwdev/browsers/:id/start', summary: 'Start template; returns session and cdpUrl', body: { optional: ['sessionId', 'profile', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
       { method: 'POST', path: '/_pwdev/browsers/:id/stop', summary: 'Stop default runtime or named session', body: { optional: ['sessionId'] } },
       { method: 'GET', path: '/_pwdev/sessions', summary: 'List live sessions' },
       { method: 'GET', path: '/_pwdev/sessions/:id', summary: 'Get live session' },
       { method: 'POST', path: '/_pwdev/sessions/:id/stop', summary: 'Stop live session' },
-      { method: 'GET|POST|DELETE', path: '/_pwdev/networks[/:id]', summary: 'Manage persisted network templates' },
       { method: 'GET|POST|DELETE', path: '/_pwdev/proxies[/:id]', summary: 'Manage proxy records' },
       { method: 'GET', path: '/_pwdev/proxies/:id/traffic', summary: 'Read a Whistle proxy traffic feed', query: ['count', 'dumpCount', 'startTime', 'lastRowId', 'ids', 'status', 'url', 'ip', 'name', 'value', 'name1/value1…name5/value5', 'mtype'] },
       { method: 'ANY', path: '/_pwdev/proxy/*', summary: 'Server-proxied managed proxy API' },
       { method: 'ANY', path: '/_pwdev/broker/*', summary: 'Server-proxied broker API' },
     ],
     details: {
-      resources: ['apps', 'browsers', 'networks', 'proxies', 'sessions'],
+      resources: ['apps', 'browsers', 'proxies', 'sessions'],
       routeTemplate: '/_pwdev/api/:resource',
       lookup: {
         method: 'POST',
@@ -2991,16 +2939,9 @@ function pwDevApiDetails(serverUrl) {
       usage: 'Persistent browser templates hold launch configuration; starting one creates a transient broker-owned session.',
       operations: [
         operation('GET', '/_pwdev/browsers', 'List browser templates', 'Fetch all persisted templates.', { method: 'GET', path: '/_pwdev/browsers' }, [], { fields: ['ok', 'browsers'] }),
-        operation('POST', '/_pwdev/browsers', 'Create or update a browser template', 'Send id plus optional app, target, profile, network/proxy, and launch settings.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-tax', appId: 'checkout-main', targetUrl: 'http://127.0.0.1:5173', proxyId: 'checkout-whistle' } }, ['networkId cannot be combined with proxyId, proxyForwardId, or proxyServer.'], { fields: ['ok', 'browser'] }),
+        operation('POST', '/_pwdev/browsers', 'Create or update a browser template', 'Send id plus optional app, target, profile, registered proxy, and launch settings.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-tax', appId: 'checkout-main', targetUrl: 'http://127.0.0.1:5173', proxyId: 'checkout-whistle' } }, ['The broker resolves SSH-peer routing from its own topology when a proxy is selected.'], { fields: ['ok', 'browser'] }),
         operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser session', 'Starts the template default session. Optionally supply sessionId for an isolated named session.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/start', body: { sessionId: 'smoke-1', ignoreSslErrors: true } }, ['Connect Playwright to response.session.cdpUrl; do not launch a separate browser.', 'sessionId uses a separate profile/runtime session.'], { fields: ['ok', 'browser', 'session'], session: ['sessionId', 'cdpUrl', 'browserInstanceId'] }),
         operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser session', 'Stops the default session, or the named session in sessionId.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/stop', body: { sessionId: 'smoke-1' } }, ['Stopping a session does not delete its browser template.'], { fields: ['ok', 'sessionId'] }),
-      ],
-    },
-    networks: {
-      usage: 'Persistent broker-owned routing templates, restored before browser start.',
-      operations: [
-        operation('GET', '/_pwdev/networks', 'List network templates', 'Fetch persisted network definitions.', { method: 'GET', path: '/_pwdev/networks' }, [], { fields: ['ok', 'networks'] }),
-        operation('POST', '/_pwdev/networks', 'Create or update a network template', 'Send a broker network definition.', { method: 'POST', path: '/_pwdev/networks', body: { id: 'staging-network' } }, ['Use a network when routing policy is distinct from a managed proxy.'], { fields: ['ok', 'network'] }),
       ],
     },
     proxies: {
@@ -3081,13 +3022,11 @@ curl -sS "$PW_DEV_URL/_pwdev/openapi/proxies/traffic.json"
 
 - **app**: project metadata, \`readme\`, accounts, and worktree. An app can be
   linked from a browser but does not own browser lifecycle.
-- **network**: reusable browser routing configuration. The server recreates it
-  in the broker when a browser starts.
 - **proxy**: reusable proxy configuration; managed proxy rules/profile state are
   retained by the proxy manager.
-- **browser**: reusable launch template. Fields include \`id\`, optional
-  \`appId\`, \`targetUrl\`, \`brokerUrl\`, \`profile\`, \`networkId\`,
-  \`proxyId\`, \`ignoreSslErrors\`, and \`headless\`.
+- **browserTpl**: reusable launch template. Fields include \`id\`, optional
+  \`appId\`, \`targetUrl\`, \`brokerUrl\`, \`profile\`, \`proxyId\`,
+  \`proxyBypassList\`, \`ignoreSslErrors\`, and \`headless\`.
 
 ## Start and use a browser
 
@@ -3151,8 +3090,6 @@ POST       /_pwdev/browsers/:id/stop
 GET        /_pwdev/sessions
 GET        /_pwdev/sessions/:id
 POST       /_pwdev/sessions/:id/stop
-GET|POST   /_pwdev/networks
-GET|DELETE /_pwdev/networks/:id
 GET|POST   /_pwdev/proxies
 GET|DELETE /_pwdev/proxies/:id
 GET        /_pwdev/proxies/:id/traffic
@@ -3842,7 +3779,7 @@ export async function deletePwDevManagedProxy(proxyId, { serverUrl = '${serverUr
   return response.json();
 }
 
-export async function createPwDevNetwork(network, { serverUrl = '${serverUrl}' } = {}) {
+export async function createPwDevBrokerNetwork(network, { serverUrl = '${serverUrl}' } = {}) {
   const response = await fetch(\`\${serverUrl}/_pwdev/networks\`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -3854,7 +3791,7 @@ export async function createPwDevNetwork(network, { serverUrl = '${serverUrl}' }
   return response.json();
 }
 
-export async function loadPwDevNetworks({ serverUrl = '${serverUrl}' } = {}) {
+export async function loadPwDevBrokerNetworks({ serverUrl = '${serverUrl}' } = {}) {
   const response = await fetch(\`\${serverUrl}/_pwdev/networks\`);
   if (!response.ok) {
     throw new Error(\`pw-dev networks load failed: \${response.status} \${await response.text()}\`);
@@ -3862,7 +3799,7 @@ export async function loadPwDevNetworks({ serverUrl = '${serverUrl}' } = {}) {
   return response.json();
 }
 
-export async function checkPwDevNetwork(networkId, { serverUrl = '${serverUrl}', ...probe } = {}) {
+export async function checkPwDevBrokerNetwork(networkId, { serverUrl = '${serverUrl}', ...probe } = {}) {
   const response = await fetch(\`\${serverUrl}/_pwdev/networks/\${encodeURIComponent(networkId)}/check\`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
