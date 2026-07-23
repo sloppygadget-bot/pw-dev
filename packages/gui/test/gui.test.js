@@ -74,8 +74,13 @@ test('gui serves static app and read-only config', async () => {
 
 test('gui proxies a managed Whistle GUI under a same-origin route', async () => {
   const whistle = http.createServer((req, res) => {
-    res.writeHead(200, { 'content-type': 'text/html' });
-    res.end(`whistle gui path: ${req.url}`);
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`whistle gui ${req.method} ${req.url} ${body}`);
+    });
   });
   await new Promise((resolve) => whistle.listen(0, '127.0.0.1', resolve));
   const whistleUrl = `http://127.0.0.1:${whistle.address().port}`;
@@ -90,7 +95,15 @@ test('gui proxies a managed Whistle GUI under a same-origin route', async () => 
   try {
     const response = await get(`${gui.origin}/proxy/proxy-main/gui/`);
     assert.equal(response.statusCode, 200);
-    assert.match(response.body, /whistle gui path: \//);
+    assert.match(response.body, /whistle gui GET \/ /);
+
+    const saved = await request(`${gui.origin}/proxy/proxy-main/gui/cgi-bin/rules/project`, {
+      method: 'POST',
+      body: 'name=local-api&rules=example.test',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    assert.equal(saved.statusCode, 200);
+    assert.match(saved.body, /whistle gui POST \/cgi-bin\/rules\/project name=local-api&rules=example.test/);
   } finally {
     await gui.close();
     await pwdev.close();

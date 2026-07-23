@@ -447,25 +447,32 @@ function renderBroker(snapshot) {
 function renderBrowsers(browsers, sessions) {
   renderCards(els.browsers, browsers.map((browser) => {
     const relatedSessions = sessions.filter((session) => session.browserId === browser.id);
-    const runtime = browser.runtime ?? relatedSessions[0];
+    const activeSessions = relatedSessions.map((session) => formatBrowserSession(session));
+    const running = relatedSessions.length > 0;
     return {
       title: browser.id,
       subtitle: browser.appId ?? 'Standalone',
-      badge: badge(runtime ? 'Running' : 'Stopped', runtime ? 'good' : 'neutral'),
+      badge: badge(running ? `${relatedSessions.length} active` : 'Stopped', running ? 'good' : 'neutral'),
       rows: {
+        Status: running ? 'Running' : 'Stopped',
         App: appLink(browser.appId),
         Target: browser.targetUrl,
         Broker: browser.brokerUrl,
         Profile: browser.profile ?? browser.id,
         Network: browser.networkId,
         Proxy: browser.proxyId,
-        Sessions: relatedSessions.map((session) => session.sessionId).join(', ') || undefined,
-        Instance: runtime?.browserInstanceId,
-        Started: formatDate(runtime?.browserStartedAt),
+        'Active sessions': activeSessions.join(' · ') || 'None',
         Updated: formatDate(browser.updatedAt),
       },
     };
   }));
+}
+
+function formatBrowserSession(session) {
+  const scope = session.scope === 'task' ? `task ${session.taskId ?? session.sessionId}` : 'default';
+  const profile = session.profile ? `profile ${session.profile}` : undefined;
+  const instance = session.browserInstanceId ? `instance ${session.browserInstanceId}` : undefined;
+  return [session.sessionId, scope, profile, instance].filter(Boolean).join(' — ');
 }
 
 function renderSessions(sessions, relationships) {

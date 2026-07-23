@@ -352,10 +352,6 @@ async function proxyWhistleGui({ req, res, requestUrl, pwDevUrl }) {
     writeText(res, 404, 'text/plain; charset=utf-8', 'Not Found');
     return;
   }
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    writeJson(res, 405, { ok: false, error: 'Whistle GUI proxy only supports GET and HEAD' });
-    return;
-  }
   if (!match[2]) {
     const location = `${requestUrl.pathname}/`;
     res.writeHead(302, { location });
@@ -382,10 +378,14 @@ async function proxyWhistleGui({ req, res, requestUrl, pwDevUrl }) {
 
   const upstreamUrl = new URL(match[2] || '/', ensureTrailingSlash(guiUrl));
   upstreamUrl.search = requestUrl.search;
+  const headers = { ...req.headers };
+  delete headers.connection;
+  delete headers.host;
   const upstream = http.request(upstreamUrl, {
     method: req.method,
     headers: {
-      accept: req.headers.accept || '*/*',
+      ...headers,
+      host: upstreamUrl.host,
       'accept-encoding': 'identity',
     },
   }, (response) => {
@@ -397,7 +397,7 @@ async function proxyWhistleGui({ req, res, requestUrl, pwDevUrl }) {
     ok: false,
     error: `Whistle GUI is unreachable at ${guiUrl}: ${error.message}`,
   }));
-  upstream.end();
+  req.pipe(upstream);
 }
 
 async function serveStatic({ req, res, root }) {
