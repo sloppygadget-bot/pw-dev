@@ -163,6 +163,57 @@ test('manager accepts explicit Whistle command override', async () => {
   await manager.stopAll();
 });
 
+test('manager stopAll preserves proxy profiles for a later restart', async () => {
+  const spawned = [];
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-stop-all-'));
+  const registryClient = fakeRegistryClient();
+  let liveProcess;
+  const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
+    registryClient,
+    quiet: true,
+    spawnImpl: fakeSpawn(spawned),
+    portAvailable: async () => true,
+    processListImpl: async () => liveProcess ? [liveProcess] : [],
+    w2StorageRoot,
+  });
+
+  try {
+    const created = await manager.createProxy({ id: 'preserved-whistle', ruleset: 'a b' });
+    liveProcess = {
+      pid: spawned[0].child.pid,
+      commandLine: `node whistle.js run -S ${created.proxy.storageDir}`,
+    };
+    const liveStatus = await manager.getProxyStatus('preserved-whistle');
+    assert.equal(liveStatus.status.running, true);
+    assert.equal(liveStatus.status.pid, spawned[0].child.pid);
+
+    await manager.stopAll({ preserve: true });
+    liveProcess = undefined;
+
+    assert.equal(spawned[0].child.killedSignal, 'SIGTERM');
+    assert.equal(fs.existsSync(created.proxy.storageDir), true);
+    assert.deepEqual(registryClient.deletes, []);
+
+    const recoveredSpawned = [];
+    const recoveredManager = createProxyManager({
+      applyRulesImpl: fakeApplyRules([]),
+      registryClient,
+      quiet: true,
+      spawnImpl: fakeSpawn(recoveredSpawned),
+      portAvailable: async () => true,
+      w2StorageRoot,
+    });
+    const status = await recoveredManager.status();
+    assert.deepEqual(status.proxies.map((proxy) => [proxy.id, proxy.running]), [['preserved-whistle', false]]);
+
+    await recoveredManager.startProxy('preserved-whistle');
+    assert.ok(recoveredSpawned[0].args.includes(created.proxy.storageDir));
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
 test('manager writes object ruleset as JSON', async () => {
   const spawned = [];
   const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-test-'));
@@ -453,6 +504,11 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     assert.equal(read.statusCode, 200);
     assert.equal(read.body.proxy.proxyUrl, created.body.proxy.proxyUrl);
 
+    const runtimeStatus = await getJson(`${server.origin}/_proxy/proxies/whistle-main/status`);
+    assert.equal(runtimeStatus.statusCode, 200);
+    assert.equal(runtimeStatus.body.status.source, 'whistle-process');
+    assert.equal(typeof runtimeStatus.body.status.running, 'boolean');
+
     const replaced = await putJson(`${server.origin}/_proxy/proxies/whistle-main/rules`, {
       baseVersion: created.body.proxy.rules.version,
       defaultRuleset: created.body.proxy.rules.defaultRuleset,
@@ -483,6 +539,66 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     assert.equal(deleted.body.proxy.running, false);
   } finally {
     await server.close();
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('proxy HTTP API lists and toggles Whistle rulesets for one proxy', async () => {
+  const whistleRequests = [];
+  const whistle = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      whistleRequests.push({ method: req.method, url: req.url, body });
+      res.setHeader('content-type', 'application/json');
+      if (req.method === 'GET' && req.url === '/cgi-bin/rules/list') {
+        res.end(JSON.stringify({
+          ec: 0,
+          allowMultipleChoice: false,
+          defaultRules: '',
+          defaultRulesIsDisabled: false,
+          list: [{ name: 'local-api', data: 'api.test 127.0.0.1:3000', selected: true }],
+        }));
+        return;
+      }
+      res.end(JSON.stringify({ ec: 0, list: req.url?.includes('/select') ? ['local-api'] : [] }));
+    });
+  });
+  await new Promise((resolve) => whistle.listen(0, '127.0.0.1', resolve));
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-rulesets-'));
+  const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
+    registryClient: fakeRegistryClient(),
+    quiet: true,
+    spawnImpl: fakeSpawn([]),
+    portAvailable: async () => true,
+    w2StorageRoot,
+  });
+  const server = await startProxyManagerServer({ manager, port: 0 });
+  const uiPort = whistle.address().port;
+
+  try {
+    await postJson(`${server.origin}/_proxy/proxies`, { id: 'ruleset-proxy', ruleset: 'a b', uiPort });
+
+    const list = await getJson(`${server.origin}/_proxy/proxies/ruleset-proxy/rulesets`);
+    assert.equal(list.statusCode, 200);
+    assert.deepEqual(list.body.selectedRulesets, ['local-api']);
+
+    const selected = await postJson(`${server.origin}/_proxy/proxies/ruleset-proxy/rulesets/local-api/select`, {});
+    assert.equal(selected.statusCode, 200, selected.body.error);
+    assert.deepEqual(selected.body.selectedRulesets, ['local-api']);
+
+    const unselected = await postJson(`${server.origin}/_proxy/proxies/ruleset-proxy/rulesets/local-api/unselect`, {});
+    assert.equal(unselected.statusCode, 200);
+    assert.deepEqual(unselected.body.selectedRulesets, []);
+    assert.deepEqual(whistleRequests.map(({ method, url, body }) => [method, url, body]), [
+      ['GET', '/cgi-bin/rules/list', ''],
+      ['POST', '/cgi-bin/rules/select', 'name=local-api'],
+      ['POST', '/cgi-bin/rules/unselect', 'name=local-api'],
+    ]);
+  } finally {
+    await server.close();
+    await new Promise((resolve) => whistle.close(resolve));
     fs.rmSync(w2StorageRoot, { recursive: true, force: true });
   }
 });

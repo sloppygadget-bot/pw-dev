@@ -34,14 +34,13 @@ select {
 }
 
 .topbar {
-  min-height: 72px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
+  gap: 12px;
+  padding: 10px 20px;
+  background: #151719;
+  color: #fff;
   position: sticky;
   top: 0;
   z-index: 2;
@@ -55,8 +54,14 @@ p {
 }
 
 h1 {
-  font-size: 20px;
+  font-size: 14px;
   font-weight: 700;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 h2 {
@@ -72,6 +77,14 @@ h3 {
 .muted {
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+.topbar .muted {
+  color: #b9dcff;
+}
+
+.topbar .muted a {
+  color: inherit;
 }
 
 .good-text {
@@ -96,7 +109,13 @@ h3 {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--muted);
+  color: #fff;
+}
+
+.topbar select,
+.topbar button {
+  background: #fff;
+  color: #151719;
 }
 
 select,

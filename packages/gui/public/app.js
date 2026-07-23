@@ -11,7 +11,6 @@ const state = {
 };
 
 const els = {
-  target: document.querySelector('#target'),
   interval: document.querySelector('#interval'),
   refresh: document.querySelector('#refresh'),
   serverState: document.querySelector('#server-state'),
@@ -55,7 +54,6 @@ void init();
 async function init() {
   const config = await fetchJson('/api/config');
   state.pwDevUrl = config.pwDevUrl;
-  els.target.textContent = 'agent-first dev scaffold';
   state.visualizers = await loadVisualizers();
   syncRendererButtons();
   await refresh();

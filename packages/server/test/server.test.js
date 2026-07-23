@@ -175,7 +175,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /\/_pwdev\/browsers\/docs-crawler/);
     assert.match(instructions.body, /Use only this server/);
     assert.match(instructions.body, /\/_pwdev\/browsers/);
-    assert.match(instructions.body, /create\/reuse the required mapping/);
+    assert.match(instructions.body, /create or reuse the required mapping/);
     assert.match(instructions.body, /\/_pwdev\/sessions/);
     assert.match(instructions.body, /browser\.close\(\)/);
     assert.doesNotMatch(instructions.body, /Inspect managed-proxy traffic/);
@@ -189,6 +189,8 @@ test('server exposes instructions and client helper source', async () => {
     const openapi = await getJson(`${server.origin}/_pwdev/openapi.json`);
     assert.equal(openapi.statusCode, 200);
     assert.equal(openapi.body.openapi, '3.1.1');
+    assert.ok(openapi.body.paths['/_pwdev/instructions']);
+    assert.ok(openapi.body.paths['/_pwdev/env']);
     assert.equal(openapi.body['x-pwdev-documents'].find((document) => document.id === 'browsers').url, '/_pwdev/openapi/browsers.json');
 
     const proxyCatalog = await getJson(`${server.origin}/_pwdev/openapi/proxies.json`);

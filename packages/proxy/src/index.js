@@ -84,6 +84,63 @@ export function createProxyManager(options = {}) {
       if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
       return { ok: true, proxy: stripChild(proxy) };
     },
+    async getProxyStatus(id) {
+      await ensureProfilesLoaded();
+      const proxy = proxies.get(id);
+      if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
+      const processes = await processListImpl();
+      const liveProcess = processes.find((processInfo) => (
+        processInfo.pid === proxy.pid
+        && extractManagedStorageDir(processInfo.commandLine, w2StorageRoot) === proxy.storageDir
+      ));
+      const running = Boolean(liveProcess);
+      return {
+        ok: true,
+        proxy: { ...stripChild(proxy), running, pid: liveProcess?.pid },
+        status: {
+          running,
+          pid: liveProcess?.pid,
+          checkedAt: new Date().toISOString(),
+          source: 'whistle-process',
+        },
+      };
+    },
+    async listProxyRulesets(id) {
+      const proxy = await getRunningProxy({ proxies, id });
+      const rules = await requestWhistleJson(new URL('/cgi-bin/rules/list', ensureTrailingSlash(proxy.guiUrl)));
+      const rulesets = Array.isArray(rules.list) ? rules.list : [];
+      return {
+        ok: true,
+        proxyId: proxy.id,
+        defaultRules: rules.defaultRules,
+        defaultRulesIsDisabled: rules.defaultRulesIsDisabled,
+        allowMultipleChoice: rules.allowMultipleChoice,
+        rulesets,
+        selectedRulesets: rulesets.filter((ruleset) => ruleset.selected).map((ruleset) => ruleset.name),
+      };
+    },
+    async selectProxyRuleset(id, name) {
+      const proxy = await getRunningProxy({ proxies, id });
+      const rulesetName = optionalString(name, 'ruleset name');
+      if (!rulesetName) throw httpError(400, 'ruleset name is required');
+      const result = await requestWhistleForm(
+        new URL('/cgi-bin/rules/select', ensureTrailingSlash(proxy.guiUrl)),
+        new URLSearchParams({ name: rulesetName }).toString()
+      );
+      if (result?.ec !== 0) throw httpError(502, result?.em || result?.msg || 'Whistle rejected ruleset selection');
+      return { ok: true, proxyId: proxy.id, selectedRulesets: result.list ?? [] };
+    },
+    async unselectProxyRuleset(id, name) {
+      const proxy = await getRunningProxy({ proxies, id });
+      const rulesetName = optionalString(name, 'ruleset name');
+      if (!rulesetName) throw httpError(400, 'ruleset name is required');
+      const result = await requestWhistleForm(
+        new URL('/cgi-bin/rules/unselect', ensureTrailingSlash(proxy.guiUrl)),
+        new URLSearchParams({ name: rulesetName }).toString()
+      );
+      if (result?.ec !== 0) throw httpError(502, result?.em || result?.msg || 'Whistle rejected ruleset deselection');
+      return { ok: true, proxyId: proxy.id, selectedRulesets: result.list ?? [] };
+    },
     async createProxy(input) {
       await ensureProfilesLoaded();
       const request = validateCreateProxyRequest(input);
@@ -318,9 +375,11 @@ export function createProxyManager(options = {}) {
       await cleanupManagedProxy(proxy, true, registryClient);
       return { ok: true, proxy: { ...stripChild(proxy), running: false } };
     },
-    async stopAll() {
+    async stopAll({ preserve = false } = {}) {
       await ensureProfilesLoaded();
-      const stopped = await Promise.all(Array.from(proxies.keys()).map((id) => this.deleteProxy(id)));
+      const stopped = await Promise.all(Array.from(proxies.keys()).map((id) => (
+        preserve ? this.stopProxy(id) : this.deleteProxy(id)
+      )));
       return { ok: true, proxies: stopped };
     },
     async cleanupOrphans() {
@@ -455,6 +514,26 @@ async function handleProxyManagerRequest({ req, res, manager }) {
     writeMethodNotAllowed(res, 'PUT');
     return;
   }
+  if (req.method === 'GET' && parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'status') {
+    writeJson(res, 200, await manager.getProxyStatus(decodeURIComponent(parts[2])));
+    return;
+  }
+  if (req.method === 'GET' && parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'rulesets') {
+    writeJson(res, 200, await manager.listProxyRulesets(decodeURIComponent(parts[2])));
+    return;
+  }
+  if (req.method === 'POST' && parts.length === 6 && parts[1] === 'proxies' && parts[3] === 'rulesets') {
+    const id = decodeURIComponent(parts[2]);
+    const name = decodeURIComponent(parts[4]);
+    if (parts[5] === 'select') {
+      writeJson(res, 200, await manager.selectProxyRuleset(id, name));
+      return;
+    }
+    if (parts[5] === 'unselect') {
+      writeJson(res, 200, await manager.unselectProxyRuleset(id, name));
+      return;
+    }
+  }
   if (req.method === 'POST' && parts.length === 4 && parts[1] === 'proxies' && parts[3] === 'start') {
     writeJson(res, 200, await manager.startProxy(decodeURIComponent(parts[2])));
     return;
@@ -567,6 +646,15 @@ function listProcessRecords(records) {
   return Array.from(records.values())
     .map(stripChild)
     .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function getRunningProxy({ proxies, id }) {
+  const proxy = proxies.get(id);
+  if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
+  if (!proxy.running || !proxy.guiUrl) {
+    throw httpError(409, `Managed proxy ${id} is stopped; start it before managing Whistle rulesets`);
+  }
+  return proxy;
 }
 
 function makeProcessRecord({ id, kind, name, appId, taskId, owner, purpose, labels, command, args, proxyPort, uiPort, proxyUrl, guiUrl, storageDir, rulesetFile, rules, whistleRuleName, pid }) {
@@ -896,6 +984,33 @@ function requestWhistleForm(url, body) {
     });
     request.once('error', reject);
     request.end(body);
+  });
+}
+
+function requestWhistleJson(url) {
+  return new Promise((resolve, reject) => {
+    const request = http.get(url, (response) => {
+      let responseText = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        responseText += chunk;
+      });
+      response.on('end', () => {
+        let payload;
+        try {
+          payload = responseText ? JSON.parse(responseText) : {};
+        } catch {
+          reject(new Error('Whistle returned invalid JSON'));
+          return;
+        }
+        if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
+          reject(new Error(payload.error || `Request failed: ${response.statusCode}`));
+          return;
+        }
+        resolve(payload);
+      });
+    });
+    request.once('error', reject);
   });
 }
 

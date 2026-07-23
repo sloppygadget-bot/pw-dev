@@ -4,6 +4,8 @@
   "servers": [{ "url": "/" }],
   "paths": {
     "/_pwdev/status": { "get": { "operationId": "getPwDevStatus", "summary": "Check server and broker health", "responses": { "200": { "description": "Live status" } } } },
+    "/_pwdev/env": { "get": { "operationId": "getPwDevEnvironment", "summary": "Discover live runtime paths and settings", "responses": { "200": { "description": "Runtime environment details" } } } },
+    "/_pwdev/instructions": { "get": { "operationId": "getPwDevInstructions", "summary": "Read the live agent workflow guide", "responses": { "200": { "description": "Machine-readable operating instructions" } } } },
     "/_pwdev/delegates": { "get": { "operationId": "listPwDevDelegates", "summary": "Discover component-owned APIs", "responses": { "200": { "description": "Available delegated API catalogs" } } } }
   },
   "x-pwdev-documents": [

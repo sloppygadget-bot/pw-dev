@@ -67,8 +67,8 @@ export async function main(argv) {
     if (shutdownPromise) return shutdownPromise;
     console.log(`Received ${signal}; shutting down.`);
     shutdownPromise = (async () => {
+      if (proxyManager) await proxyManager.stopAll({ preserve: true });
       await server.close();
-      if (proxyManager) await proxyManager.stopAll();
       if (proxyManagerServer) await proxyManagerServer.close();
     })();
     return shutdownPromise;
