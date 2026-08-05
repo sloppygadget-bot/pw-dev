@@ -22,6 +22,7 @@ const require = createRequire(import.meta.url);
 const SERVER_PACKAGE_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const PROXY_PACKAGE_ROOT = path.resolve(SERVER_PACKAGE_ROOT, '..', 'proxy');
 const BROKER_PACKAGE_ROOT = path.resolve(SERVER_PACKAGE_ROOT, '..', 'cdp-broker');
+const INSTRUCTION_TEMPLATE_ROOT = path.join(SERVER_PACKAGE_ROOT, 'instructions');
 
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -74,7 +75,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * Agents should treat `appUrl` and a browser CDP URL as the primary attach
  * contract: load the app at `appUrl`, and connect Playwright over app `cdpUrl`
  * for the default browser slot or `browserSessions[sessionId].cdpUrl` for a
- * task-scoped browser session.
+ * isolated named browser session.
  *
  * @typedef {object} PwDevAppManifest
  * @property {true} ok
@@ -95,7 +96,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} browserInstanceId Broker instance id for a managed browser session.
  * @property {string=} browserStartedAt ISO timestamp returned by the broker for the managed browser session.
  * @property {PwDevActiveTask=} activeTask Agent/user task that currently owns the browser session.
- * @property {Record<string, PwDevBrowserSession>=} browserSessions Task-scoped browser sessions for parallel app work.
+ * @property {Record<string, PwDevBrowserSession>=} browserSessions Named browser sessions for parallel app work.
  * @property {string=} serverUrl pw-dev server URL that registered or serves this app.
  * @property {string=} createdAt Registry creation timestamp.
  * @property {string=} updatedAt Registry update timestamp.
@@ -127,9 +128,9 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
 /**
  * Reusable proxy registry record.
  *
- * Proxies are configuration only. They do not carry runner or status fields.
- * Apps should reference a proxy by `proxyId` instead of duplicating proxy
- * details across app records.
+ * External records are reusable routing metadata. Managed records mirror the
+ * durable Whistle profile and can include current process state. Apps should
+ * reference a proxy by `proxyId` instead of duplicating proxy details.
  *
  * @typedef {object} PwDevProxyRecord
  * @property {string} id Stable proxy id.
@@ -146,6 +147,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {number=} proxyPort Allocated Whistle proxy port.
  * @property {number=} uiPort Allocated Whistle GUI port.
  * @property {number=} pid Current Whistle process id when managed.
+ * @property {boolean=} running Current managed Whistle process state; not persisted by the server mirror.
  * @property {string=} brokerProxyForwardId Broker-managed proxy forward id.
  * @property {string=} rulesetFile Local ruleset handoff file used to create this proxy.
  * @property {{ defaultRuleset: string, overrideRuleset: string, effectiveRuleset: string, version: number, updatedAt: string }=} rules Managed live rules state for proxies created by `pw-dev proxy`.
@@ -193,6 +195,7 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} browserStartedAt ISO timestamp returned by the broker.
  * @property {string=} networkId Broker network id associated with the session.
  * @property {string=} proxyId Reusable proxy registry id associated with the session.
+ * @property {{ proxyId: string, sessionId: string, leasedAt: string, trafficStartTime: string }=} proxyLease Exclusive proxy-pool lease and Whistle traffic cursor held for this session.
  * @property {string=} proxyForwardId Broker proxy-forward id associated with the session.
  * @property {string=} proxyServer Explicit Chrome proxy server URL associated with the session.
  */
@@ -290,12 +293,13 @@ export async function startPwDevServer(options = {}) {
     persist: (registeredProxies) => persistProxies(proxyRegistryFile, registeredProxies),
   });
   const sessions = createSessionRegistry();
+  const pendingProxyLeases = new Map();
   let origin;
 
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browsers, proxies, sessions, pendingProxyLeases, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -382,13 +386,14 @@ export async function startPwDevServer(options = {}) {
  *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
  *   sessions: PwDevSessionRegistry,
+ *   pendingProxyLeases: Map<string, { proxyId: string, sessionId: string, leasedAt: string, trafficStartTime: string }>,
  *   broker: PwDevBrokerPairing,
  *   proxyManagerUrl: string,
  *   ensureProxyManager?: () => Promise<unknown>,
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browsers, proxies, sessions, pendingProxyLeases = new Map(), broker, proxyManagerUrl, ensureProxyManager }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -436,7 +441,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname === '/_pwdev/browsers' || requestUrl.pathname.startsWith('/_pwdev/browsers/')) {
-    await handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, serverUrl, writeBody });
+    await handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, pendingProxyLeases, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody });
     return;
   }
 
@@ -787,7 +792,7 @@ function persistRegistryFile(file, content) {
 
 /** @param {Record<string, unknown>} proxy @returns {Record<string, unknown>} */
 function persistedProxy(proxy) {
-  const { pid: _pid, ...persistent } = proxy;
+  const { pid: _pid, running: _running, ...persistent } = proxy;
   return persistent;
 }
 
@@ -805,6 +810,7 @@ function cloneBrowserSessions(sessions) {
     {
       ...session,
       ...(session.activeTask ? { activeTask: { ...session.activeTask } } : {}),
+      ...(session.proxyLease ? { proxyLease: { ...session.proxyLease } } : {}),
     },
   ]));
 }
@@ -813,6 +819,7 @@ function cloneSession(session) {
   return {
     ...session,
     ...(session.activeTask ? { activeTask: { ...session.activeTask } } : {}),
+    ...(session.proxyLease ? { proxyLease: { ...session.proxyLease } } : {}),
   };
 }
 
@@ -937,34 +944,14 @@ async function reconcileManagedProxies({ apps, proxies, proxyManagerUrl }) {
   } catch {
     return;
   }
-  const liveManagedProxies = Array.isArray(status.proxies)
+  const managedProfiles = Array.isArray(status.proxies)
     ? status.proxies
         .filter((proxy) => proxy && typeof proxy === 'object' && typeof proxy.id === 'string' && proxy.id.trim() !== '')
-        .map((proxy) => ({
-          id: proxy.id,
-          kind: proxy.kind,
-          name: proxy.name,
-          appId: proxy.appId,
-          taskId: proxy.taskId,
-          owner: proxy.owner,
-          purpose: proxy.purpose,
-          labels: proxy.labels,
-          proxyUrl: proxy.proxyUrl,
-          guiUrl: proxy.guiUrl,
-          storageDir: proxy.storageDir,
-          proxyPort: proxy.proxyPort,
-          uiPort: proxy.uiPort,
-          pid: proxy.pid,
-          rulesetFile: proxy.rulesetFile,
-          rules: proxy.rules,
-          managed: true,
-          createdAt: proxy.createdAt ?? proxy.startedAt,
-          updatedAt: proxy.updatedAt,
-        }))
+        .map(managedProxyRegistration)
     : [];
-  const liveIds = new Set(liveManagedProxies.map((proxy) => proxy.id));
+  const profileIds = new Set(managedProfiles.map((proxy) => proxy.id));
 
-  for (const proxy of liveManagedProxies) {
+  for (const proxy of managedProfiles) {
     proxies.upsert(proxy);
     if (proxy.appId) {
       const app = apps.get(proxy.appId);
@@ -975,7 +962,7 @@ async function reconcileManagedProxies({ apps, proxies, proxyManagerUrl }) {
   }
 
   const staleIds = proxies.list()
-    .filter((proxy) => proxy.managed && !liveIds.has(proxy.id))
+    .filter((proxy) => proxy.managed && !profileIds.has(proxy.id))
     .map((proxy) => proxy.id);
   if (!staleIds.length) return;
 
@@ -985,6 +972,31 @@ async function reconcileManagedProxies({ apps, proxies, proxyManagerUrl }) {
       apps.update(app.id, { proxyId: undefined });
     }
   }
+}
+
+function managedProxyRegistration(proxy) {
+  return omitUndefined({
+    id: proxy.id,
+    kind: proxy.kind,
+    name: proxy.name,
+    appId: proxy.appId,
+    taskId: proxy.taskId,
+    owner: proxy.owner,
+    purpose: proxy.purpose,
+    labels: proxy.labels,
+    proxyUrl: proxy.proxyUrl,
+    guiUrl: proxy.guiUrl,
+    storageDir: proxy.storageDir,
+    proxyPort: proxy.proxyPort,
+    uiPort: proxy.uiPort,
+    pid: proxy.pid,
+    running: proxy.running,
+    rulesetFile: proxy.rulesetFile,
+    rules: proxy.rules,
+    managed: true,
+    createdAt: proxy.createdAt ?? proxy.startedAt,
+    updatedAt: proxy.updatedAt,
+  });
 }
 
 /**
@@ -1277,6 +1289,7 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
     writeJson(res, 200, {
       ok: true,
       session,
+      releasedProxyLease: session.proxyLease,
       app: app ? buildAppResponse(app, sessions) : undefined,
       browser: stop,
     }, writeBody);
@@ -1286,29 +1299,89 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
   writeJson(res, 404, { ok: false, error: 'Unknown pw-dev sessions endpoint' }, writeBody);
 }
 
-/**
- * Handle central app registry routes under `/_pwdev/apps`.
- *
- * `POST /_pwdev/apps` is an upsert. Re-posting the same app id updates its
- * app URL, worktree, branch, agent instructions, and network/proxy metadata in place.
- *
- * @param {{
- *   req: http.IncomingMessage,
- *   res: http.ServerResponse,
- *   requestUrl: URL,
- *   apps: PwDevAppRegistry,
- *   proxies: PwDevProxyRegistry,
- *   sessions: PwDevSessionRegistry,
- *   broker: PwDevBrokerPairing,
- *   serverUrl: string,
- *   writeBody: boolean,
- * }} options
- * @returns {Promise<void>}
- */
-async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, serverUrl, writeBody }) {
+/** Validate that every durable proxy named by a browser pool exists. */
+function validateBrowserProxyPool(template, proxies) {
+  if (!template.proxyIds) return;
+  for (const proxyId of template.proxyIds) {
+    if (!proxies.get(proxyId)) {
+      const error = new Error(`Unknown proxy in browser template pool: ${proxyId}`);
+      error.statusCode = 404;
+      throw error;
+    }
+  }
+}
+
+function buildProxyPoolState(template, sessions, pendingProxyLeases) {
+  if (!template.proxyIds) return undefined;
+  const pool = new Set(template.proxyIds);
+  const leases = new Map();
+  for (const session of sessions.list()) {
+    if (!session.proxyId || !pool.has(session.proxyId)) continue;
+    leases.set(session.proxyId, session.proxyLease ?? {
+      proxyId: session.proxyId,
+      sessionId: session.sessionId,
+      leasedAt: session.browserStartedAt,
+      trafficStartTime: session.browserStartedAt ? String(Date.parse(session.browserStartedAt)) : undefined,
+    });
+  }
+  for (const [proxyId, lease] of pendingProxyLeases) {
+    if (pool.has(proxyId) && !leases.has(proxyId)) leases.set(proxyId, lease);
+  }
+  return {
+    proxyIds: [...template.proxyIds],
+    availableProxyIds: template.proxyIds.filter((proxyId) => !leases.has(proxyId)),
+    leases: [...leases.values()],
+  };
+}
+
+function reserveBrowserProxyLease({ template, sessions, pendingProxyLeases, sessionId }) {
+  const pool = buildProxyPoolState(template, sessions, pendingProxyLeases);
+  if (!pool) return undefined;
+  if (pool.leases.some((lease) => lease.sessionId === sessionId)) {
+    const error = new Error('Browser template session is already starting');
+    error.statusCode = 409;
+    throw error;
+  }
+  const proxyId = pool.availableProxyIds[0];
+  if (!proxyId) {
+    const error = new Error(`No proxy is available in browser template pool: ${template.id}`);
+    error.statusCode = 409;
+    throw error;
+  }
+  const leasedAt = new Date();
+  const lease = {
+    proxyId,
+    sessionId,
+    leasedAt: leasedAt.toISOString(),
+    trafficStartTime: String(leasedAt.getTime()),
+  };
+  pendingProxyLeases.set(proxyId, lease);
+  return lease;
+}
+
+async function ensureManagedProxyRunning({ proxyId, proxies, proxyManagerUrl, ensureProxyManager }) {
+  if (!proxyId) return;
+  const registered = proxies.get(proxyId);
+  if (!registered?.managed) return;
+  if (ensureProxyManager) await ensureProxyManager();
+  const started = await brokerJson(proxyManagerUrl, `/_proxy/proxies/${encodeURIComponent(proxyId)}/start`, {
+    method: 'POST',
+  });
+  if (started.proxy) proxies.upsert(managedProxyRegistration(started.proxy));
+}
+
+async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, pendingProxyLeases, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody }) {
   const parts = requestUrl.pathname.split('/').filter(Boolean);
   await reconcileSessionsBestEffort({ sessions, broker });
-  const withRuntime = (template) => ({ ...template, runtime: sessions.listByBrowser(template.id).find((session) => session.scope === 'default'), sessions: sessions.listByBrowser(template.id) });
+  const withRuntime = (template) => {
+    const browserSessions = sessions.listByBrowser(template.id);
+    return omitUndefined({
+      ...template,
+      runtime: browserSessions.find((session) => session.scope === 'default'),
+      sessions: browserSessions,
+      proxyPool: buildProxyPoolState(template, sessions, pendingProxyLeases),
+    });
+  };
   if (parts.length === 2) {
     if (req.method === 'GET' || req.method === 'HEAD') {
       writeJson(res, 200, { ok: true, browsers: browsers.list().map(withRuntime) }, writeBody);
@@ -1353,31 +1426,45 @@ async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, brows
       writeJson(res, 409, { ok: false, error: 'Browser template session is already active', session: existing }, writeBody);
       return;
     }
+    validateBrowserProxyPool(template, proxies);
+    const proxyLease = reserveBrowserProxyLease({ template, sessions, pendingProxyLeases, sessionId });
     const brokerUrl = broker.resolve(template.brokerUrl ?? app?.brokerUrl);
     const network = {};
-    const proxy = resolveProxyForBrowserStart({ proxies, proxyId: template.proxyId ?? app?.proxyId });
-    const brokerStatus = proxy.proxyId && proxy.proxyServer ? await brokerJson(brokerUrl, '/_broker/status') : undefined;
-    const proxyPeer = brokerStatus?.topology?.mode === 'ssh' && brokerStatus.topology.remote ? 'ssh-peer' : undefined;
-    const start = await brokerJson(brokerUrl, '/_broker/start', {
-      method: 'POST',
-      body: omitUndefined({
-        profile,
-        proxyServer: proxy.proxyServer,
-        proxyForwardId: proxy.proxyForwardId,
-        proxyPeer,
-        proxyName: proxyPeer ? proxy.proxyId : undefined,
-        ignoreSslErrors: payload.ignoreSslErrors ?? template.ignoreSslErrors,
-        proxyBypassList: payload.proxyBypassList ?? template.proxyBypassList,
-        headless: payload.headless ?? template.headless,
-        resetProfile: payload.resetProfile ?? template.resetProfile,
-      }),
-    });
-    const cdpUrl = rewriteBrokerUrlToServerProxy(start.cdpUrl, serverUrl);
-    const session = sessions.upsert(makeBrowserSession({
-      sessionId, appId: template.appId, browserId: id, scope,
-      brokerUrl, start, profile, cdpUrl, network, proxy,
-    }));
-    writeJson(res, 200, { ok: true, browser: { ...template, runtime: session }, session, start: { ...start, cdpUrl } }, writeBody);
+    try {
+      const selectedProxyId = proxyLease?.proxyId ?? template.proxyId ?? app?.proxyId;
+      await ensureManagedProxyRunning({ proxyId: selectedProxyId, proxies, proxyManagerUrl, ensureProxyManager });
+      const proxy = resolveProxyForBrowserStart({ proxies, proxyId: selectedProxyId });
+      const brokerStatus = proxy.proxyId && proxy.proxyServer ? await brokerJson(brokerUrl, '/_broker/status') : undefined;
+      const proxyPeer = brokerStatus?.topology?.mode === 'ssh' && brokerStatus.topology.remote ? 'ssh-peer' : undefined;
+      const start = await brokerJson(brokerUrl, '/_broker/start', {
+        method: 'POST',
+        body: omitUndefined({
+          profile,
+          proxyServer: proxy.proxyServer,
+          proxyForwardId: proxy.proxyForwardId,
+          proxyPeer,
+          proxyName: proxyPeer ? proxy.proxyId : undefined,
+          ignoreSslErrors: payload.ignoreSslErrors ?? template.ignoreSslErrors,
+          proxyBypassList: payload.proxyBypassList ?? template.proxyBypassList,
+          headless: payload.headless ?? template.headless,
+          resetProfile: payload.resetProfile ?? template.resetProfile,
+        }),
+      });
+      const cdpUrl = rewriteBrokerUrlToServerProxy(start.cdpUrl, serverUrl);
+      const session = sessions.upsert(makeBrowserSession({
+        sessionId, appId: template.appId, browserId: id, scope,
+        brokerUrl, start, profile, cdpUrl, network, proxy, proxyLease,
+      }));
+      writeJson(res, 200, {
+        ok: true,
+        browser: withRuntime(template),
+        session,
+        proxyLease,
+        start: { ...start, cdpUrl },
+      }, writeBody);
+    } finally {
+      if (proxyLease) pendingProxyLeases.delete(proxyLease.proxyId);
+    }
     return;
   }
   if (parts.length === 4 && action === 'stop' && req.method === 'POST') {
@@ -1392,7 +1479,7 @@ async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, brows
     }
     const stop = await brokerJson(runtime.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: runtime.browserInstanceId } });
     sessions.delete(runtime.sessionId);
-    writeJson(res, 200, { ok: true, browser: template, stop }, writeBody);
+    writeJson(res, 200, { ok: true, browser: withRuntime(template), releasedProxyLease: runtime.proxyLease, stop }, writeBody);
     return;
   }
   writeJson(res, 404, { ok: false, error: 'Unknown browser template endpoint' }, writeBody);
@@ -1725,7 +1812,7 @@ function proxyProxyManagerPath(requestUrl) {
  *
  * The app registry remains the agent-facing source of truth. On start, this
  * helper calls `POST /_broker/start`, saves the returned `cdpUrl` and
- * `instanceId` onto the app's default browser slot or a task-scoped
+ * `instanceId` onto the app's default browser slot or an isolated named
  * `browserSessions` entry, and returns app, session, and broker payloads. On
  * stop, it calls `POST /_broker/stop` and removes the matching session fields.
  *
@@ -1932,7 +2019,7 @@ function findActiveBrowserProfile(sessions, profile) {
   return undefined;
 }
 
-function makeBrowserSession({ sessionId, appId, browserId, scope, task, activeTask, brokerUrl, start, profile, cdpUrl, network, proxy }) {
+function makeBrowserSession({ sessionId, appId, browserId, scope, task, activeTask, brokerUrl, start, profile, cdpUrl, network, proxy, proxyLease }) {
   return omitUndefined({
     sessionId,
     appId,
@@ -1946,6 +2033,7 @@ function makeBrowserSession({ sessionId, appId, browserId, scope, task, activeTa
     browserStartedAt: start.startedAt,
     networkId: start.networkId ?? network.networkId,
     proxyId: proxy.proxyId,
+    proxyLease,
     proxyForwardId: start.proxyForwardId,
     proxyServer: start.proxyServer,
     activeTask,
@@ -2243,7 +2331,12 @@ function validateBrowserTemplate(rawBrowser) {
   const id = requiredString(rawBrowser.id, 'id');
   const appId = optionalString(rawBrowser.appId, 'appId');
   const profile = optionalString(rawBrowser.profile, 'profile');
+  const proxyId = optionalString(rawBrowser.proxyId, 'proxyId');
+  const proxyIds = rawBrowser.proxyIds === undefined ? undefined : validateStringArray(rawBrowser.proxyIds, 'proxyIds');
   if (profile) validateBrowserProfileName(profile, 'profile');
+  if (proxyIds?.length === 0) throwValidationError('proxyIds must contain at least one proxy id');
+  if (proxyIds && new Set(proxyIds).size !== proxyIds.length) throwValidationError('proxyIds must not contain duplicates');
+  if (proxyId && proxyIds) throwValidationError('proxyId and proxyIds are mutually exclusive');
   return omitUndefined({
     id,
     appId,
@@ -2251,7 +2344,8 @@ function validateBrowserTemplate(rawBrowser) {
     targetUrl: optionalString(rawBrowser.targetUrl, 'targetUrl'),
     profile,
     brokerUrl: optionalString(rawBrowser.brokerUrl, 'brokerUrl'),
-    proxyId: optionalString(rawBrowser.proxyId, 'proxyId'),
+    proxyId,
+    proxyIds,
     proxyBypassList: optionalString(rawBrowser.proxyBypassList, 'proxyBypassList'),
     ignoreSslErrors: rawBrowser.ignoreSslErrors === undefined ? undefined : Boolean(rawBrowser.ignoreSslErrors),
     headless: rawBrowser.headless === undefined ? undefined : Boolean(rawBrowser.headless),
@@ -2301,6 +2395,7 @@ function validateProxyRegistration(rawProxy) {
     proxyPort: rawProxy.proxyPort === undefined ? undefined : requiredPositiveInteger(rawProxy.proxyPort, 'proxyPort'),
     uiPort: rawProxy.uiPort === undefined ? undefined : requiredPositiveInteger(rawProxy.uiPort, 'uiPort'),
     pid: rawProxy.pid === undefined ? undefined : requiredPositiveInteger(rawProxy.pid, 'pid'),
+    running: rawProxy.running === undefined ? undefined : Boolean(rawProxy.running),
     brokerProxyForwardId: optionalString(rawProxy.brokerProxyForwardId, 'brokerProxyForwardId'),
     rules: rawProxy.rules === undefined ? undefined : validateManagedProxyRules(rawProxy.rules),
     managed: rawProxy.managed === undefined ? undefined : Boolean(rawProxy.managed),
@@ -2450,6 +2545,7 @@ function validateBrowserSession(rawSession, name) {
     browserStartedAt: optionalString(rawSession.browserStartedAt, `${name}.browserStartedAt`),
     networkId: optionalString(rawSession.networkId, `${name}.networkId`),
     proxyId: optionalString(rawSession.proxyId, `${name}.proxyId`),
+    proxyLease: rawSession.proxyLease === undefined ? undefined : validateProxyLease(rawSession.proxyLease, `${name}.proxyLease`),
     proxyForwardId: optionalString(rawSession.proxyForwardId, `${name}.proxyForwardId`),
     proxyServer: optionalString(rawSession.proxyServer, `${name}.proxyServer`),
     activeTask: validateActiveTask(rawSession.activeTask),
@@ -2474,10 +2570,23 @@ function validateSessionRegistration(rawSession) {
     browserStartedAt: optionalString(rawSession.browserStartedAt, 'browserStartedAt'),
     networkId: optionalString(rawSession.networkId, 'networkId'),
     proxyId: optionalString(rawSession.proxyId, 'proxyId'),
+    proxyLease: rawSession.proxyLease === undefined ? undefined : validateProxyLease(rawSession.proxyLease, 'proxyLease'),
     proxyForwardId: optionalString(rawSession.proxyForwardId, 'proxyForwardId'),
     proxyServer: optionalString(rawSession.proxyServer, 'proxyServer'),
     activeTask: rawSession.activeTask === undefined ? undefined : validateActiveTask(rawSession.activeTask),
   });
+}
+
+function validateProxyLease(rawLease, name) {
+  if (!rawLease || typeof rawLease !== 'object' || Array.isArray(rawLease)) {
+    throwValidationError(`${name} must be an object`);
+  }
+  return {
+    proxyId: requiredString(rawLease.proxyId, `${name}.proxyId`),
+    sessionId: requiredString(rawLease.sessionId, `${name}.sessionId`),
+    leasedAt: requiredString(rawLease.leasedAt, `${name}.leasedAt`),
+    trafficStartTime: requiredString(rawLease.trafficStartTime, `${name}.trafficStartTime`),
+  };
 }
 
 function requiredString(value, name) {
@@ -2784,6 +2893,90 @@ function readOpenApiDocument(packageRoot, relativePath) {
   return JSON.parse(readFileSync(path.join(packageRoot, 'openapi', relativePath), 'utf8'));
 }
 
+const OPENAPI_HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace']);
+
+/** Read and render a Markdown instruction template with explicit placeholders. */
+function renderInstructionTemplate(name, values) {
+  const template = readFileSync(path.join(INSTRUCTION_TEMPLATE_ROOT, name), 'utf8');
+  const rendered = template.replace(/\{\{([A-Z_]+)\}\}/g, (placeholder, key) => {
+    if (!Object.hasOwn(values, key)) {
+      throw new Error(`Missing instruction template value for ${placeholder}`);
+    }
+    return values[key];
+  });
+  const unresolved = rendered.match(/\{\{[A-Z_]+\}\}/);
+  if (unresolved) throw new Error(`Unresolved instruction template placeholder ${unresolved[0]}`);
+  return rendered.endsWith('\n') ? rendered : `${rendered}\n`;
+}
+
+/** Return the root catalog and each control-plane domain document it links. */
+function controlPlaneOpenApiCatalog() {
+  const rootUrl = '/_pwdev/openapi.json';
+  const rootDocument = readOpenApiDocument(SERVER_PACKAGE_ROOT, SERVER_OPENAPI_DOCUMENTS.get(rootUrl));
+  const catalog = [{
+    url: rootUrl,
+    whenToUse: rootDocument.info?.description,
+    document: rootDocument,
+  }];
+  for (const entry of rootDocument['x-pwdev-documents'] ?? []) {
+    const relativePath = SERVER_OPENAPI_DOCUMENTS.get(entry.url);
+    if (!relativePath) throw new Error(`OpenAPI catalog links unknown document ${entry.url}`);
+    catalog.push({
+      url: entry.url,
+      whenToUse: entry.whenToUse,
+      document: readOpenApiDocument(SERVER_PACKAGE_ROOT, relativePath),
+    });
+  }
+  return catalog;
+}
+
+/** Generate the instruction document list from the checked-in OpenAPI metadata. */
+function renderOpenApiDocumentLinks(serverUrl) {
+  const documents = [
+    ...controlPlaneOpenApiCatalog(),
+    {
+      url: '/_pwdev/delegates/proxy/openapi.json',
+      whenToUse: 'Create a managed proxy or change its lifecycle or rules.',
+      document: readOpenApiDocument(PROXY_PACKAGE_ROOT, 'root.json'),
+    },
+    {
+      url: '/_pwdev/delegates/broker/openapi.json',
+      whenToUse: 'Use advanced broker capabilities not covered by the control plane.',
+      document: readOpenApiDocument(BROKER_PACKAGE_ROOT, BROKER_OPENAPI_DOCUMENT),
+    },
+  ];
+  return documents
+    .map(({ url, whenToUse, document }) => {
+      const title = document.info?.title ?? url;
+      return `- [${title}](${serverUrl}${url})${whenToUse ? ` — ${whenToUse}` : ''}`;
+    })
+    .join('\n');
+}
+
+/** Generate the concise control-plane operation table from OpenAPI paths. */
+function renderOpenApiEndpointSummary() {
+  const operations = [];
+  const seen = new Set();
+  for (const { document } of controlPlaneOpenApiCatalog()) {
+    for (const [apiPath, pathItem] of Object.entries(document.paths ?? {})) {
+      for (const [method, operation] of Object.entries(pathItem)) {
+        if (!OPENAPI_HTTP_METHODS.has(method)) continue;
+        const key = `${method}:${apiPath}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const summary = operation.summary
+          ?? operation.description
+          ?? operation.responses?.['200']?.description
+          ?? operation.operationId;
+        operations.push({ method: method.toUpperCase(), path: apiPath, summary });
+      }
+    }
+  }
+  const rows = operations.map(({ method, path: apiPath, summary }) =>
+    `| ${method} | \`${apiPath}\` | ${String(summary).replace(/\|/g, '\\|').replace(/\s+/g, ' ')} |`);
+  return ['| Method | Path | Purpose |', '| --- | --- | --- |', ...rows].join('\n');
+}
+
 function pwDevDelegates(serverUrl, proxyManagerUrl, brokerSummary) {
   return {
     ok: true,
@@ -2811,11 +3004,11 @@ function pwDevDelegates(serverUrl, proxyManagerUrl, brokerSummary) {
 }
 
 function brokerDelegateInstructions(serverUrl) {
-  return `# pw-dev broker delegate\n\nThis API is owned by the CDP broker and delivered through pw-dev. Use only\n\`${serverUrl}/_pwdev/broker/*\`; do not call the broker port directly.\n\nFetch \`${serverUrl}/_pwdev/delegates/broker/openapi.json\` for advanced instance,\nprofile, network, and proxy-forward operations. Prefer the server control-plane\nbrowser and session APIs for ordinary browser lifecycle work.\n`;
+  return renderInstructionTemplate('broker-delegate.md', { SERVER_URL: serverUrl });
 }
 
 function proxyDelegateInstructions(serverUrl) {
-  return `# pw-dev proxy delegate\n\nThis API is owned by the proxy manager but is delivered through pw-dev. Use only\n\`${serverUrl}/_pwdev/proxy/*\`; do not call the proxy-manager port directly.\n\nFetch \`${serverUrl}/_pwdev/delegates/proxy/openapi.json\` first. Then load only the\nlinked lifecycle or ruleset document needed for the next operation. Use the\ncontrol-plane \`/_pwdev/openapi/proxies.json\` document to register proxy metadata\nor read captured traffic for a registered proxy.\n`;
+  return renderInstructionTemplate('proxy-delegate.md', { SERVER_URL: serverUrl });
 }
 
 function pwDevApi(serverUrl) {
@@ -2826,8 +3019,8 @@ function pwDevApi(serverUrl) {
     entities: {
       apps: { persistent: true, fields: ['id', 'name', 'worktree', 'branch', 'readme', 'accounts'] },
       proxies: { persistent: true, fields: ['id', 'appId', 'ruleset', 'proxyUrl'] },
-      browserTpls: { persistent: true, path: '/_pwdev/browsers', fields: ['id', 'appId?', 'targetUrl?', 'brokerUrl?', 'profile?', 'proxyId?', 'ignoreSslErrors?', 'proxyBypassList?', 'headless?'] },
-      sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'appId?', 'browserInstanceId', 'cdpUrl'] },
+      browserTpls: { persistent: true, path: '/_pwdev/browsers', fields: ['id', 'appId?', 'targetUrl?', 'brokerUrl?', 'profile?', 'proxyId?', 'proxyIds?', 'ignoreSslErrors?', 'proxyBypassList?', 'headless?'] },
+      sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'appId?', 'browserInstanceId', 'cdpUrl', 'proxyLease?'] },
     },
     endpoints: [
       { method: 'GET', path: '/_pwdev/status', summary: 'Server and broker health' },
@@ -2836,10 +3029,10 @@ function pwDevApi(serverUrl) {
       { method: 'GET', path: '/_pwdev/api', summary: 'Compact API index; use a detail route or POST filter for usage' },
       { method: 'POST', path: '/_pwdev/api', summary: 'Find one operation by JSON { method, path }' },
       { method: 'GET|POST', path: '/_pwdev/apps', summary: 'Manage app metadata' },
-      { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or upsert browser templates', body: { required: ['id'], optional: ['appId', 'targetUrl', 'brokerUrl', 'profile', 'proxyId', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
+      { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or upsert browser templates', body: { required: ['id'], optional: ['appId', 'targetUrl', 'brokerUrl', 'profile', 'proxyId', 'proxyIds', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
       { method: 'GET|DELETE', path: '/_pwdev/browsers/:id', summary: 'Get or delete browser template' },
-      { method: 'POST', path: '/_pwdev/browsers/:id/start', summary: 'Start template; returns session and cdpUrl', body: { optional: ['sessionId', 'profile', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
-      { method: 'POST', path: '/_pwdev/browsers/:id/stop', summary: 'Stop default runtime or named session', body: { optional: ['sessionId'] } },
+      { method: 'POST', path: '/_pwdev/browsers/:id/start', summary: 'Start template; leases a pooled proxy and returns session/cdpUrl', body: { optional: ['sessionId', 'profile', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
+      { method: 'POST', path: '/_pwdev/browsers/:id/stop', summary: 'Stop default or named session and release its proxy lease', body: { optional: ['sessionId'] } },
       { method: 'GET', path: '/_pwdev/sessions', summary: 'List live sessions' },
       { method: 'GET', path: '/_pwdev/sessions/:id', summary: 'Get live session' },
       { method: 'POST', path: '/_pwdev/sessions/:id/stop', summary: 'Stop live session' },
@@ -2939,9 +3132,9 @@ function pwDevApiDetails(serverUrl) {
       usage: 'Persistent browser templates hold launch configuration; starting one creates a transient broker-owned session.',
       operations: [
         operation('GET', '/_pwdev/browsers', 'List browser templates', 'Fetch all persisted templates.', { method: 'GET', path: '/_pwdev/browsers' }, [], { fields: ['ok', 'browsers'] }),
-        operation('POST', '/_pwdev/browsers', 'Create or update a browser template', 'Send id plus optional app, target, profile, registered proxy, and launch settings.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-tax', appId: 'checkout-main', targetUrl: 'http://127.0.0.1:5173', proxyId: 'checkout-whistle' } }, ['The broker resolves SSH-peer routing from its own topology when a proxy is selected.'], { fields: ['ok', 'browser'] }),
-        operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser session', 'Starts the template default session. Optionally supply sessionId for an isolated named session.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/start', body: { sessionId: 'smoke-1', ignoreSslErrors: true } }, ['Connect Playwright to response.session.cdpUrl; do not launch a separate browser.', 'sessionId uses a separate profile/runtime session.'], { fields: ['ok', 'browser', 'session'], session: ['sessionId', 'cdpUrl', 'browserInstanceId'] }),
-        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser session', 'Stops the default session, or the named session in sessionId.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/stop', body: { sessionId: 'smoke-1' } }, ['Stopping a session does not delete its browser template.'], { fields: ['ok', 'sessionId'] }),
+        operation('POST', '/_pwdev/browsers', 'Create or update a browser template', 'Send id plus optional app, target, profile, one fixed proxyId or an ordered proxyIds pool, and launch settings.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-tax', appId: 'checkout-main', targetUrl: 'http://127.0.0.1:5173', proxyIds: ['checkout-traffic-a', 'checkout-traffic-b'] } }, ['proxyId and proxyIds are mutually exclusive.', 'The broker resolves SSH-peer routing from its own topology when a proxy is selected.'], { fields: ['ok', 'browser'] }),
+        operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser session', 'Starts the template default session. Optionally supply sessionId for an isolated named session. A proxyIds template leases the first available proxy exclusively.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/start', body: { sessionId: 'smoke-1', ignoreSslErrors: true } }, ['Connect Playwright to response.session.cdpUrl; do not launch a separate browser.', 'sessionId uses a separate profile/runtime session.', 'Pool exhaustion returns 409.'], { fields: ['ok', 'browser', 'session', 'proxyLease?'], session: ['sessionId', 'cdpUrl', 'browserInstanceId', 'proxyLease?'] }),
+        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser session', 'Stops the default session, or the named session in sessionId, and releases its pooled proxy.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/stop', body: { sessionId: 'smoke-1' } }, ['Stopping a session does not delete its browser template or durable proxy profile.'], { fields: ['ok', 'browser', 'releasedProxyLease?'] }),
       ],
     },
     proxies: {
@@ -2973,667 +3166,25 @@ function pwDevApiDetails(serverUrl) {
             },
           },
         }),
-        operation('POST', '/_pwdev/proxy/proxies', 'Create a managed Whistle proxy', 'Send a ruleset and id or appId. The server lazily starts its proxy manager.', { method: 'POST', path: '/_pwdev/proxy/proxies', body: { id: 'checkout-whistle', taskId: 'smoke-login', ruleset: 'example.com 127.0.0.1:3000' } }, ['Use /_pwdev/proxy/* rather than the proxy-manager port.', 'Delete task-scoped proxies after the task.'], { fields: ['ok', 'proxy'] }),
+        operation('POST', '/_pwdev/proxy/proxies', 'Create a managed Whistle proxy', 'Send a ruleset and id or appId. The server lazily starts its proxy manager.', { method: 'POST', path: '/_pwdev/proxy/proxies', body: { id: 'checkout-whistle', taskId: 'smoke-login', ruleset: 'example.com 127.0.0.1:3000' } }, ['Use /_pwdev/proxy/* rather than the proxy-manager port.', 'Managed proxy profiles are durable and reusable; delete one only when its retained profile is no longer wanted.'], { fields: ['ok', 'proxy'] }),
       ],
     },
     sessions: {
       usage: 'Live, broker-owned runtime records. They are removed after broker restart or explicit stop.',
       operations: [
         operation('GET', '/_pwdev/sessions', 'List live sessions', 'Fetch and reconcile active broker sessions.', { method: 'GET', path: '/_pwdev/sessions' }, [], { fields: ['ok', 'sessions'] }),
-        operation('POST', '/_pwdev/sessions/:id/stop', 'Stop a live session', 'Stop directly by session id when the originating template is not convenient.', { method: 'POST', path: '/_pwdev/sessions/checkout-tax__default/stop' }, ['Does not delete the persistent browser template.'], { fields: ['ok', 'sessionId'] }),
+        operation('POST', '/_pwdev/sessions/:id/stop', 'Stop a live session', 'Stop directly by session id when the originating template is not convenient; any pooled proxy lease is released.', { method: 'POST', path: '/_pwdev/sessions/checkout-tax__default/stop' }, ['Does not delete the persistent browser template or durable proxy profile.'], { fields: ['ok', 'session', 'releasedProxyLease?'] }),
       ],
     },
   };
 }
 
 function pwDevInstructions(serverUrl) {
-  return `# pw-dev agent instructions
-
-Use only this server's \`/_pwdev/*\` APIs. Do not call broker or proxy-manager
-ports directly.
-
-## Discover
-
-\`\`\`bash
-curl '${serverUrl}/_pwdev/status'
-curl '${serverUrl}/_pwdev/openapi.json'
-\`\`\`
-
-\`status\` reports broker reachability. The root OpenAPI document is a compact
-catalog: read its \`x-pwdev-documents\` list, then fetch only the domain document
-needed next (for example \`/_pwdev/openapi/browsers.json\` or
-\`/_pwdev/openapi/proxies.json\`). \`env\` is optional runtime-path discovery for
-shell/external tooling; fetch it again after a server restart.
-
-For managed-proxy lifecycle or rules, first fetch \`GET /_pwdev/delegates\` and
-then the proxy delegate's linked OpenAPI document. The server republishes that
-component-owned contract under \`/_pwdev/proxy/*\`; do not call its internal port.
-
-## Persisted entities
-
-- **app**: project metadata, \`readme\`, accounts, and worktree. An app can be
-  linked from a browser but does not own browser lifecycle.
-- **proxy**: reusable proxy configuration; managed proxy rules/profile state are
-  retained by the proxy manager.
-- **browserTpl**: reusable launch template. Fields include \`id\`, optional
-  \`appId\`, \`targetUrl\`, \`brokerUrl\`, \`profile\`, \`proxyId\`,
-  \`proxyBypassList\`, \`ignoreSslErrors\`, and \`headless\`.
-
-## Start and use a browser
-
-Create or update a persistent **browserTpl** with \`POST /_pwdev/browsers\`.
-Start its default session without a payload, or start an isolated concurrent
-session with a \`sessionId\` (which receives its own profile by default):
-
-\`\`\`js
-const started = await fetch('${serverUrl}/_pwdev/browsers/docs-crawler/start', {
-  method: 'POST',
-}).then((response) => response.json());
-
-const browser = await chromium.connectOverCDP(started.session.cdpUrl);
-// Navigate to the template's targetUrl when one is configured.
-\`\`\`
-
-For parallel work, send \`{ "sessionId": "shard-1" }\` to start and stop:
-\`POST /_pwdev/browsers/:id/start\` and
-\`POST /_pwdev/browsers/:id/stop\`. Named sessions are transient and appear
-in \`GET /_pwdev/sessions\`.
-
-The response creates a transient **session**. Broker state is authoritative;
-the server removes a session when broker status no longer reports its instance.
-Stop with \`POST /_pwdev/browsers/:id/stop\` or
-\`POST /_pwdev/sessions/:id/stop\`. Detach Playwright with \`browser.close()\`
-when automation ends; that disconnects the client without stopping the instance.
-
-For a remote SSH broker, when the selected \`proxyId\` resolves to a proxy URL,
-pw-dev asks the broker to create or reuse the required mapping. Do not create
-proxy forwards yourself; a proxy record that already has a broker forward uses
-that existing forward.
-
-## Example workflows
-
-### App-based
-
-1. Register the app with \`POST /_pwdev/apps\`. Put operational guidance in
-   \`readme\`: devserver start/stop commands, environment setup, and the proxy
-   rule template plus its compose/compile method.
-2. Read that app \`readme\`, compose the rules, then create a managed proxy with
-   \`POST /_pwdev/proxy/proxies\` and \`appId\`.
-3. Create a browser template with \`POST /_pwdev/browsers\`, using \`appId\`
-   and the returned \`proxyId\`.
-4. Start it with \`POST /_pwdev/browsers/:id/start\`; attach Playwright to the
-   returned session \`cdpUrl\`.
-
-### Standalone
-
-1. Create a managed proxy with \`POST /_pwdev/proxy/proxies\` and no \`appId\`.
-2. Create a browser template with \`targetUrl\` and that \`proxyId\`.
-3. Start it with \`POST /_pwdev/browsers/:id/start\`; attach Playwright to the
-   returned session \`cdpUrl\`.
-
-## API documents
-
-- [Control-plane catalog](${serverUrl}/_pwdev/openapi.json)
-- [Apps](${serverUrl}/_pwdev/openapi/apps.json)
-- [browserTpls](${serverUrl}/_pwdev/openapi/browsers.json)
-- [Sessions](${serverUrl}/_pwdev/openapi/sessions.json)
-- [Proxy records and traffic](${serverUrl}/_pwdev/openapi/proxies.json)
-- [Managed proxy delegate](${serverUrl}/_pwdev/delegates/proxy/openapi.json)
-- [Broker delegate](${serverUrl}/_pwdev/delegates/broker/openapi.json)
-
-App-scoped \`/_pwdev/apps/:id/browser/*\` routes are retired.
-`;
-
-  const skillPath = path.join(process.cwd(), '.claude', 'skills', 'playwright-cli', 'SKILL.md');
-  const skillSection = existsSync(skillPath)
-    ? `## Browser-automation command reference (read this file)
-
-The bundled \`playwright-cli\` skill is a plain-text command reference. Read it
-directly for the full command set (open/goto/click/snapshot/network/tracing/…);
-you do not need it registered as a skill to use it:
-
-\`\`\`text
-${skillPath}
-\`\`\`
-
-Its \`references/\` directory (same folder) holds deeper guides. Drive the
-browser via the \`playwright-cli\` binary as documented there.
-
-`
-    : `## Browser-automation command reference
-
-The bundled \`playwright-cli\` skill is not installed in this workspace. To get
-the plain-text command reference at
-\`${skillPath}\`, run \`npm run install:playwright\`.
-
-`;
-  return `# pw-dev agent instructions
-
-Use this server as the control plane for app discovery, browser lifecycle, and
-broker-proxied CDP. Agents should not need the broker URL directly.
-
-${skillSection}## Environment constants (external / shell scripts)
-
-\`GET /_pwdev/env\` returns the live constants (server URL, broker proxy path,
-bundled skill path, resolved Chromium executable) as JSON. Node clients can just
-fetch it; non-Node/shell consumers should request the shell-export form and
-\`eval\` it — the values track the running server, so re-run it after a restart:
-
-\`\`\`bash
-eval "$(curl -s '${serverUrl}/_pwdev/env?format=sh')"
-# now $PW_DEV_URL, $PW_DEV_BROKER_PROXY, $PW_DEV_PLAYWRIGHT,
-# $PW_DEV_PLAYWRIGHT_CLI, $PW_SKILL_PATH, $PW_CHROMIUM_PATH, … are set
-\`\`\`
-
-Do not persist these into a static file; fetch them from the running server so
-they never go stale or collide across concurrent server instances.
-
-## Discover server and broker state
-
-\`\`\`js
-const status = await fetch('${serverUrl}/_pwdev/status')
-  .then((response) => response.json());
-
-if (!status.broker?.configured) {
-  throw new Error('pw-dev broker status is unavailable');
-}
-
-function pwDevApi(serverUrl) {
-  return {
-    ok: true,
-    version: 1,
-    serverUrl,
-    entities: {
-      apps: { persistent: true, fields: ['id', 'name', 'worktree', 'branch', 'readme', 'accounts'] },
-      networks: { persistent: true, fields: ['id', 'proxy', 'browser'] },
-      proxies: { persistent: true, fields: ['id', 'appId', 'ruleset', 'proxyUrl'] },
-      browsers: { persistent: true, fields: ['id', 'appId?', 'targetUrl?', 'brokerUrl?', 'profile?', 'networkId?', 'proxyId?', 'ignoreSslErrors?', 'headless?'] },
-      sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'appId?', 'browserInstanceId', 'cdpUrl'] },
-    },
-    endpoints: [
-      { method: 'GET', path: '/_pwdev/status', summary: 'Server and broker health' },
-      { method: 'GET', path: '/_pwdev/env', summary: 'Live runtime constants' },
-      { method: 'GET', path: '/_pwdev/instructions', summary: 'Concise workflow guide' },
-      { method: 'GET', path: '/_pwdev/apps', summary: 'List apps' },
-      { method: 'POST', path: '/_pwdev/apps', summary: 'Create or update app metadata' },
-      { method: 'GET', path: '/_pwdev/browsers', summary: 'List persisted browser templates' },
-      { method: 'POST', path: '/_pwdev/browsers', summary: 'Create or update browser template', body: { required: ['id'], optional: ['appId', 'targetUrl', 'brokerUrl', 'profile', 'networkId', 'proxyId', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
-      { method: 'GET', path: '/_pwdev/browsers/:id', summary: 'Get template and current runtime session' },
-      { method: 'DELETE', path: '/_pwdev/browsers/:id', summary: 'Delete template' },
-      { method: 'POST', path: '/_pwdev/browsers/:id/start', summary: 'Start template; no request body; returns session and cdpUrl' },
-      { method: 'POST', path: '/_pwdev/browsers/:id/stop', summary: 'Stop template runtime session' },
-      { method: 'GET', path: '/_pwdev/sessions', summary: 'List live sessions' },
-      { method: 'GET', path: '/_pwdev/sessions/:id', summary: 'Get live session' },
-      { method: 'POST', path: '/_pwdev/sessions/:id/stop', summary: 'Stop live session' },
-      { method: 'GET|POST|DELETE', path: '/_pwdev/networks[/:id]', summary: 'Manage persisted network templates' },
-      { method: 'GET|POST|DELETE', path: '/_pwdev/proxies[/:id]', summary: 'Manage proxy records' },
-      { method: 'ANY', path: '/_pwdev/proxy/*', summary: 'Server-proxied managed proxy API' },
-      { method: 'ANY', path: '/_pwdev/broker/*', summary: 'Server-proxied broker API' },
-    ],
-    retired: ['/_pwdev/apps/:id/browser/*'],
-  };
-}
-
-if (status.broker.reachable === false) {
-  throw new Error(\`pw-dev broker is unreachable: \${status.broker.error}\`);
-}
-
-if (status.broker.status?.topology?.remote && status.broker.status.topology.mode === 'ssh') {
-  // A selected proxyId is mapped by the broker automatically. Agents must not
-  // create or choose proxy forwards/ports.
-}
-\`\`\`
-
-## List and select apps
-
-Only explicitly registered apps appear in \`/_pwdev/apps\`. The server root
-manifest remains available at \`/_pwdev/manifest\`, but it is not registered as
-an app unless the server was started with \`--register-default-app\`.
-
-\`\`\`js
-const { apps } = await fetch('${serverUrl}/_pwdev/apps')
-  .then((response) => response.json());
-
-const app = apps.find((candidate) => candidate.id === 'checkout-tax');
-\`\`\`
-
-## List sessions
-
-Sessions are first-class server resources. App reads still project active
-session data for convenience, but \`/_pwdev/sessions\` is the canonical lookup
-surface for session id, task, broker instance, and CDP URL.
-
-\`\`\`js
-const { sessions } = await fetch('${serverUrl}/_pwdev/sessions')
-  .then((response) => response.json());
-
-const session = sessions.find((candidate) => candidate.sessionId === 'checkout-tax__smoke-login-20260629');
-\`\`\`
-
-## Register an app
-
-\`\`\`js
-await fetch('${serverUrl}/_pwdev/proxies', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    id: 'whistle-main',
-    kind: 'whistle',
-    name: 'Shared Whistle',
-    proxyUrl: 'http://127.0.0.1:8899',
-  }),
-});
-
-await fetch('${serverUrl}/_pwdev/apps', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    id: 'fortisase-dev',
-    appUrl: 'https://dev.fortisase-sovereign.com',
-    readme: 'Run npm run dev before testing. Copy .env.example to .env.local; ask before changing shared staging data.',
-    accounts: {
-      login: {
-        usr: 'xxx',
-        pwd: 'xxx',
-      },
-    },
-    proxyId: 'whistle-main',
-  }),
-});
-\`\`\`
-
-Use \`readme\` for concise app-specific agent instructions: how to start or
-stop devserver(s), required environment variables or local setup, test-data
-constraints, and task precautions. When the app uses a managed proxy, include
-the proxy-rule template path, the command or method that composes/compiles the
-ruleset, its required inputs, and how to apply the result through the
-server-proxied proxy API. Only register non-production test accounts in
-\`accounts\`. Do not put production accounts, personal credentials, or
-sensitive tokens in app metadata.
-
-## Persisted browser templates
-
-Use browser templates for a reusable browser target. Templates are persisted by
-the server; their live broker instance is transient, so start the same template
-again after a broker restart. \`appId\` is optional: use it to link an app's
-instructions, accounts, and defaults. Omit it for a crawler or generic browser
-and supply \`targetUrl\` instead.
-
-\`brokerUrl\` is optional and selects the configured server broker when absent.
-\`networkId\`, \`proxyId\`, profile, and launch settings are template fields;
-the start request normally has no body.
-
-\`\`\`js
-const browser = await fetch('${serverUrl}/_pwdev/browsers', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    id: 'docs-crawler',
-    targetUrl: 'https://example.com/docs',
-    brokerUrl: 'http://127.0.0.1:18080',
-    profile: 'docs-crawler',
-    headless: true,
-  }),
-}).then((response) => response.json());
-
-const startedBrowser = await fetch('${serverUrl}/_pwdev/browsers/docs-crawler/start', {
-  method: 'POST',
-}).then((response) => response.json());
-// Attach Playwright to startedBrowser.start.cdpUrl.
-\`\`\`
-
-Endpoints:
-
-\`\`\`text
-GET|POST /_pwdev/browsers
-GET|DELETE /_pwdev/browsers/:id
-POST /_pwdev/browsers/:id/start
-POST /_pwdev/browsers/:id/stop
-\`\`\`
-
-## Branch/app lifecycle guidelines
-
-- Treat each development branch or app registration as its own lifecycle
-  boundary. Register an app with that branch's \`worktree\`, and use that app id
-  for all tasks against that branch.
-- Before starting a browser template, stop its existing live session or use a
-  distinct browser template/profile for parallel work. Start templates through
-  \`POST /_pwdev/browsers/:id/start\`.
-- The server automatically reconciles session liveness against broker status on
-  session and app reads. If a broker restart loses an instance, stale session
-  records are removed automatically instead of requiring a manual cleanup pass.
-- Create a dedicated managed proxy for the branch/app when proxying is needed.
-  Wire that proxy to a browser template through its \`proxyId\`.
-- When work is finished, stop the browser template and delete task-scoped
-  managed proxies. Keep persistent broker profiles only when their login/session
-  state is intentionally reusable.
-
-## Playwright clients
-
-There are two supported ways to run Playwright against a pw-dev browser:
-
-1. Use the Playwright package, CLI, and bundled skills installed in the pw-dev
-   workspace. Generated task code should live inside pw-dev. They are installed
-   by \`npm install\`; run \`npm run install:playwright\` to repeat that setup.
-2. Use a Playwright installation owned by the client agent. The agent can run
-   scripts from its own workspace and attach to the pw-dev broker session using
-   the returned \`cdpUrl\`.
-
-In both modes, attach to the existing browser; do not launch a separate one.
-After the script finishes, detach without stopping the broker-owned browser:
-
-\`\`\`js
-const browser = await chromium.connectOverCDP(cdpUrl);
-try {
-  // Run the agent's Playwright task here.
-} finally {
-  // For a browser connected over CDP, close() disconnects this client.
-  await browser.close();
-}
-\`\`\`
-
-Use the server browser/session stop endpoint separately when the task's browser
-session should actually be stopped.
-
-Default location for generated pw-dev Playwright scripts and artifacts:
-
-\`\`\`text
-.agent/tasks/<task-id>/run.mjs
-.agent/tasks/<task-id>/artifacts/
-\`\`\`
-
-The script may be copied elsewhere if you want to run it against another
-Playwright install or keep it outside pw-dev. The artifacts directory is for
-outputs produced by that run.
-
-In generated task code, import Playwright normally and connect to pw-dev's CDP
-URL. Do not launch a separate browser:
-
-\`\`\`js
-import { chromium } from 'playwright';
-
-const browser = await chromium.connectOverCDP(cdpUrl);
-\`\`\`
-
-## Start browser and attach Playwright
-
-\`\`\`js
-const started = await fetch('${serverUrl}/_pwdev/browsers/checkout-tax/start', {
-  method: 'POST',
-}).then((response) => response.json());
-
-const { browser: template } = await fetch('${serverUrl}/_pwdev/browsers/checkout-tax')
-  .then((response) => response.json());
-
-const cdpUrl = started.session.cdpUrl;
-const browser = await chromium.connectOverCDP(cdpUrl);
-const context = browser.contexts()[0];
-const page = context.pages()[0] ?? await context.newPage();
-if (template.targetUrl) await page.goto(template.targetUrl);
-\`\`\`
-
-The session \`cdpUrl\` points at \`/_pwdev/broker/*\`, which proxies broker
-HTTP and WebSocket traffic through this server.
-
-## Stop browser
-
-\`\`\`js
-await fetch('${serverUrl}/_pwdev/browsers/checkout-tax/stop', {
-  method: 'POST',
-});
-\`\`\`
-
-Or stop by session id directly:
-
-\`\`\`js
-await fetch('${serverUrl}/_pwdev/sessions/checkout-tax__default/stop', {
-  method: 'POST',
-});
-\`\`\`
-
-## Create a managed Whistle proxy
-
-The normal \`pw-dev server\` command starts the local proxy manager lazily on
-the first server-proxied proxy operation and stops it with the server. Use the
-server-proxied API; agents do not need the proxy manager port directly. Send a
-ready-to-apply \`ruleset\`;
-pw-dev creates a Whistle instance with separate proxy and GUI ports, registers
-it under \`/_pwdev/proxies\`, and starts it with HTTPS capture enabled
-(\`Enable HTTPS / Capture Tunnel Traffic\`), and attaches it to \`appId\` when
-provided.
-
-If the server was started with \`--no-proxy-manager\`, configure an external
-manager with \`--proxy-manager-url\` before using these routes.
-
-Create requires \`ruleset\` and either \`id\` or \`appId\`. If only \`appId\`
-is supplied, the proxy id defaults to \`<appId>-whistle\`.
-
-Most managed proxies should be task-scoped: create one for a specific
-test/verification, start the browser with that \`proxyId\`, and delete the proxy
-when the task ends. Use \`taskId\`, \`owner\`, \`purpose\`, and \`labels\` to
-track why the proxy exists, and compose the \`ruleset\` for the debugging job
-at hand: point app traffic at a GUI devserver, mock API responses, inject
-local code, or combine those behaviors in one task-scoped proxy.
-
-Managed proxies expose live rules state at \`proxy.rules\`. Rules replacement is
-full-state and uses \`PUT /_pwdev/proxy/proxies/:id/rules\`; send the complete
-default and override rulesets together with \`baseVersion\`. Read the current
-\`proxy.rules\`, compute the desired replacement, and write it in place. The
-running proxy and browser do not need to be rebuilt. Use \`baseVersion\` to avoid
-lost updates.
-
-\`\`\`js
-const managedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    id: 'checkout-tax-whistle',
-    taskId: 'smoke-login-20260629',
-    owner: 'codex',
-    purpose: 'Smoke login API rewrite',
-    labels: ['smoke', 'verification'],
-    ruleset: 'example.com 127.0.0.1:3000',
-  }),
-}).then((response) => response.json());
-
-// Shared proxies do not need appId. Pass the returned id into each browser
-// start that should use this proxy. Supplying appId during create is only a
-// convenience that patches that app's proxyId for you.
-const proxiedStart = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    proxyId: managedProxy.proxy.id,
-    task: { id: 'smoke-login-20260629', owner: 'codex' },
-  }),
-}).then((response) => response.json());
-
-const proxyStatus = await fetch('${serverUrl}/_pwdev/proxy/status')
-  .then((response) => response.json());
-
-// Managed proxy configuration is retained in its Whistle profile. Stop,
-// start, or restart it through pw-dev; never use the manager port directly.
-await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle/restart', {
-  method: 'POST',
-});
-
-const currentProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle')
-  .then((response) => response.json());
-
-// Example: replace the complete rules state on the running proxy.
-const updatedProxy = await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle/rules', {
-  method: 'PUT',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    baseVersion: currentProxy.proxy.rules.version,
-    defaultRuleset: currentProxy.proxy.rules.defaultRuleset,
-    overrideRuleset: 'example.com/api/orders/preview resBody://{ "ok": true, "source": "mock" }',
-  }),
-}).then((response) => response.json());
-\`\`\`
-
-## Create and use a broker network
-
-Networks are broker-owned browser routing profiles. Use \`networkId\` in browser
-start requests instead of creating proxy forwards directly.
-
-For normal managed-proxy starts, use \`proxyId\` instead. If the selected broker
-reports SSH remote topology, it automatically creates or reuses the SSH mapping
-to that proxy on its peer. \`proxyForwardId\` and mapped ports are broker
-internals, exposed only on the resulting session for diagnostics.
-
-When the broker topology reports \`remote: true\` with \`mode: "ssh"\`, prefer a
-mapped proxy network for agent-local debugging traffic. Typical flow:
-
-1. Create a managed Whistle proxy with a task-specific \`ruleset\`.
-2. Read the returned \`proxyUrl\` and use its port as \`proxy.remotePort\`.
-3. Create \`/_pwdev/networks\` with \`proxy.mode: "ssh-peer"\`.
-4. Start the browser with \`networkId\`.
-
-That lets the remote broker browser reach an agent-local proxy for GUI
-devserver tapping, API mocking, code injection, and similar debugging work.
-
-\`\`\`js
-const network = await fetch('${serverUrl}/_pwdev/networks', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    id: 'agent-whistle',
-    kind: 'whistle',
-    proxy: { mode: 'ssh-peer', remotePort: 8899 },
-    browser: { ignoreSslErrors: true },
-  }),
-}).then((response) => response.json());
-
-const startedWithNetwork = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    networkId: network.network.id,
-    task: { id: 'smoke-login-20260629', owner: 'codex' },
-  }),
-}).then((response) => response.json());
-\`\`\`
-
-Use \`proxy.mode: "ssh-peer"\` when the proxy is on the SSH peer configured by
-broker \`--ssh\`. Set \`proxy.remotePort\` to the Whistle port on that SSH peer;
-set \`proxy.localPort\` only if you need a fixed broker-side forwarded port.
-Use \`"direct"\` or \`"broker-local"\` when the proxy URL is already reachable
-from the broker/Chrome host.
-
-## Create and remove a broker proxy forward
-
-This is the lower-level API behind \`proxy.mode: "ssh-peer"\` networks. Prefer
-\`/_pwdev/networks\` for normal agent workflows. The broker must have been
-started with \`--ssh\`.
-
-\`\`\`js
-const forward = await fetch('${serverUrl}/_pwdev/broker/proxy-forwards', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    name: 'checkout-tax-whistle',
-    remotePort: 8899,
-    localPort: 18899,
-  }),
-}).then((response) => response.json());
-
-await fetch('${serverUrl}/_pwdev/proxies', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    id: 'checkout-tax-broker-whistle',
-    kind: 'whistle',
-    name: 'Checkout tax Whistle via broker SSH forward',
-    brokerProxyForwardId: forward.forwardId,
-  }),
-});
-
-const startedWithForward = await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/start', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    proxyId: 'checkout-tax-broker-whistle',
-    ignoreSslErrors: true,
-    task: { id: 'smoke-login-20260629', owner: 'codex' },
-  }),
-}).then((response) => response.json());
-\`\`\`
-
-Remove the forward after stopping every browser session that uses it. The broker
-returns \`409 Conflict\` if the forward is still in use.
-
-\`\`\`js
-await fetch('${serverUrl}/_pwdev/apps/checkout-tax/browser/stop', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ taskId: 'smoke-login-20260629' }),
-});
-
-await fetch(\`${serverUrl}/_pwdev/broker/proxy-forwards/\${encodeURIComponent(forward.forwardId)}\`, {
-  method: 'DELETE',
-});
-\`\`\`
-
-Delete task-scoped managed proxies when the task ends:
-
-\`\`\`js
-await fetch('${serverUrl}/_pwdev/proxy/proxies/checkout-tax-whistle', {
-  method: 'DELETE',
-});
-\`\`\`
-
-## Endpoints
-
-\`\`\`text
-GET    /_pwdev/status
-GET    /_pwdev/env
-GET    /_pwdev/instructions
-GET    /_pwdev/api
-POST   /_pwdev/api
-GET    /_pwdev/api/:resource
-GET    /_pwdev/client.js
-GET    /_pwdev/proxies
-POST   /_pwdev/proxies
-GET    /_pwdev/proxies/:id
-DELETE /_pwdev/proxies/:id
-GET    /_pwdev/proxies/:id/traffic
-GET    /_pwdev/networks
-POST   /_pwdev/networks
-GET    /_pwdev/networks/:id
-DELETE /_pwdev/networks/:id
-POST   /_pwdev/networks/:id/check
-GET    /_pwdev/sessions
-GET    /_pwdev/sessions/:id
-POST   /_pwdev/sessions/:id/stop
-GET    /_pwdev/apps
-POST   /_pwdev/apps
-GET    /_pwdev/apps/:id
-DELETE /_pwdev/apps/:id
-GET    /_pwdev/apps/:id/manifest
-GET    /_pwdev/browsers
-POST   /_pwdev/browsers
-GET    /_pwdev/browsers/:id
-DELETE /_pwdev/browsers/:id
-POST   /_pwdev/browsers/:id/start
-POST   /_pwdev/browsers/:id/stop
-ANY    /_pwdev/broker/*
-GET    /_pwdev/proxy/status
-GET    /_pwdev/proxy/proxies
-POST   /_pwdev/proxy/proxies
-GET    /_pwdev/proxy/proxies/:id
-PUT    /_pwdev/proxy/proxies/:id/rules
-DELETE /_pwdev/proxy/proxies/:id
-POST   /_pwdev/proxy/proxies/:id/stop
-POST   /_pwdev/proxy/stop-all
-\`\`\`
-
-Helper source is available from:
-
-\`\`\`text
-GET /_pwdev/client.js
-\`\`\`
-`;
+  return renderInstructionTemplate('agent.md', {
+    SERVER_URL: serverUrl,
+    API_DOCUMENTS: renderOpenApiDocumentLinks(serverUrl),
+    API_ENDPOINTS: renderOpenApiEndpointSummary(),
+  });
 }
 
 function pwDevClientSource(serverUrl) {

@@ -236,9 +236,13 @@ await page.goto(started.browser.targetUrl);
   metadata is for non-production test accounts only.
 - `proxy` is the optional runner for managed Whistle proxies. It accepts
   external-agent rulesets, allocates separate proxy and GUI ports, registers
-  the proxy, and can attach it to an app.
+  the proxy, and stores its durable source-of-truth record inside the Whistle
+  profile. Process stop does not delete that profile.
 - The broker owns Chrome and persistent profile state.
 - The agent attaches to the broker and does not close the browser unless asked.
 - One broker process can own multiple Chrome instances/profiles.
 - A browser template can start a default session or named parallel sessions;
   named sessions get isolated profiles by default.
+- A browser template can own an ordered `proxyIds` pool. Active sessions lease
+  proxies exclusively and release them on stop without stopping or deleting
+  the reusable Whistle profile.

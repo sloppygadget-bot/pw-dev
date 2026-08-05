@@ -36,7 +36,7 @@ export async function main(argv) {
 
   const shutdown = async (signal) => {
     if (!options.quiet) console.log(`Received ${signal}; shutting down.`);
-    await manager.stopAll();
+    await manager.stopAll({ preserve: true });
     await server.close();
   };
   process.once('SIGINT', () => void shutdown('SIGINT'));

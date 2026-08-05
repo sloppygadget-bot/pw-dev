@@ -1,0 +1,302 @@
+{
+  "bin/pw-dev.js": {
+    "mtime": 1782627830.6278028,
+    "ast_hash": "8c448f32a126f2a1b92e90450880c6cb",
+    "semantic_hash": "8c448f32a126f2a1b92e90450880c6cb"
+  },
+  "package.json": {
+    "mtime": 1785306522.3273687,
+    "ast_hash": "2d8e1890f5da51ae051426e75001aa65",
+    "semantic_hash": "2d8e1890f5da51ae051426e75001aa65"
+  },
+  "packages/cdp-broker/bin/pw-cdp-broker.js": {
+    "mtime": 1782627725.91134,
+    "ast_hash": "22e3504a8d2c1ca84e09d21f3f8d169d",
+    "semantic_hash": "22e3504a8d2c1ca84e09d21f3f8d169d"
+  },
+  "packages/cdp-broker/package.json": {
+    "mtime": 1782627830.7508008,
+    "ast_hash": "53483cbe1c2c1bff65ea71c4875cde7b",
+    "semantic_hash": "53483cbe1c2c1bff65ea71c4875cde7b"
+  },
+  "packages/cdp-broker/src/browser-manager.js": {
+    "mtime": 1783575060.6549115,
+    "ast_hash": "defdd9d95a1b1141db312879571ed883",
+    "semantic_hash": "defdd9d95a1b1141db312879571ed883"
+  },
+  "packages/cdp-broker/src/chrome.js": {
+    "mtime": 1782627725.9133399,
+    "ast_hash": "6bb168cab82cdef481df8e3581dfceb3",
+    "semantic_hash": "6bb168cab82cdef481df8e3581dfceb3"
+  },
+  "packages/cdp-broker/src/cli.js": {
+    "mtime": 1784098014.8219752,
+    "ast_hash": "fb77c87065655ff4aa6dabed46108e45",
+    "semantic_hash": "fb77c87065655ff4aa6dabed46108e45"
+  },
+  "packages/cdp-broker/src/index.js": {
+    "mtime": 1783575159.0407557,
+    "ast_hash": "3cbbce73f66c9178e82cbab122bdc6a8",
+    "semantic_hash": "3cbbce73f66c9178e82cbab122bdc6a8"
+  },
+  "packages/cdp-broker/src/networks.js": {
+    "mtime": 1783838349.34306,
+    "ast_hash": "ce978c689ea3b1220f2a918a2465c48a",
+    "semantic_hash": "ce978c689ea3b1220f2a918a2465c48a"
+  },
+  "packages/cdp-broker/src/profiles.js": {
+    "mtime": 1782627725.9133399,
+    "ast_hash": "f66de688c9a8e6192b7f42af33b1f85e",
+    "semantic_hash": "f66de688c9a8e6192b7f42af33b1f85e"
+  },
+  "packages/cdp-broker/src/proxy-forwards.js": {
+    "mtime": 1784181058.4901633,
+    "ast_hash": "781a53b3e5e20b6ffb558c6fcf4028d2",
+    "semantic_hash": "781a53b3e5e20b6ffb558c6fcf4028d2"
+  },
+  "packages/cdp-broker/src/server.js": {
+    "mtime": 1784609917.47878,
+    "ast_hash": "1f41bddd402dced96032e8fad85a31e7",
+    "semantic_hash": "1f41bddd402dced96032e8fad85a31e7"
+  },
+  "packages/cdp-broker/test/browser-manager.test.js": {
+    "mtime": 1782627725.91434,
+    "ast_hash": "fb7505de519e58a832b768c6adcac42b",
+    "semantic_hash": "fb7505de519e58a832b768c6adcac42b"
+  },
+  "packages/cdp-broker/test/chrome.test.js": {
+    "mtime": 1782627725.91434,
+    "ast_hash": "a92efbc2171d54b72bc6200ded88fadd",
+    "semantic_hash": "a92efbc2171d54b72bc6200ded88fadd"
+  },
+  "packages/cdp-broker/test/cli.test.js": {
+    "mtime": 1784098053.2841902,
+    "ast_hash": "ee739f9d9a6b5eb2c847e5288af0f0ff",
+    "semantic_hash": "ee739f9d9a6b5eb2c847e5288af0f0ff"
+  },
+  "packages/cdp-broker/test/networks.test.js": {
+    "mtime": 1783838170.3505566,
+    "ast_hash": "9c5994a3d4e686be3f9b151774904134",
+    "semantic_hash": "9c5994a3d4e686be3f9b151774904134"
+  },
+  "packages/cdp-broker/test/profiles.test.js": {
+    "mtime": 1782627725.91434,
+    "ast_hash": "c4e598849f646eb8b18aaac11d8d8d4c",
+    "semantic_hash": "c4e598849f646eb8b18aaac11d8d8d4c"
+  },
+  "packages/cdp-broker/test/proxy-forwards.test.js": {
+    "mtime": 1784181106.7587419,
+    "ast_hash": "9921cdd50b9e34ce48a7279c6067c6ff",
+    "semantic_hash": "9921cdd50b9e34ce48a7279c6067c6ff"
+  },
+  "packages/cdp-broker/test/server.test.js": {
+    "mtime": 1784609943.3962016,
+    "ast_hash": "fd421415cdabb71cd66096310cbad1c1",
+    "semantic_hash": "fd421415cdabb71cd66096310cbad1c1"
+  },
+  "packages/cli/bin/pw-dev.js": {
+    "mtime": 1782627831.8277853,
+    "ast_hash": "22e3504a8d2c1ca84e09d21f3f8d169d",
+    "semantic_hash": "22e3504a8d2c1ca84e09d21f3f8d169d"
+  },
+  "packages/cli/package.json": {
+    "mtime": 1782627831.702787,
+    "ast_hash": "12b77982de1d06ee80e2a9b915298721",
+    "semantic_hash": "12b77982de1d06ee80e2a9b915298721"
+  },
+  "packages/cli/src/cli.js": {
+    "mtime": 1783576214.2204332,
+    "ast_hash": "0e8bc5f462dd54f17e2fdf1b4531c2d9",
+    "semantic_hash": "0e8bc5f462dd54f17e2fdf1b4531c2d9"
+  },
+  "packages/cli/test/cli.test.js": {
+    "mtime": 1783576274.1613626,
+    "ast_hash": "f8932ffd550c2948aff244af142e1393",
+    "semantic_hash": "f8932ffd550c2948aff244af142e1393"
+  },
+  "packages/gui/bin/pw-dev-gui.js": {
+    "mtime": 1783575920.6965225,
+    "ast_hash": "22e3504a8d2c1ca84e09d21f3f8d169d",
+    "semantic_hash": "22e3504a8d2c1ca84e09d21f3f8d169d"
+  },
+  "packages/gui/package.json": {
+    "mtime": 1783575920.5815217,
+    "ast_hash": "ee83a664acd29f1181a4088ab3cf8025",
+    "semantic_hash": "ee83a664acd29f1181a4088ab3cf8025"
+  },
+  "packages/gui/public/app.js": {
+    "mtime": 1784789119.8723576,
+    "ast_hash": "124c2b8fa726ffe18600231f4309adb9",
+    "semantic_hash": "124c2b8fa726ffe18600231f4309adb9"
+  },
+  "packages/gui/src/cli.js": {
+    "mtime": 1784094762.5055487,
+    "ast_hash": "53a8325f2ba059c105989eafabf03927",
+    "semantic_hash": "53a8325f2ba059c105989eafabf03927"
+  },
+  "packages/gui/src/server.js": {
+    "mtime": 1784789365.731494,
+    "ast_hash": "014da4eefd9bda2b7d569607775e64a9",
+    "semantic_hash": "014da4eefd9bda2b7d569607775e64a9"
+  },
+  "packages/gui/test/gui.test.js": {
+    "mtime": 1784789365.8384821,
+    "ast_hash": "e1bfdb2f326226e04dd45db444f10276",
+    "semantic_hash": "e1bfdb2f326226e04dd45db444f10276"
+  },
+  "packages/proxy/bin/pw-dev-proxy.js": {
+    "mtime": 1782775385.0485723,
+    "ast_hash": "22e3504a8d2c1ca84e09d21f3f8d169d",
+    "semantic_hash": "22e3504a8d2c1ca84e09d21f3f8d169d"
+  },
+  "packages/proxy/package.json": {
+    "mtime": 1782977116.3053288,
+    "ast_hash": "f9bdfc761b343be3d0ca684faa3f055b",
+    "semantic_hash": "f9bdfc761b343be3d0ca684faa3f055b"
+  },
+  "packages/proxy/src/cli.js": {
+    "mtime": 1785309646.4387708,
+    "ast_hash": "2375bb3859861d2220d5031234205983",
+    "semantic_hash": "2375bb3859861d2220d5031234205983"
+  },
+  "packages/proxy/src/index.js": {
+    "mtime": 1785309677.7205539,
+    "ast_hash": "ecee1dc0d0d6e3164e943c0e18bd0bcc",
+    "semantic_hash": "ecee1dc0d0d6e3164e943c0e18bd0bcc"
+  },
+  "packages/proxy/test/proxy.test.js": {
+    "mtime": 1785310557.1869547,
+    "ast_hash": "58333db2f107d4133c07ae2ce47a7c45",
+    "semantic_hash": "58333db2f107d4133c07ae2ce47a7c45"
+  },
+  "packages/server/bin/pw-dev-server.js": {
+    "mtime": 1782627831.2077942,
+    "ast_hash": "22e3504a8d2c1ca84e09d21f3f8d169d",
+    "semantic_hash": "22e3504a8d2c1ca84e09d21f3f8d169d"
+  },
+  "packages/server/package.json": {
+    "mtime": 1782627831.0007973,
+    "ast_hash": "193beb66f54a05a950fece21d66eeac4",
+    "semantic_hash": "193beb66f54a05a950fece21d66eeac4"
+  },
+  "packages/server/src/cli.js": {
+    "mtime": 1784786281.9309301,
+    "ast_hash": "101058e9bd6666aa24c075641d6b37de",
+    "semantic_hash": "101058e9bd6666aa24c075641d6b37de"
+  },
+  "packages/server/src/index.js": {
+    "mtime": 1785310921.6746101,
+    "ast_hash": "cb7a8c1311ef6b5ddea0a195fd666b8d",
+    "semantic_hash": "cb7a8c1311ef6b5ddea0a195fd666b8d"
+  },
+  "packages/server/test/server.test.js": {
+    "mtime": 1785310598.5183153,
+    "ast_hash": "5a9f1c87cba9eb343ec0111a645c5b21",
+    "semantic_hash": "5a9f1c87cba9eb343ec0111a645c5b21"
+  },
+  "scripts/check-kb.mjs": {
+    "mtime": 1785310898.4239347,
+    "ast_hash": "7f1b70962547fcac9a02326f84ee6e33",
+    "semantic_hash": "7f1b70962547fcac9a02326f84ee6e33"
+  },
+  "docs/server.md": {
+    "mtime": 1785310898.3199363,
+    "ast_hash": "20dff8715871b3c20734a89278efb37e",
+    "semantic_hash": "20dff8715871b3c20734a89278efb37e"
+  },
+  "examples/static-site/index.html": {
+    "mtime": 1782627832.1947799,
+    "ast_hash": "dc099f6b2d8b719c672551f5572ff884",
+    "semantic_hash": "dc099f6b2d8b719c672551f5572ff884"
+  },
+  "packages/cdp-broker/README.md": {
+    "mtime": 1783575528.4958694,
+    "ast_hash": "8b2583cb6a900228c56beeb913aaef2d",
+    "semantic_hash": "8b2583cb6a900228c56beeb913aaef2d"
+  },
+  "packages/gui/public/api-docs.html": {
+    "mtime": 1784608823.338908,
+    "ast_hash": "c9c17e21b90b6a7b6150fcfefc277365",
+    "semantic_hash": "c9c17e21b90b6a7b6150fcfefc277365"
+  },
+  "packages/gui/public/index.html": {
+    "mtime": 1784785119.6212008,
+    "ast_hash": "9972447c8e5c6dff305934639092ccf3",
+    "semantic_hash": "9972447c8e5c6dff305934639092ccf3"
+  },
+  "packages/proxy/README.md": {
+    "mtime": 1785310233.2884266,
+    "ast_hash": "b3f733c9767f7e319ab74e31a3181992",
+    "semantic_hash": "b3f733c9767f7e319ab74e31a3181992"
+  },
+  "packages/server/instructions/agent.md": {
+    "mtime": 1785310474.7462635,
+    "ast_hash": "b3562821c7bbdce6b81d1eee3405d873",
+    "semantic_hash": "b3562821c7bbdce6b81d1eee3405d873"
+  },
+  "packages/server/instructions/broker-delegate.md": {
+    "mtime": 1785306363.3551931,
+    "ast_hash": "3424747158e175d6822e57c749a819ca",
+    "semantic_hash": "3424747158e175d6822e57c749a819ca"
+  },
+  "packages/server/instructions/proxy-delegate.md": {
+    "mtime": 1785310198.8770702,
+    "ast_hash": "3ff6703189c5273be921d30184b34abf",
+    "semantic_hash": "3ff6703189c5273be921d30184b34abf"
+  },
+  "packages/cdp-broker/openapi/root.json": {
+    "mtime": 1784609917.6877418,
+    "ast_hash": "c98ed6cb2cb415a0dd233fdc2655e2a6",
+    "semantic_hash": "c98ed6cb2cb415a0dd233fdc2655e2a6"
+  },
+  "packages/proxy/openapi/lifecycle.json": {
+    "mtime": 1785310153.8229363,
+    "ast_hash": "8ddb517ae1e0a24c268ba73ef12918ce",
+    "semantic_hash": "8ddb517ae1e0a24c268ba73ef12918ce"
+  },
+  "packages/proxy/openapi/root.json": {
+    "mtime": 1785310557.3939514,
+    "ast_hash": "25a1f846ea850efede9e2ffafac817dd",
+    "semantic_hash": "25a1f846ea850efede9e2ffafac817dd"
+  },
+  "packages/proxy/openapi/rulesets.json": {
+    "mtime": 1785310557.49995,
+    "ast_hash": "4666fc33d8430d7415f1944e71865407",
+    "semantic_hash": "4666fc33d8430d7415f1944e71865407"
+  },
+  "packages/server/openapi/apps.json": {
+    "mtime": 1784607259.0253105,
+    "ast_hash": "0dde29c0b61c34845ad8253201cad424",
+    "semantic_hash": "0dde29c0b61c34845ad8253201cad424"
+  },
+  "packages/server/openapi/browsers.json": {
+    "mtime": 1785310598.410317,
+    "ast_hash": "16c6012c5d41da9000c1628f13c0bed3",
+    "semantic_hash": "16c6012c5d41da9000c1628f13c0bed3"
+  },
+  "packages/server/openapi/proxies/index.json": {
+    "mtime": 1784609440.8719444,
+    "ast_hash": "476accf878b5942f1fbdf00c0c68d6a0",
+    "semantic_hash": "476accf878b5942f1fbdf00c0c68d6a0"
+  },
+  "packages/server/openapi/proxies/records.json": {
+    "mtime": 1784607259.582456,
+    "ast_hash": "59f976955be8fbfb6dc87df482bd79f5",
+    "semantic_hash": "59f976955be8fbfb6dc87df482bd79f5"
+  },
+  "packages/server/openapi/proxies/traffic.json": {
+    "mtime": 1784607259.6994865,
+    "ast_hash": "67b1742648e907403f419b6c7755dd4f",
+    "semantic_hash": "67b1742648e907403f419b6c7755dd4f"
+  },
+  "packages/server/openapi/root.json": {
+    "mtime": 1784785607.7992325,
+    "ast_hash": "a66230413b9ce54744f3ec69e08550f9",
+    "semantic_hash": "a66230413b9ce54744f3ec69e08550f9"
+  },
+  "packages/server/openapi/sessions.json": {
+    "mtime": 1785310557.6029482,
+    "ast_hash": "a417bce0511586b54d57ce8182dd7e90",
+    "semantic_hash": "a417bce0511586b54d57ce8182dd7e90"
+  }
+}

@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.1",
-  "info": { "title": "pw-dev managed proxy API", "version": "1.0.0", "description": "Proxy-manager-owned API. Native deployments serve it at /_proxy; pw-dev republishes it for agents at /_pwdev/proxy." },
+  "info": { "title": "pw-dev managed proxy API", "version": "1.0.0", "description": "Proxy-manager-owned API. Each in-house Whistle -S profile is the durable source of truth; process lifecycle preserves it and only explicit DELETE removes it. Native deployments serve this API at /_proxy; pw-dev republishes it for agents at /_pwdev/proxy." },
   "servers": [{ "url": "/_proxy" }],
   "paths": {
     "/status": { "get": { "operationId": "getManagedProxyStatus", "responses": { "200": { "description": "Manager and managed proxy status" } } } }

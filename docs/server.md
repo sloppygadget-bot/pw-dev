@@ -50,7 +50,8 @@ restart.
 
 Browser templates persist in `<worktree>/.pw-dev/browsers.json`. A template
 contains `id`, optional `appId` and `targetUrl`, optional `profile`,
-`proxyId`, broker override, and browser launch options. `appId`
+one fixed `proxyId` or a reusable `proxyIds` pool, broker override, and browser
+launch options. `appId`
 links an app's instructions/accounts/defaults when applicable; omit it for a
 standalone crawler or generic automation browser. Its live broker instance is transient:
 after a broker restart, start the same template again rather than recreating
@@ -78,22 +79,26 @@ proxy metadata, and can attach that proxy to an app by patching the app
 `proxyId`. Each managed Whistle proxy is started with isolated `-S` storage
 under `packages/proxy/.runtime/whistle` and HTTPS capture enabled
 (`Enable HTTPS / Capture Tunnel Traffic`); the proxy manager removes that
-directory when the proxy exits or is stopped.
+directory only when the proxy is explicitly deleted. Process exit, stop,
+manager shutdown, and browser lease release preserve the profile.
 
 Use `--no-proxy-manager` when managing the proxy service separately, or pass an
 external manager with `--proxy-manager-url`. The standalone `npm start -- proxy`
 command remains available for that setup.
 
-Most managed proxies should be scoped to one task/test/verification. Agents can
-tag them with `taskId`, `owner`, `purpose`, and `labels`, then start a browser
-session with the returned `proxy.id` and delete the proxy when the task ends.
-If the proxy manager is restarted after a crash, it automatically terminates
-orphaned pw-dev Whistle processes before accepting new proxies. This cleanup is
-limited to processes launched with a `-S` storage directory under the configured
-Whistle storage root, so unrelated Whistle instances are not stopped.
+Managed proxies are durable and reusable. For task/test isolation, create a
+small pool of profiles and configure the browser template with `proxyIds`.
+Starting a template session leases one available proxy exclusively; stopping
+the session releases the lease but leaves the Whistle process and profile
+available for another task. The manager starts a stopped managed proxy
+idempotently when it is leased. Only explicit proxy deletion removes its
+profile. Processes under the configured storage root that have no valid
+pw-dev profile are treated as orphans; unrelated Whistle instances are not
+stopped.
 Compose the `ruleset` for the debugging job at hand: point app traffic at a
 GUI devserver, mock API responses, inject local code, or combine those
-behaviors in one task-scoped proxy:
+behaviors in one durable proxy profile. Use a browser lease cursor when a task
+needs a clean traffic window:
 
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/proxy/proxies \
@@ -227,8 +232,10 @@ curl -X POST http://127.0.0.1:9696/_pwdev/proxies \
   }'
 ```
 
-Proxy registrations are reusable metadata. They have no runner or status.
-Update a proxy port by re-posting the same `id` with a different `proxyUrl`.
+External proxy registrations are reusable routing metadata. Update a proxy
+port by re-posting the same `id` with a different `proxyUrl`. Managed proxy
+records mirror durable Whistle profiles and can include current runtime state;
+the proxy manager and profile remain authoritative.
 Use `brokerProxyForwardId` instead of `proxyUrl` when the broker owns the
 forward, but do not set both fields.
 
@@ -311,6 +318,22 @@ curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop \
   -H 'content-type: application/json' \
   -d '{"sessionId":"shard-1"}'
 ```
+
+To give concurrent tasks separate Whistle traffic contexts, configure a proxy
+pool instead of one fixed `proxyId`:
+
+```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
+  -H 'content-type: application/json' \
+  -d '{"id":"checkout-tax","appId":"checkout-tax","proxyIds":["checkout-traffic-a","checkout-traffic-b"]}'
+```
+
+Each active session receives `session.proxyLease`. Use its
+`trafficStartTime` as the `startTime` query value when reading
+`/_pwdev/proxies/:id/traffic`. Stopping the browser template or session releases
+the lease; it does not stop or delete the durable proxy.
+Leases are transient like sessions; stop active template sessions before
+restarting the pw-dev server.
 
 Apps no longer own browser lifecycle. The retired
 `/_pwdev/apps/:id/browser/*` routes return `410 Gone`.

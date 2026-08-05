@@ -375,7 +375,7 @@ export function createProxyManager(options = {}) {
       await cleanupManagedProxy(proxy, true, registryClient);
       return { ok: true, proxy: { ...stripChild(proxy), running: false } };
     },
-    async stopAll({ preserve = false } = {}) {
+    async stopAll({ preserve = true } = {}) {
       await ensureProfilesLoaded();
       const stopped = await Promise.all(Array.from(proxies.keys()).map((id) => (
         preserve ? this.stopProxy(id) : this.deleteProxy(id)
@@ -393,13 +393,13 @@ export function createProxyManager(options = {}) {
       });
     },
     async recover() {
-      return recoverRegisteredProxies({
+      await ensureProfilesLoaded();
+      return recoverProxyProfiles({
         root: w2StorageRoot,
         processListImpl,
         killProcessImpl,
         registryClient,
         proxies,
-        whistle,
         quiet,
       });
     },
@@ -1050,13 +1050,12 @@ async function cleanupManagedProxy(record, quiet, registryClient) {
   await record.managedCleanupPromise;
 }
 
-async function recoverRegisteredProxies({
+async function recoverProxyProfiles({
   root,
   processListImpl,
   killProcessImpl,
   registryClient,
   proxies,
-  whistle,
   quiet,
 }) {
   let processes;
@@ -1064,30 +1063,12 @@ async function recoverRegisteredProxies({
     processes = await processListImpl();
   } catch (error) {
     if (!quiet) console.error(`proxy recovery discovery failed: ${error.message}`);
-    return { ok: false, recovered: [], stale: [] };
-  }
-
-  let registryProxies;
-  try {
-    registryProxies = await registryClient.listProxies?.() ?? [];
-  } catch (error) {
-    if (!quiet) console.error(`proxy recovery registry lookup failed: ${error.message}`);
-    return { ok: false, recovered: [], stale: [] };
-  }
-
-  let appProxyReferences;
-  if (registryClient.listApps) {
-    try {
-      const apps = await registryClient.listApps() ?? [];
-      appProxyReferences = new Set(
-        apps
-          .map((app) => app?.proxyId)
-          .filter((proxyId) => typeof proxyId === 'string' && proxyId.length > 0)
-      );
-    } catch (error) {
-      if (!quiet) console.error(`proxy app reference lookup failed: ${error.message}`);
-      return { ok: false, recovered: [], stale: [] };
-    }
+    return {
+      ok: false,
+      recovered: [],
+      stopped: listProcessRecords(proxies),
+      stale: [],
+    };
   }
 
   const processByStorageDir = new Map();
@@ -1099,64 +1080,60 @@ async function recoverRegisteredProxies({
   }
 
   const recovered = [];
+  const stopped = [];
+  for (const record of proxies.values()) {
+    const processInfo = processByStorageDir.get(path.resolve(record.storageDir));
+    if (processInfo) {
+      const child = {
+        pid: processInfo.pid,
+        killed: false,
+        kill: (signal) => {
+          child.killed = true;
+          killProcessImpl(processInfo.pid, signal);
+        },
+      };
+      record.pid = processInfo.pid;
+      record.running = true;
+      record.child = child;
+      recovered.push(stripChild(record));
+    } else {
+      record.pid = undefined;
+      record.running = false;
+      record.child = undefined;
+      record.startedAt = undefined;
+      stopped.push(stripChild(record));
+    }
+
+    await Promise.resolve(registryClient.updateProxy?.(omitUndefined({
+      ...stripChild(record),
+      managed: true,
+    }))).catch((error) => {
+      if (!quiet) console.error(`proxy registry mirror failed: ${record.id}: ${error.message}`);
+    });
+  }
+
+  let registryProxies = [];
+  try {
+    registryProxies = await registryClient.listProxies?.() ?? [];
+  } catch (error) {
+    if (!quiet) console.error(`proxy recovery registry lookup failed: ${error.message}`);
+  }
+
   const stale = [];
   for (const registered of registryProxies) {
-    if (!registered?.managed || !registered.storageDir) continue;
-    if (registered.appId && appProxyReferences && !appProxyReferences.has(registered.id)) {
-      stale.push(registered.id);
-      await removeStaleRegistryRecord(registered, registryClient, quiet);
-      continue;
-    }
-    const storageDir = path.resolve(registered.storageDir);
-    if (!isWithinRoot(storageDir, root)) continue;
-    const processInfo = processByStorageDir.get(storageDir);
-    if (!processInfo) {
-      stale.push(registered.id);
-      await removeStaleRegistryRecord(registered, registryClient, quiet);
-      continue;
-    }
-
-    const proxyPort = registered.proxyPort ?? parseCommandPort(processInfo.commandLine, '-p');
-    const uiPort = registered.uiPort ?? parseCommandPort(processInfo.commandLine, '--uiport');
-    if (!proxyPort || !uiPort) continue;
-    const rules = registered.rules ?? await readPersistedRules(storageDir);
-    const record = makeProcessRecord({
-      id: registered.id,
-      kind: registered.kind ?? 'whistle',
-      name: registered.name,
-      appId: registered.appId,
-      taskId: registered.taskId,
-      owner: registered.owner,
-      purpose: registered.purpose,
-      labels: registered.labels,
-      command: registered.command ?? whistle.command,
-      args: registered.args ?? processInfo.commandLine.split(/\s+/).slice(1),
-      proxyPort,
-      uiPort,
-      proxyUrl: registered.proxyUrl ?? `http://127.0.0.1:${proxyPort}`,
-      guiUrl: registered.guiUrl ?? `http://127.0.0.1:${uiPort}`,
-      storageDir,
-      rulesetFile: registered.rulesetFile ?? path.join(storageDir, 'ruleset.txt'),
-      rules,
-      whistleRuleName: makeWhistleRuleName(registered.id),
-      pid: processInfo.pid,
-    });
-    record.startedAt = registered.startedAt ?? record.startedAt;
-    record.updatedAt = registered.updatedAt ?? record.updatedAt;
-    record.child = {
-      pid: processInfo.pid,
-      killed: false,
-      kill: (signal) => {
-        record.child.killed = true;
-        killProcessImpl(processInfo.pid, signal);
-      },
-    };
-    proxies.set(record.id, record);
-    recovered.push(stripChild(record));
+    if (!registered?.managed || proxies.has(registered.id)) continue;
+    stale.push(registered.id);
+    await removeStaleRegistryRecord(registered, registryClient, quiet);
   }
-  return { ok: true, recovered, stale };
-}
 
+  return {
+    ok: true,
+    profiles: listProcessRecords(proxies),
+    recovered,
+    stopped,
+    stale,
+  };
+}
 async function cleanupOrphanedProxies({ root, processListImpl, killProcessImpl, registryClient, preservedStorageDirs = new Set(), quiet }) {
   let processes;
   try {

@@ -1,11 +1,70 @@
 {
   "openapi": "3.1.1",
-  "info": { "title": "pw-dev browserTpl API", "version": "1.0.0", "description": "Persistent browserTpl records and their lifecycle. Start returns a transient session; attach Playwright to session.cdpUrl instead of launching a browser." },
+  "info": {
+    "title": "pw-dev browserTpl API",
+    "version": "1.0.0",
+    "description": "Persistent browserTpl records and transient browser sessions. A template can select one fixed proxyId or lease exclusively from proxyIds."
+  },
   "servers": [{ "url": "/" }],
   "paths": {
-    "/_pwdev/browsers": { "get": { "operationId": "listBrowserTemplates", "responses": { "200": { "description": "Browser templates" } } }, "post": { "operationId": "upsertBrowserTemplate", "description": "Use proxyId for a registered proxy. SSH-peer routing is resolved by the broker based on its topology.", "responses": { "200": { "description": "Saved template" } } } },
-    "/_pwdev/browsers/{id}/start": { "post": { "operationId": "startBrowser", "summary": "Start a managed browser session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Started browser and session containing cdpUrl" } } } },
-    "/_pwdev/browsers/{id}/stop": { "post": { "operationId": "stopBrowser", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Stopped session" } } } }
+    "/_pwdev/browsers": {
+      "get": {
+        "operationId": "listBrowserTemplates",
+        "summary": "List templates with sessions and proxy-pool availability",
+        "responses": { "200": { "description": "Browser templates and transient runtime state" } }
+      },
+      "post": {
+        "operationId": "upsertBrowserTemplate",
+        "summary": "Create or update a persistent browser template",
+        "description": "Use proxyId for a fixed proxy or proxyIds for an exclusive reusable pool. The fields are mutually exclusive.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "appId": { "type": "string" },
+                  "targetUrl": { "type": "string" },
+                  "profile": { "type": "string" },
+                  "proxyId": { "type": "string", "description": "Fixed reusable proxy." },
+                  "proxyIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": { "type": "string" },
+                    "description": "Ordered pool of durable proxies leased exclusively per active session."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Saved template" } }
+      }
+    },
+    "/_pwdev/browsers/{id}/start": {
+      "post": {
+        "operationId": "startBrowser",
+        "summary": "Start a browser session, leasing a pooled proxy when configured",
+        "description": "Managed proxies are started idempotently when selected. The response proxyLease includes trafficStartTime for lease-scoped traffic reads.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Started session containing cdpUrl and an optional proxyLease" },
+          "409": { "description": "Session already exists or the proxy pool is exhausted" }
+        }
+      }
+    },
+    "/_pwdev/browsers/{id}/stop": {
+      "post": {
+        "operationId": "stopBrowser",
+        "summary": "Stop a session, releasing its pooled proxy when present",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Stopped session with releasedProxyLease when applicable" } }
+      }
+    }
   },
   "x-pwdev-documents": [
     { "id": "sessions", "url": "/_pwdev/openapi/sessions.json", "whenToUse": "Inspect or stop a session directly." }

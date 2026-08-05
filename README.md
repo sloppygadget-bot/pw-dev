@@ -123,11 +123,16 @@ can be supplied with `--proxy-manager-url`. The standalone
 The proxy manager creates managed Whistle instances from rulesets supplied by
 an external agent. Each instance gets separate proxy and GUI ports, isolated
 `-S` storage under `packages/proxy/.runtime/whistle`, HTTPS capture enabled, a
-proxy registry entry, and optionally an app `proxyId` attachment. Task-scoped
-managed proxies can carry `taskId`, `owner`, `purpose`, and `labels` metadata
-for client-side cleanup and filtering.
-Shared proxies can be created without `appId`; pass the returned proxy id as
-`proxyId` when starting each browser session that should use it.
+proxy registry entry, and optionally an app `proxyId` attachment. The in-house
+Whistle profile is the durable source of truth: stopping the process, stopping
+the manager, or releasing a browser lease preserves configuration, rules, and
+traffic. Only `DELETE /_pwdev/proxy/proxies/:id` removes the profile.
+
+For task-isolated traffic, create several managed profiles without `appId` and
+put their ids in a browser template's `proxyIds`. Each active template session
+leases one available proxy exclusively and releases it when the session stops.
+The returned `proxyLease.trafficStartTime` can be passed to the proxy traffic
+endpoint as `startTime` to read traffic from that lease boundary.
 
 Start the read-only local dashboard:
 
@@ -239,47 +244,49 @@ up to six request-header filters (`name`/`value` through `name5`/`value5`) are
 supported; use `mtype=1` for exact header values. Use the returned
 `traffic.data.lastId` as `startTime` to poll for later entries.
 
-Agents attach through the app manifest's `cdpUrl`. They only need the app
-browser endpoints when asking `pw-dev` to start or stop broker sessions.
-Broker APIs are proxied under `/_pwdev/broker/*`, so manifests can point CDP
-at the pw-dev server instead of exposing the broker port.
+Agents attach through the `session.cdpUrl` returned by a browser-template start.
+Use `/_pwdev/browsers/*` and `/_pwdev/sessions/*` for ordinary lifecycle work.
+Broker APIs are proxied under `/_pwdev/broker/*`, so the returned CDP URL can
+point at the pw-dev server instead of exposing the broker port.
 
-Proxy registrations are reusable metadata only. They have no runner or status;
-update a proxy port by re-posting the same proxy `id` with a new `proxyUrl`.
+External proxy registrations are reusable routing metadata; update a port by
+re-posting the same proxy `id` with a new `proxyUrl`. Managed proxy records are
+durable Whistle-profile mirrors and may also expose current runtime state; the
+proxy manager and profile remain authoritative.
 When a broker reports SSH remote topology, selecting a registered proxy by
 `proxyId` automatically creates or reuses a broker-owned SSH mapping. Agents do
 not need proxy-forward IDs or mapped ports.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 
-Browser start accepts task metadata so agents and humans can see why a browser
-session exists. With `task.id`, the server creates a task-scoped browser session
-under the same app and uses profile `<app id>__<task id>` unless `profile` is
+To start an isolated named browser session from one template, send `sessionId`.
+The default profile is `<template id>__<session id>` unless `profile` is
 explicitly supplied:
 
 ```json
 {
-  "task": {
-    "id": "smoke-login-20260629",
-    "label": "Smoke login flow",
-    "owner": "codex"
-  }
+  "sessionId": "smoke-login-20260629"
 }
 ```
 
-The start response includes `session.cdpUrl` for task-scoped starts. Agents
-should attach to that URL, or to `app.cdpUrl` for a default no-task browser.
+The start response always includes `session.cdpUrl`; attach Playwright to that
+URL. When the template has `proxyIds`, the session also receives a proxy lease.
 
-Duplicate starts for the same default slot or same `task.id` return
-`409 Conflict`. Agents should end completed task sessions explicitly with
-`POST /_pwdev/browsers/:id/stop`; app registrations and
-persistent profiles remain available for later tasks.
+Duplicate starts for the same default slot or named session return `409
+Conflict`. End completed sessions explicitly with
+`POST /_pwdev/browsers/:id/stop`; app registrations, browser profiles, and
+managed proxy profiles remain available for later work.
 
 ## Tests
 
 ```bash
+npm run check:kb
 npm test
 ```
+
+`check:kb` validates the OpenAPI catalogs and links, instruction templates,
+local Markdown links, documented npm commands, and the live rendered discovery
+endpoints against an ephemeral server.
 
 ## Implementation Standard
 

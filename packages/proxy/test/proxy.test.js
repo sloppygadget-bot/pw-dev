@@ -147,12 +147,14 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
 
 test('manager accepts explicit Whistle command override', async () => {
   const spawned = [];
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-override-'));
   const manager = createProxyManager({
     applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
     w2Command: 'w2',
+    w2StorageRoot,
     portAvailable: async () => true,
   });
 
@@ -160,7 +162,8 @@ test('manager accepts explicit Whistle command override', async () => {
   assert.equal(spawned[0].command, 'w2');
   assert.deepEqual(spawned[0].args.slice(0, 3), ['run', '-p', '8888']);
   assert.deepEqual(spawned[0].args.slice(-2), ['-M', 'enableHttps']);
-  await manager.stopAll();
+  await manager.stopAll({ preserve: false });
+  fs.rmSync(w2StorageRoot, { recursive: true, force: true });
 });
 
 test('manager stopAll preserves proxy profiles for a later restart', async () => {
@@ -188,7 +191,7 @@ test('manager stopAll preserves proxy profiles for a later restart', async () =>
     assert.equal(liveStatus.status.running, true);
     assert.equal(liveStatus.status.pid, spawned[0].child.pid);
 
-    await manager.stopAll({ preserve: true });
+    await manager.stopAll();
     liveProcess = undefined;
 
     assert.equal(spawned[0].child.killedSignal, 'SIGTERM');
@@ -237,17 +240,19 @@ test('manager writes object ruleset as JSON', async () => {
       rules: [{ pattern: '/api', target: 'http://127.0.0.1:3000' }],
     });
   } finally {
-    await manager.stopAll();
+    await manager.stopAll({ preserve: false });
     fs.rmSync(w2StorageRoot, { recursive: true, force: true });
   }
 });
 
 test('manager rejects duplicate managed proxy ids', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-duplicate-'));
   const manager = createProxyManager({
     applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn([]),
+    w2StorageRoot,
     portAvailable: async () => true,
   });
 
@@ -256,16 +261,19 @@ test('manager rejects duplicate managed proxy ids', async () => {
     () => manager.createProxy({ id: 'dup', ruleset: 'a b' }),
     /Managed proxy already exists/
   );
-  await manager.stopAll();
+  await manager.stopAll({ preserve: false });
+  fs.rmSync(w2StorageRoot, { recursive: true, force: true });
 });
 
-test('manager clears proxy records when child spawn fails', async () => {
+test('manager retains a stopped durable profile when its child process fails', async () => {
   const spawned = [];
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-child-failure-'));
   const manager = createProxyManager({
     applyRulesImpl: fakeApplyRules([]),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
+    w2StorageRoot,
     portAvailable: async () => true,
   });
 
@@ -273,8 +281,11 @@ test('manager clears proxy records when child spawn fails', async () => {
   spawned[0].child.emit('error', new Error('spawn ENOENT'));
 
   const status = await manager.status();
-  assert.deepEqual(status.proxies, []);
+  assert.deepEqual(status.proxies.map((proxy) => [proxy.id, proxy.running]), [['whistle-main', false]]);
+  assert.equal(fs.existsSync(status.proxies[0].storageDir), true);
   assert.deepEqual(manager.serverUrl, 'http://127.0.0.1:9696');
+  await manager.deleteProxy('whistle-main');
+  fs.rmSync(w2StorageRoot, { recursive: true, force: true });
 });
 
 test('proxy manager cleans orphaned Whistle processes on startup', async () => {
@@ -329,6 +340,7 @@ test('proxy manager recovers registered Whistle profiles on startup', async () =
   fs.mkdirSync(storageDir, { recursive: true });
   fs.writeFileSync(path.join(storageDir, 'default-ruleset.txt'), 'a b');
   fs.writeFileSync(path.join(storageDir, 'override-ruleset.txt'), '');
+  writeProxyProfileFixture(storageDir, { id: 'recoverable-whistle', proxyPort: 8899, uiPort: 9800 });
   const killed = [];
   const registryClient = fakeRegistryClient({
     proxies: [{
@@ -370,10 +382,11 @@ test('proxy manager recovers registered Whistle profiles on startup', async () =
   }
 });
 
-test('proxy manager removes app-scoped proxies no longer referenced by an app', async () => {
+test('proxy manager retains durable profiles when an app no longer references them', async () => {
   const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-unreferenced-'));
   const storageDir = path.join(w2StorageRoot, 'unreferenced-whistle');
   fs.mkdirSync(storageDir, { recursive: true });
+  writeProxyProfileFixture(storageDir, { id: 'unreferenced-whistle', proxyPort: 8899, uiPort: 9800, appId: 'checkout' });
   const killed = [];
   const registryClient = fakeRegistryClient({
     apps: [{ id: 'checkout', proxyId: 'another-proxy' }],
@@ -402,13 +415,10 @@ test('proxy manager removes app-scoped proxies no longer referenced by an app', 
   try {
     const server = await startProxyManagerServer({ manager, port: 0 });
     const status = await getJson(`${server.origin}/_proxy/status`);
-    assert.deepEqual(status.body.proxies, []);
-    assert.deepEqual(killed, [{ pid: 4002, signal: 'SIGTERM' }]);
-    assert.deepEqual(registryClient.deletes, ['unreferenced-whistle']);
-    assert.deepEqual(registryClient.appPatches, [{
-      id: 'checkout',
-      patch: { proxyId: null },
-    }]);
+    assert.deepEqual(status.body.proxies.map((proxy) => [proxy.id, proxy.running]), [['unreferenced-whistle', true]]);
+    assert.deepEqual(killed, []);
+    assert.deepEqual(registryClient.deletes, []);
+    assert.deepEqual(registryClient.appPatches, []);
     await server.close();
   } finally {
     fs.rmSync(w2StorageRoot, { recursive: true, force: true });
@@ -418,11 +428,13 @@ test('proxy manager removes app-scoped proxies no longer referenced by an app', 
 test('manager replaces managed proxy rules without restarting Whistle', async () => {
   const spawned = [];
   const appliedRules = [];
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-replace-rules-'));
   const manager = createProxyManager({
     applyRulesImpl: fakeApplyRules(appliedRules),
     registryClient: fakeRegistryClient(),
     quiet: true,
     spawnImpl: fakeSpawn(spawned),
+    w2StorageRoot,
     portAvailable: async () => true,
   });
 
@@ -472,7 +484,8 @@ test('manager replaces managed proxy rules without restarting Whistle', async ()
     }),
     /Managed proxy rules changed/
   );
-  await manager.stopAll();
+  await manager.stopAll({ preserve: false });
+  fs.rmSync(w2StorageRoot, { recursive: true, force: true });
 });
 
 test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
@@ -602,6 +615,28 @@ test('proxy HTTP API lists and toggles Whistle rulesets for one proxy', async ()
     fs.rmSync(w2StorageRoot, { recursive: true, force: true });
   }
 });
+
+function writeProxyProfileFixture(storageDir, { id, proxyPort, uiPort, appId }) {
+  const updatedAt = '2026-01-01T00:00:00.000Z';
+  fs.writeFileSync(path.join(storageDir, 'pw-dev-proxy.json'), `${JSON.stringify({
+    version: 1,
+    id,
+    kind: 'whistle',
+    appId,
+    proxyPort,
+    uiPort,
+    proxyUrl: `http://127.0.0.1:${proxyPort}`,
+    guiUrl: `http://127.0.0.1:${uiPort}`,
+    rulesetFile: path.join(storageDir, 'ruleset.txt'),
+    rules: {
+      defaultRuleset: 'a b',
+      overrideRuleset: '',
+      effectiveRuleset: 'a b',
+      version: 1,
+      updatedAt,
+    },
+  }, null, 2)}\n`);
+}
 
 function fakeRegistryClient({ apps = [], proxies = [] } = {}) {
   const client = {
