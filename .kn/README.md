@@ -20,5 +20,6 @@ of truth for behavior.
 
 - [system](system.md) — the control-plane model and ownership boundaries.
 - [journeys](journeys.md) — practical agent/user journeys and acceptance checks.
+- [browser-lifecycle](browser-lifecycle.md) — reusable browser configuration,
+  session ownership, and cleanup semantics.
 - [e2e-rationale](e2e-rationale.md) — why the E2E suite uses public APIs and local doubles.
-
