@@ -63,6 +63,9 @@ async function startBrokerDouble() {
       instances.delete(body.instanceId);
       return send(res, 200, { ok: true, stopped: body.instanceId });
     }
+    if (req.method === 'POST' && req.url === '/_broker/profiles/clear') {
+      return send(res, 200, { ok: true, profile: body.profile, cleared: true });
+    }
     if (req.method === 'GET' && req.url === '/_broker/status') {
       return send(res, 200, {
         ok: true,
@@ -121,11 +124,12 @@ test('app verification lifecycle discovers, attaches, and cleans up a session', 
     assert.equal(instructions.status(), 200);
     assert.match(await instructions.text(), /\/_pwdev\/apps/);
     assert.equal((await json(env.client, 'POST', `${env.server.origin}/_pwdev/apps`, { id: 'checkout', appUrl: env.server.origin })).response.status(), 200);
-    assert.equal((await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers`, { id: 'checkout', appId: 'checkout', headless: true })).response.status(), 200);
+    assert.equal((await json(env.client, 'POST', `${env.server.origin}/_pwdev/browser-configs`, { id: 'checkout-config', headless: true })).response.status(), 200);
+    assert.equal((await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers`, { id: 'checkout', browserConfigId: 'checkout-config', appId: 'checkout' })).response.status(), 200);
     const started = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/checkout/start`);
     assert.equal(started.response.status(), 200);
     assert.equal(started.payload.session.sessionId, 'checkout__default');
-    assert.equal(started.payload.session.cdpUrl, `${env.server.origin}/_pwdev/broker/instances/bkr_checkout`);
+    assert.equal(started.payload.session.cdpUrl, `${env.server.origin}/_pwdev/broker/instances/bkr_checkout-config__checkout`);
     const version = await env.client.get(`${started.payload.session.cdpUrl}/json/version`);
     assert.equal(version.status(), 200);
     assert.equal((await version.json()).Browser, 'MockChrome/1.0');
@@ -134,18 +138,20 @@ test('app verification lifecycle discovers, attaches, and cleans up a session', 
   } finally { await env.close(); }
 });
 
-test('parallel named sessions stay isolated and clean up independently', async () => {
+test('parallel browsers sharing one config stay isolated and clean up independently', async () => {
   const env = await makeServer();
   try {
-    await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers`, { id: 'crawler', targetUrl: env.server.origin });
-    const one = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/crawler/start`, { sessionId: 'worker-a' });
-    const two = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/crawler/start`, { sessionId: 'worker-b' });
+    await json(env.client, 'POST', `${env.server.origin}/_pwdev/browser-configs`, { id: 'crawler', targetUrl: env.server.origin });
+    await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers`, { id: 'worker-a', browserConfigId: 'crawler' });
+    await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers`, { id: 'worker-b', browserConfigId: 'crawler' });
+    const one = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/worker-a/start`);
+    const two = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/worker-b/start`);
     assert.equal(one.payload.session.profile, 'crawler__worker-a');
     assert.equal(two.payload.session.profile, 'crawler__worker-b');
     assert.notEqual(one.payload.session.cdpUrl, two.payload.session.cdpUrl);
-    await json(env.client, 'POST', `${env.server.origin}/_pwdev/sessions/crawler__worker-a/stop`);
-    assert.deepEqual((await json(env.client, 'GET', `${env.server.origin}/_pwdev/sessions`)).payload.sessions.map((s) => s.sessionId), ['crawler__worker-b']);
-    await json(env.client, 'POST', `${env.server.origin}/_pwdev/sessions/crawler__worker-b/stop`);
+    await json(env.client, 'POST', `${env.server.origin}/_pwdev/sessions/worker-a__default/stop`);
+    assert.deepEqual((await json(env.client, 'GET', `${env.server.origin}/_pwdev/sessions`)).payload.sessions.map((s) => s.sessionId), ['worker-b__default']);
+    await json(env.client, 'POST', `${env.server.origin}/_pwdev/sessions/worker-b__default/stop`);
   } finally { await env.close(); }
 });
 
@@ -155,16 +161,18 @@ test('exclusive proxy lease lifecycle reports exhaustion and reuses a released p
   const env = await makeServer({ proxyManagerUrl: manager.origin });
   try {
     await json(env.client, 'POST', `${env.server.origin}/_pwdev/proxies`, proxies[0]);
-    await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers`, { id: 'traffic', proxyIds: ['proxy-a'] });
-    const first = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/traffic/start`, { sessionId: 'a' });
+    await json(env.client, 'POST', `${env.server.origin}/_pwdev/browser-configs`, { id: 'traffic' });
+    await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers`, { id: 'traffic-a', browserConfigId: 'traffic', proxyIds: ['proxy-a'] });
+    await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers`, { id: 'traffic-b', browserConfigId: 'traffic', proxyIds: ['proxy-a'] });
+    const first = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/traffic-a/start`);
     assert.equal(first.response.status(), 200);
-    assert.equal(first.payload.proxyLease.proxyId, 'proxy-a');
-    const exhausted = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/traffic/start`, { sessionId: 'b' });
+    assert.equal(first.payload.session.proxyId, 'proxy-a');
+    const exhausted = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/traffic-b/start`);
     assert.equal(exhausted.response.status(), 409);
-    await json(env.client, 'POST', `${env.server.origin}/_pwdev/sessions/traffic__a/stop`);
-    const reused = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/traffic/start`, { sessionId: 'b' });
+    await json(env.client, 'DELETE', `${env.server.origin}/_pwdev/browsers/traffic-a`);
+    const reused = await json(env.client, 'POST', `${env.server.origin}/_pwdev/browsers/traffic-b/start`);
     assert.equal(reused.response.status(), 200);
-    assert.equal(reused.payload.proxyLease.proxyId, 'proxy-a');
+    assert.equal(reused.payload.session.proxyId, 'proxy-a');
     assert.deepEqual(manager.requests.filter((r) => r.path.endsWith('/start')).map((r) => r.path), ['/_proxy/proxies/proxy-a/start', '/_proxy/proxies/proxy-a/start']);
   } finally { await env.close(); await manager.close(); }
 });

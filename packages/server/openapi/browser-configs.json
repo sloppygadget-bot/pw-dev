@@ -1,0 +1,59 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "pw-dev browser config API",
+    "version": "1.0.0",
+    "description": "Reusable Chrome launch configuration. Browser configs are composed into browsers and cannot be started directly."
+  },
+  "servers": [{ "url": "/" }],
+  "paths": {
+    "/_pwdev/browser-configs": {
+      "get": {
+        "operationId": "listBrowserConfigs",
+        "summary": "List browser configs",
+        "responses": { "200": { "description": "Persisted browser configurations" } }
+      },
+      "post": {
+        "operationId": "upsertBrowserConfig",
+        "summary": "Create or update a browser config",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "name": { "type": "string" },
+                  "targetUrl": { "type": "string" },
+                  "profile": { "type": "string" },
+                  "brokerUrl": { "type": "string" },
+                  "proxyBypassList": { "type": "string" },
+                  "ignoreSslErrors": { "type": "boolean" },
+                  "headless": { "type": "boolean" },
+                  "resetProfile": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Saved browser config" }, "409": { "description": "Referenced browser config cannot be edited" } }
+      }
+    },
+    "/_pwdev/browser-configs/{id}": {
+      "get": {
+        "operationId": "getBrowserConfig",
+        "summary": "Get one browser config",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Browser config" }, "404": { "description": "Unknown browser config" } }
+      },
+      "delete": {
+        "operationId": "deleteBrowserConfig",
+        "summary": "Delete an unused browser config",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Deleted browser config" }, "409": { "description": "Browser config is referenced or occupied" } }
+      }
+    }
+  }
+}

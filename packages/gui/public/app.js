@@ -1,13 +1,14 @@
 const state = {
   timer: undefined,
   intervalMs: 5000,
+  refreshGeneration: 0,
   pwDevUrl: '',
-  currentView: 'topology',
+  currentView: 'browsers',
   last: undefined,
-  visualizers: undefined,
-  renderToken: 0,
-  topologyRenderer: 'mermaid',
-  topologySimulations: [],
+  browserView: 'diagram',
+  editingBrowserId: undefined,
+  editingBrowserConfigId: undefined,
+  editingProxyId: undefined,
 };
 
 const els = {
@@ -17,33 +18,94 @@ const els = {
   brokerState: document.querySelector('#broker-state'),
   sessionsState: document.querySelector('#sessions-state'),
   updatedAt: document.querySelector('#updated-at'),
-  topologyCards: document.querySelector('#topology-cards'),
-  topologyContext: document.querySelector('#topology-context'),
+  browsersDiagram: document.querySelector('#browsers-diagram'),
+  browsersTable: document.querySelector('#browsers-table'),
   apps: document.querySelector('#apps-list'),
   broker: document.querySelector('#broker-list'),
-  browsers: document.querySelector('#browsers-list'),
+  browserConfigs: document.querySelector('#browser-configs-list'),
   sessions: document.querySelector('#sessions-list'),
   proxies: document.querySelector('#proxies-list'),
-  rendererButtons: [...document.querySelectorAll('.toggle-btn')],
+  newBrowser: document.querySelector('#new-browser'),
+  browserEditor: document.querySelector('#browser-editor'),
+  browserEditorTitle: document.querySelector('#browser-editor-title'),
+  cancelBrowser: document.querySelector('#cancel-browser'),
+  browserId: document.querySelector('#browser-id'),
+  browserName: document.querySelector('#browser-name'),
+  browserConfigId: document.querySelector('#browser-config-id'),
+  browserAppId: document.querySelector('#browser-app-id'),
+  browserProxyId: document.querySelector('#browser-proxy-id'),
+  browserProxyIds: document.querySelector('#browser-proxy-ids'),
+  browserProfile: document.querySelector('#browser-profile'),
+  browserReadme: document.querySelector('#browser-readme'),
+  browserEditorError: document.querySelector('#browser-editor-error'),
+  newBrowserConfig: document.querySelector('#new-browser-config'),
+  browserConfigEditor: document.querySelector('#browser-config-editor'),
+  browserConfigEditorTitle: document.querySelector('#browser-config-editor-title'),
+  cancelBrowserConfig: document.querySelector('#cancel-browser-config'),
+  browserConfigIdEditor: document.querySelector('#browser-config-id-editor'),
+  browserConfigName: document.querySelector('#browser-config-name'),
+  browserConfigTargetUrl: document.querySelector('#browser-config-target-url'),
+  browserConfigBrokerUrl: document.querySelector('#browser-config-broker-url'),
+  browserConfigProfile: document.querySelector('#browser-config-profile'),
+  browserConfigProxyBypassList: document.querySelector('#browser-config-proxy-bypass-list'),
+  browserConfigIgnoreSslErrors: document.querySelector('#browser-config-ignore-ssl-errors'),
+  browserConfigHeadless: document.querySelector('#browser-config-headless'),
+  browserConfigResetProfile: document.querySelector('#browser-config-reset-profile'),
+  browserConfigEditorError: document.querySelector('#browser-config-editor-error'),
+  newProxy: document.querySelector('#new-proxy'),
+  proxyEditor: document.querySelector('#proxy-editor'),
+  proxyEditorTitle: document.querySelector('#proxy-editor-title'),
+  cancelProxy: document.querySelector('#cancel-proxy'),
+  proxyId: document.querySelector('#proxy-id'),
+  proxyName: document.querySelector('#proxy-name'),
+  proxyKind: document.querySelector('#proxy-kind'),
+  proxyUrl: document.querySelector('#proxy-url'),
+  proxyForwardId: document.querySelector('#proxy-forward-id'),
+  proxyGuiUrl: document.querySelector('#proxy-gui-url'),
+  proxyOwner: document.querySelector('#proxy-owner'),
+  proxyTaskId: document.querySelector('#proxy-task-id'),
+  proxyPurpose: document.querySelector('#proxy-purpose'),
+  proxyLabels: document.querySelector('#proxy-labels'),
+  proxyEditorError: document.querySelector('#proxy-editor-error'),
 };
+
+els.newBrowser.disabled = true;
+els.newBrowserConfig.disabled = true;
+els.newProxy.disabled = true;
+
+for (const button of document.querySelectorAll('[data-browser-view]')) {
+  button.addEventListener('click', () => {
+    state.browserView = button.dataset.browserView;
+    for (const item of document.querySelectorAll('[data-browser-view]')) {
+      item.classList.toggle('active', item.dataset.browserView === state.browserView);
+    }
+    if (state.last) renderBrowsers(state.last.browsers);
+  });
+}
 
 for (const button of document.querySelectorAll('.nav-item')) {
   button.addEventListener('click', () => showView(button.dataset.view));
 }
 
-for (const button of els.rendererButtons) {
-  button.addEventListener('click', () => {
-    const nextRenderer = button.dataset.renderer;
-    if (!nextRenderer || nextRenderer === state.topologyRenderer) return;
-    state.topologyRenderer = nextRenderer;
-    syncRendererButtons();
-    if (state.last) {
-      void renderTopology(state.last, state.renderToken);
-    }
-  });
-}
-
 els.refresh.addEventListener('click', () => void refresh());
+els.newBrowser.addEventListener('click', () => openBrowserEditor());
+els.cancelBrowser.addEventListener('click', closeBrowserEditor);
+els.browserEditor.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void saveBrowser();
+});
+els.newBrowserConfig.addEventListener('click', () => openBrowserConfigEditor());
+els.cancelBrowserConfig.addEventListener('click', closeBrowserConfigEditor);
+els.browserConfigEditor.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void saveBrowserConfig();
+});
+els.newProxy.addEventListener('click', () => openProxyEditor());
+els.cancelProxy.addEventListener('click', closeProxyEditor);
+els.proxyEditor.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void saveProxy();
+});
 els.interval.addEventListener('change', () => {
   state.intervalMs = Number(els.interval.value);
   schedule();
@@ -54,9 +116,10 @@ void init();
 async function init() {
   const config = await fetchJson('/api/config');
   state.pwDevUrl = config.pwDevUrl;
-  state.visualizers = await loadVisualizers();
-  syncRendererButtons();
   await refresh();
+  els.newBrowser.disabled = false;
+  els.newBrowserConfig.disabled = false;
+  els.newProxy.disabled = false;
   schedule();
 }
 
@@ -80,11 +143,37 @@ function showView(view) {
 
 function showApp(appId) {
   showView('apps');
-  const appCard = [...els.apps.querySelectorAll('[data-app-id]')]
-    .find((card) => card.dataset.appId === appId);
-  if (!appCard) return;
-  appCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  appCard.focus({ preventScroll: true });
+  focusEntityRow(els.apps, 'appId', appId, 'app-target');
+}
+
+function showProxy(proxyId) {
+  showView('proxies');
+  focusEntityRow(els.proxies, 'proxyId', proxyId, 'proxy-target');
+}
+
+function focusEntityRow(root, dataKey, id, targetClass) {
+  const row = [...root.querySelectorAll(`[data-${dataKey.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}]`)]
+    .find((item) => item.dataset[dataKey] === id);
+  if (!row) return;
+  for (const target of root.querySelectorAll('.entity-target')) {
+    target.classList.remove('entity-target', 'app-target', 'proxy-target', 'session-target');
+  }
+  row.classList.add('entity-target', targetClass);
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  row.focus({ preventScroll: true });
+}
+
+function showSession(sessionId) {
+  showView('sessions');
+  const sessionRow = [...els.sessions.querySelectorAll('[data-session-id]')]
+    .find((row) => row.dataset.sessionId === sessionId);
+  if (!sessionRow) return;
+  for (const row of els.sessions.querySelectorAll('.session-target')) {
+    row.classList.remove('session-target');
+  }
+  sessionRow.classList.add('session-target');
+  sessionRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  sessionRow.focus({ preventScroll: true });
 }
 
 function showNetwork(networkId) {
@@ -96,16 +185,12 @@ function showNetwork(networkId) {
   networkCard.focus({ preventScroll: true });
 }
 
-function syncRendererButtons() {
-  for (const button of els.rendererButtons) {
-    button.classList.toggle('active', button.dataset.renderer === state.topologyRenderer);
-  }
-}
-
 async function refresh() {
   els.refresh.disabled = true;
+  const generation = ++state.refreshGeneration;
   try {
     const snapshot = normalizeSnapshot(await fetchJson('/api/snapshot'));
+    if (generation !== state.refreshGeneration) return;
     state.last = snapshot;
     await render(snapshot);
   } finally {
@@ -116,7 +201,7 @@ async function refresh() {
 function normalizeSnapshot(raw) {
   const status = raw.server.status;
   const apps = raw.server.apps;
-  const serverBrowsers = raw.server.browsers;
+  const serverBrowserConfigs = raw.server.browserConfigs;
   const serverSessions = raw.server.sessions;
   const proxies = raw.server.proxies;
   const serverNetworks = raw.server.networks;
@@ -133,8 +218,8 @@ function normalizeSnapshot(raw) {
     : status.body?.manifest
       ? [status.body.manifest]
       : [];
-  const browserTemplates = serverBrowsers.ok && serverBrowsers.body?.browsers
-    ? serverBrowsers.body.browsers
+  const browserConfigs = serverBrowserConfigs.ok && serverBrowserConfigs.body?.browserConfigs
+    ? serverBrowserConfigs.body.browserConfigs
     : [];
   const proxyStatusById = new Map(proxyStatuses.map((status) => [status.id, status]));
   const proxyList = (proxies.ok && proxies.body?.proxies
@@ -161,7 +246,7 @@ function normalizeSnapshot(raw) {
       slot: session.scope,
     }))
     : [];
-  const relationships = computeRelationships({ apps: appList, browsers: browserTemplates, sessions, proxies: proxyList, networks: networkList, proxyForwards, brokerStatus });
+  const relationships = computeRelationships({ apps: appList, browserConfigs: browserConfigs, sessions, proxies: proxyList, networks: networkList, proxyForwards, brokerStatus });
 
   return {
     serverOk,
@@ -169,15 +254,18 @@ function normalizeSnapshot(raw) {
     broker: status.body?.broker,
     brokerStatus,
     brokers: brokerEntries,
-    browsers: browserTemplates,
+    browserConfigs: browserConfigs,
     proxyStatus,
     apps: appList,
     proxies: proxyList,
     networks: networkList,
     proxyForwards,
     sessions,
+    browsers: raw.server.browsers?.ok && raw.server.browsers.body?.browsers
+      ? raw.server.browsers.body.browsers
+      : [],
     relationships,
-    errors: [status, apps, serverBrowsers, serverSessions, proxies, serverNetworks, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
+    errors: [status, apps, serverBrowserConfigs, serverSessions, proxies, serverNetworks, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
     updatedAt: new Date(raw.collectedAt),
   };
 }
@@ -204,7 +292,7 @@ function normalizeBrokerEntries(raw) {
   }));
 }
 
-function computeRelationships({ apps, browsers, sessions, proxies, networks, proxyForwards, brokerStatus }) {
+function computeRelationships({ apps, browserConfigs, sessions, proxies, networks, proxyForwards, brokerStatus }) {
   const relationships = new Map();
   const add = (type, id, label) => {
     if (!id || !label) return;
@@ -220,18 +308,16 @@ function computeRelationships({ apps, browsers, sessions, proxies, networks, pro
     add('proxyForward', app.proxyForwardId, `apps: ${app.id}`);
   }
 
-  for (const browser of browsers) {
-    add('browser', browser.id, browser.appId ? `app: ${browser.appId}` : undefined);
-    add('app', browser.appId, `browsers: ${browser.id}`);
-    add('network', browser.networkId, `browsers: ${browser.id}`);
-    add('proxy', browser.proxyId, `browsers: ${browser.id}`);
-    add('profile', browser.profile, `browsers: ${browser.id}`);
+  for (const browserConfig of browserConfigs) {
+    add('browserConfig', browserConfig.id, `profile: ${browserConfig.profile ?? browserConfig.id}`);
+    add('profile', browserConfig.profile, `browser configs: ${browserConfig.id}`);
   }
 
   for (const session of sessions) {
     add('session', session.sessionId, `src app: ${session.appId}`);
     add('session', session.sessionId, `browser: ${session.browserId}`);
     add('browser', session.browserId, `sessions: ${session.sessionId}`);
+    add('browserConfig', session.browserConfigId, `sessions: ${session.sessionId}`);
     add('network', session.networkId, `sessions: ${session.sessionId}`);
     add('proxy', session.proxyId, `sessions: ${session.sessionId}`);
     add('proxyForward', session.proxyForwardId, `sessions: ${session.sessionId}`);
@@ -275,7 +361,6 @@ function related(relationships, type, id) {
 }
 
 async function render(snapshot) {
-  const token = ++state.renderToken;
   els.serverState.textContent = snapshot.serverOk ? 'Online' : 'Error';
   els.serverState.className = snapshot.serverOk ? 'good-text' : 'bad-text';
 
@@ -295,20 +380,326 @@ async function render(snapshot) {
 
   els.updatedAt.textContent = snapshot.updatedAt.toLocaleTimeString();
 
-  setCount('topology', topologyFlowCount(snapshot));
+  setCount('browsers', snapshot.browsers.length);
   setCount('apps', snapshot.apps.length);
   setCount('broker', snapshot.brokers.length);
-  setCount('browsers', snapshot.browsers.length);
+  setCount('browser-configs', snapshot.browserConfigs.length);
   setCount('sessions', snapshot.sessions.length);
   setCount('proxies', snapshot.proxies.length);
 
-  await renderTopology(snapshot, token);
-  if (token !== state.renderToken) return;
-  renderApps(snapshot.apps, snapshot.relationships);
+  renderBrowsers(snapshot.browsers);
+  renderApps(snapshot.apps, snapshot.relationships, snapshot.browsers);
   renderBroker(snapshot);
-  renderBrowsers(snapshot.browsers, snapshot.sessions);
-  renderSessions(snapshot.sessions, snapshot.relationships);
-  renderProxies(snapshot.proxies, snapshot.relationships);
+  renderBrowserConfigs(snapshot.browserConfigs, snapshot.sessions, snapshot.browsers);
+  renderSessions(snapshot.sessions, snapshot.relationships, snapshot.browsers);
+  renderProxies(snapshot.proxies, snapshot.relationships, snapshot.browsers, snapshot.apps, snapshot.sessions);
+}
+
+function openBrowserEditor(browser) {
+  state.editingBrowserId = browser?.id;
+  syncBrowserEditorOptions(state.last);
+  els.browserEditorTitle.textContent = browser ? `Edit ${browser.name ?? browser.id}` : 'New browser';
+  els.browserId.value = browser?.id ?? '';
+  els.browserId.disabled = Boolean(browser);
+  els.browserName.value = browser?.name ?? '';
+  els.browserConfigId.value = browser?.browserConfigId ?? state.last?.browserConfigs?.[0]?.id ?? '';
+  els.browserAppId.value = browser?.appId ?? '';
+  els.browserProxyId.value = browser?.proxyId ?? '';
+  els.browserProxyIds.value = browser?.proxyId ? '' : (browser?.proxyIds ?? []).join(', ');
+  els.browserProfile.value = browser?.profile ?? '';
+  els.browserReadme.value = browser?.readme ?? '';
+  els.browserEditorError.textContent = '';
+  els.browserEditor.classList.remove('hidden');
+  els.browserId.focus();
+}
+
+function closeBrowserEditor() {
+  state.editingBrowserId = undefined;
+  els.browserEditor.classList.add('hidden');
+  els.browserEditorError.textContent = '';
+}
+
+function syncBrowserEditorOptions(snapshot) {
+  if (!snapshot) return;
+  setSelectOptions(els.browserConfigId, snapshot.browserConfigs, { required: true });
+  setSelectOptions(els.browserAppId, snapshot.apps, { emptyLabel: 'No app' });
+  setSelectOptions(els.browserProxyId, snapshot.proxies, { emptyLabel: 'No proxy' });
+}
+
+function setSelectOptions(select, values, { emptyLabel, required = false } = {}) {
+  const selected = select.value;
+  select.replaceChildren();
+  if (emptyLabel !== undefined) {
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = emptyLabel;
+    select.append(empty);
+  }
+  for (const value of values ?? []) {
+    const option = document.createElement('option');
+    option.value = value.id;
+    option.textContent = value.name ? `${value.name} (${value.id})` : value.id;
+    select.append(option);
+  }
+  select.required = required;
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+}
+
+async function saveBrowser() {
+  els.browserEditorError.textContent = '';
+  const id = els.browserId.value.trim();
+  const browser = omitEmpty({
+    id,
+    name: els.browserName.value.trim(),
+    browserConfigId: els.browserConfigId.value,
+    appId: els.browserAppId.value,
+    proxyId: els.browserProxyId.value,
+    proxyIds: els.browserProxyIds.value.split(',').map((value) => value.trim()).filter(Boolean),
+    profile: els.browserProfile.value.trim(),
+    readme: els.browserReadme.value.trim(),
+  });
+  if (!browser.id || !browser.browserConfigId) {
+    els.browserEditorError.textContent = 'ID and browser config are required.';
+    return;
+  }
+  if (browser.proxyId && browser.proxyIds) {
+    els.browserEditorError.textContent = 'Choose a fixed proxy or a proxy pool, not both.';
+    return;
+  }
+  try {
+    await fetchJson('/api/pwdev/browsers', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(browser),
+    });
+    closeBrowserEditor();
+    await refresh();
+  } catch (error) {
+    els.browserEditorError.textContent = error.message;
+  }
+}
+
+function openBrowserConfigEditor(browserConfig) {
+  state.editingBrowserConfigId = browserConfig?.id;
+  els.browserConfigEditorTitle.textContent = browserConfig ? `Edit ${browserConfig.name ?? browserConfig.id}` : 'New browser config';
+  els.browserConfigIdEditor.value = browserConfig?.id ?? '';
+  els.browserConfigIdEditor.disabled = Boolean(browserConfig);
+  els.browserConfigName.value = browserConfig?.name ?? '';
+  els.browserConfigTargetUrl.value = browserConfig?.targetUrl ?? '';
+  els.browserConfigBrokerUrl.value = browserConfig?.brokerUrl ?? '';
+  els.browserConfigProfile.value = browserConfig?.profile ?? '';
+  els.browserConfigProxyBypassList.value = browserConfig?.proxyBypassList ?? '';
+  els.browserConfigIgnoreSslErrors.checked = Boolean(browserConfig?.ignoreSslErrors);
+  els.browserConfigHeadless.checked = Boolean(browserConfig?.headless);
+  els.browserConfigResetProfile.checked = Boolean(browserConfig?.resetProfile);
+  els.browserConfigEditorError.textContent = '';
+  els.browserConfigEditor.classList.remove('hidden');
+  els.browserConfigIdEditor.focus();
+}
+
+function closeBrowserConfigEditor() {
+  state.editingBrowserConfigId = undefined;
+  els.browserConfigEditor.classList.add('hidden');
+  els.browserConfigEditorError.textContent = '';
+}
+
+async function saveBrowserConfig() {
+  els.browserConfigEditorError.textContent = '';
+  const browserConfig = omitEmpty({
+    id: els.browserConfigIdEditor.value.trim(),
+    name: els.browserConfigName.value.trim(),
+    targetUrl: els.browserConfigTargetUrl.value.trim(),
+    brokerUrl: els.browserConfigBrokerUrl.value.trim(),
+    profile: els.browserConfigProfile.value.trim(),
+    proxyBypassList: els.browserConfigProxyBypassList.value.trim(),
+    ignoreSslErrors: els.browserConfigIgnoreSslErrors.checked,
+    headless: els.browserConfigHeadless.checked,
+    resetProfile: els.browserConfigResetProfile.checked,
+  });
+  if (!browserConfig.id) {
+    els.browserConfigEditorError.textContent = 'ID is required.';
+    return;
+  }
+  try {
+    await fetchJson('/api/pwdev/browser-configs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(browserConfig),
+    });
+    closeBrowserConfigEditor();
+    await refresh();
+  } catch (error) {
+    els.browserConfigEditorError.textContent = error.message;
+  }
+}
+
+async function deleteBrowserConfig(browserConfig) {
+  if (!window.confirm(`Delete browser config ${browserConfig.name ?? browserConfig.id}?`)) return;
+  try {
+    await fetchJson(`/api/pwdev/browser-configs/${encodeURIComponent(browserConfig.id)}`, { method: 'DELETE' });
+    if (state.editingBrowserConfigId === browserConfig.id) closeBrowserConfigEditor();
+    await refresh();
+  } catch (error) {
+    window.alert(`Browser config delete failed: ${error.message}`);
+  }
+}
+
+function omitEmpty(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, child]) => {
+    if (Array.isArray(child)) return child.length > 0;
+    return child !== undefined && child !== null && child !== '';
+  }));
+}
+
+async function startBrowser(browser) {
+  await mutateBrowser(browser, 'start', {});
+}
+
+async function stopBrowser(browser) {
+  await mutateBrowser(browser, 'stop', {});
+}
+
+async function mutateBrowser(browser, action, body) {
+  try {
+    await fetchJson(`/api/pwdev/browsers/${encodeURIComponent(browser.id)}/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    await refresh();
+  } catch (error) {
+    window.alert(`Browser ${action} failed: ${error.message}`);
+  }
+}
+
+async function deleteBrowser(browser) {
+  if (!window.confirm(`Delete browser ${browser.name ?? browser.id}? This stops its session and removes the browser record.`)) return;
+  try {
+    await fetchJson(`/api/pwdev/browsers/${encodeURIComponent(browser.id)}`, { method: 'DELETE' });
+    if (state.editingBrowserId === browser.id) closeBrowserEditor();
+    await refresh();
+  } catch (error) {
+    window.alert(`Browser delete failed: ${error.message}`);
+  }
+}
+
+function browserActions(browser) {
+  const agentLease = browser.occupancy?.state === 'claimed' ? browser.occupancy : undefined;
+  const deleteBlocked = Boolean(agentLease);
+  return actionGroup([
+    { label: 'Edit', onClick: () => openBrowserEditor(browser) },
+    browser.sessionId
+      ? { label: 'Delete session', onClick: () => stopBrowser(browser) }
+      : { label: 'Create session', onClick: () => startBrowser(browser) },
+    {
+      label: 'Delete browser',
+      disabled: deleteBlocked,
+      title: deleteBlocked
+        ? `Cannot delete: occupied by ${agentLease.owner}${agentLease.taskId ? `, task ${agentLease.taskId}` : ''}`
+        : 'Delete browser',
+      onClick: () => deleteBrowser(browser),
+    },
+  ]);
+}
+
+function actionGroup(actions) {
+  return { actionGroup: true, actions: actions.filter(Boolean) };
+}
+
+function createActionButtons(actions = []) {
+  const root = document.createElement('div');
+  root.className = 'table-actions';
+  for (const action of actions) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = action.label;
+    button.disabled = Boolean(action.disabled);
+    if (action.title) button.title = action.title;
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await action.onClick();
+      } finally {
+        button.disabled = false;
+      }
+    });
+    root.append(button);
+  }
+  return root;
+}
+
+function renderBrowsers(browsers) {
+  if (state.browserView === 'table') {
+    els.browsersDiagram.classList.add('hidden');
+    els.browsersTable.classList.remove('hidden');
+    renderTable(els.browsersTable, [
+      'Browser', 'Status', 'Lease', 'App', 'Proxy', 'Browser config', 'Profile', 'Session', 'Actions',
+    ], browsers.map((browser) => [
+      browser.name ?? browser.id,
+      browser.status ?? (browser.sessionId ? 'Occupied' : 'Ready'),
+      formatBrowserOccupancy(browser),
+      appLink(browser.appId),
+      proxyLink(browser.proxyId),
+      browser.browserConfigId,
+      browser.profile,
+      sessionLink(browser.sessionId),
+      browserActions(browser),
+    ]), { rowKeys: browsers.map((browser) => browser.id), rowKeyAttribute: 'browserId' });
+    return;
+  }
+  els.browsersTable.classList.add('hidden');
+  els.browsersDiagram.classList.remove('hidden');
+  renderBrowserDiagram(els.browsersDiagram, browsers);
+}
+
+function renderBrowserDiagram(root, browsers) {
+  root.replaceChildren();
+  if (!browsers.length) {
+    root.append(emptyState('No browsers'));
+    return;
+  }
+  for (const browser of browsers) {
+    const card = document.createElement('article');
+    card.className = 'browser-diagram card';
+    const title = document.createElement('h3');
+    title.textContent = browser.name ?? browser.id;
+    card.append(title);
+    const flow = document.createElement('div');
+    flow.className = 'browser-flow';
+    const nodes = [
+      ['session', browser.sessionId ?? 'No active session', sessionLink(browser.sessionId)],
+      ['proxy', browser.proxyId ?? 'No proxy', proxyLink(browser.proxyId)],
+      ['app', browser.appId ?? 'No app', appLink(browser.appId)],
+    ];
+    for (const [index, [kind, label, link]] of nodes.entries()) {
+      const node = document.createElement(link ? 'a' : 'div');
+      node.className = `browser-node ${kind}`;
+      node.textContent = label;
+      if (link) {
+        node.classList.add('entity-node-link', `${kind}-link`);
+        node.href = link.href;
+        node.addEventListener('click', (event) => {
+          event.preventDefault();
+          link.onClick();
+        });
+      }
+      flow.append(node);
+      if (index < nodes.length - 1) {
+        const arrow = document.createElement('span');
+        arrow.className = 'browser-arrow';
+        arrow.textContent = '→';
+        flow.append(arrow);
+      }
+    }
+    const browserConfigLabel = document.createElement('div');
+    browserConfigLabel.className = 'browser-config-label';
+    browserConfigLabel.textContent = `spawned from ${browser.browserConfigId ?? 'browser config'}`;
+    const occupancyLabel = document.createElement('div');
+    occupancyLabel.className = 'browser-config-label';
+    occupancyLabel.textContent = `occupancy: ${formatBrowserOccupancy(browser)}`;
+    card.append(flow, browserConfigLabel, occupancyLabel, createActionButtons(browserActions(browser).actions));
+    root.append(card);
+  }
 }
 
 function brokerLabel(status) {
@@ -333,89 +724,14 @@ function mergeBrokerStatus({ direct, viaServer }) {
   };
 }
 
-async function renderTopology(snapshot, token) {
-  disposeTopologySimulations();
-  const contexts = buildTopologyContexts(snapshot);
-  els.topologyCards.replaceChildren();
-
-  if (!contexts.length) {
-    els.topologyCards.append(emptyState('No registered apps are present in this snapshot.'));
-  } else {
-    for (const context of contexts) {
-      const card = document.createElement('article');
-      card.className = `card topology-card topology-flow-${context.sessions.length ? 'active' : 'idle'}`;
-
-      const head = document.createElement('div');
-      head.className = 'card-head';
-      const titleWrap = document.createElement('div');
-      const title = document.createElement('h3');
-      title.textContent = context.app.name ?? context.app.id;
-      const subtitle = document.createElement('div');
-      subtitle.className = 'id';
-      subtitle.textContent = context.app.id;
-      titleWrap.append(title, subtitle);
-
-      const badgeRow = document.createElement('div');
-      badgeRow.className = 'badge-row';
-      badgeRow.append(
-        badgeElement(context.sessions.length ? `${context.sessions.length} sessions` : 'No session', context.sessions.length ? 'good' : 'neutral'),
-        badgeElement(context.proxies.length ? `${context.proxies.length} proxies` : 'No proxy', context.proxies.length ? 'good' : 'neutral'),
-        badgeElement(context.networks.length ? `${context.networks.length} networks` : 'No network', context.networks.length ? 'warn' : 'neutral')
-      );
-      head.append(titleWrap, badgeRow);
-
-      const graph = buildTopologyGraph(snapshot, context);
-      const surface = document.createElement('div');
-      surface.className = 'topology-surface';
-      if (state.topologyRenderer === 'd3') {
-        const simulation = renderD3Graph(surface, graph);
-        if (simulation) state.topologySimulations.push(simulation);
-      } else {
-        await renderMermaidGraph(surface, graph, token);
-        if (token !== state.renderToken) return;
-      }
-
-      const summaryTitle = document.createElement('h4');
-      summaryTitle.className = 'topology-subtitle';
-      summaryTitle.textContent = 'Active wiring';
-      const summaryList = document.createElement('ul');
-      summaryList.className = 'topology-summary';
-      if (context.flows.length) {
-        for (const flow of context.flows) {
-          const item = document.createElement('li');
-          item.textContent = flow.summary;
-          summaryList.append(item);
-        }
-      } else {
-        const item = document.createElement('li');
-        item.textContent = `app ${context.app.id} is registered but has no active session, proxy, or network wiring.`;
-        summaryList.append(item);
-      }
-
-      card.append(head, surface, summaryTitle, summaryList);
-      els.topologyCards.append(card);
-    }
-  }
-
-  await renderMarkdown(els.topologyContext, buildSnapshotMarkdown(snapshot), token);
-}
-
-function renderApps(apps, relationships) {
-  renderCards(els.apps, apps.map((app) => ({
-    appId: app.id,
-    title: app.name ?? app.id,
-    subtitle: app.id,
-    badge: related(relationships, 'app', app.id) ? badge('Configured', 'good') : badge('Registered', 'neutral'),
-    rows: {
-      URL: app.appUrl,
-      Branch: app.branch,
-      Network: app.networkId,
-      Proxy: app.proxyId,
-      README: app.readme ? copyableText(app.readme) : undefined,
-      Sessions: related(relationships, 'app', app.id),
-      Worktree: app.worktree,
-    },
-  })));
+function renderApps(apps, relationships, browsers) {
+  renderTable(els.apps, ['App', 'URL', 'Branch', 'Used By', 'README'], apps.map((app) => [
+    app.name ?? app.id,
+    app.appUrl,
+    app.branch,
+    usedBy(browsers, 'appId', app.id),
+    app.readme ? copyableText(app.readme) : undefined,
+  ]), { rowKeys: apps.map((app) => app.id), rowKeyAttribute: 'appId' });
 }
 
 function renderBroker(snapshot) {
@@ -444,58 +760,111 @@ function renderBroker(snapshot) {
   }));
 }
 
-function renderBrowsers(browsers, sessions) {
-  renderCards(els.browsers, browsers.map((browser) => {
-    const relatedSessions = sessions.filter((session) => session.browserId === browser.id);
+function renderBrowserConfigs(browserConfigs, sessions, browsers) {
+  renderTable(els.browserConfigs, ['Browser config', 'Target', 'Profile', 'Used By', 'Active sessions', 'Actions'], browserConfigs.map((browserConfig) => {
+    const relatedSessions = sessions.filter((session) => session.browserConfigId === browserConfig.id);
     const activeSessions = relatedSessions.map((session) => formatBrowserSession(session));
-    const running = relatedSessions.length > 0;
-    return {
-      title: browser.id,
-      subtitle: browser.appId ?? 'Standalone',
-      badge: badge(running ? `${relatedSessions.length} active` : 'Stopped', running ? 'good' : 'neutral'),
-      rows: {
-        Status: running ? 'Running' : 'Stopped',
-        App: appLink(browser.appId),
-        Target: browser.targetUrl,
-        Broker: browser.brokerUrl,
-        Profile: browser.profile ?? browser.id,
-        Network: browser.networkId,
-        Proxy: browser.proxyId,
-        'Active sessions': activeSessions.join(' · ') || 'None',
-        Updated: formatDate(browser.updatedAt),
-      },
-    };
-  }));
+    const usage = browserConfigUsage(browserConfig, browsers, sessions);
+    return [
+      browserConfig.name ?? browserConfig.id,
+      browserConfig.targetUrl,
+      browserConfig.profile ?? browserConfig.id,
+      usedBy(browsers, 'browserConfigId', browserConfig.id),
+      activeSessions.join(' · ') || 'None',
+      browserConfigActions(browserConfig, usage),
+    ];
+  }), { rowKeys: browserConfigs.map((browserConfig) => browserConfig.id), rowKeyAttribute: 'browserConfigId' });
+}
+
+function browserConfigUsage(browserConfig, browsers, sessions) {
+  const references = browsers
+    .filter((browser) => browser.browserConfigId === browserConfig.id)
+    .map((browser) => `browser:${browser.name ?? browser.id}`);
+  const occupiedBy = sessions
+    .filter((session) => session.browserConfigId === browserConfig.id)
+    .map((session) => session.sessionId);
+  return { references, occupiedBy };
+}
+
+function browserConfigActions(browserConfig, usage) {
+  const referenced = usage.references.length > 0;
+  const occupied = usage.occupiedBy.length > 0;
+  return actionGroup([
+    {
+      label: 'Edit',
+      disabled: referenced,
+      title: referenced ? `Cannot edit: ${usage.references.join(', ')}` : 'Edit browser config',
+      onClick: () => openBrowserConfigEditor(browserConfig),
+    },
+    {
+      label: 'Delete config',
+      disabled: referenced || occupied,
+      title: occupied
+        ? `Cannot delete: occupied by ${usage.occupiedBy.join(', ')}`
+        : referenced
+          ? `Cannot delete: referenced by ${usage.references.join(', ')}`
+          : 'Delete browser config',
+      onClick: () => deleteBrowserConfig(browserConfig),
+    },
+  ]);
 }
 
 function formatBrowserSession(session) {
   const scope = session.scope === 'task' ? `task ${session.taskId ?? session.sessionId}` : 'default';
   const profile = session.profile ? `profile ${session.profile}` : undefined;
   const instance = session.browserInstanceId ? `instance ${session.browserInstanceId}` : undefined;
-  return [session.sessionId, scope, profile, instance].filter(Boolean).join(' — ');
+  const lease = formatSessionLease(session);
+  return [session.sessionId, scope, profile, instance, lease].filter(Boolean).join(' — ');
 }
 
-function renderSessions(sessions, relationships) {
-  renderCards(els.sessions, sessions.map((session) => ({
-    title: session.sessionId,
-    subtitle: session.browserId ?? session.appId ?? 'Standalone',
-    badge: session.slot === 'task' ? badge('Task', 'neutral') : badge('Default', 'good'),
-    rows: {
-      Task: session.taskId,
-      Browser: session.browserId,
-      'Related src app': appLink(session.appId),
-      Owner: session.activeTask?.owner,
-      Profile: session.profile,
-      Network: session.networkId,
-      Proxy: session.proxyId,
-      'SSH proxy mapping': session.proxyForwardId ? 'active' : undefined,
-      'Proxy forward': session.proxyForwardId,
-      Instance: session.browserInstanceId,
-      Started: formatDate(session.browserStartedAt),
-      CDP: session.cdpUrl,
-      Related: related(relationships, 'session', session.sessionId),
-    },
-  })));
+function renderSessions(sessions, relationships, browsers) {
+  renderTable(els.sessions, ['Session', 'Browser', 'Browser config', 'App', 'Proxy', 'Profile', 'Lease', 'Used By', 'Instance'], sessions.map((session) => [
+    session.sessionId,
+    session.browserId,
+    session.browserConfigId,
+    session.appId,
+    session.proxyId,
+    session.profile,
+    formatSessionLease(session),
+    usedBy(browsers, 'sessionId', session.sessionId),
+    session.browserInstanceId,
+  ]), { rowKeys: sessions.map((session) => session.sessionId) });
+}
+
+function formatBrowserOccupancy(browser) {
+  if (browser.status !== 'occupied' && !browser.sessionId) return 'Ready';
+  const occupancy = browser.occupancy;
+  if (!occupancy || occupancy.state === 'unclaimed') return 'Unclaimed';
+  return formatLeaseDetails(occupancy);
+}
+
+function formatSessionLease(session) {
+  if (!session?.lease) return session?.sessionId ? 'Unclaimed' : undefined;
+  return formatLeaseDetails(session.lease);
+}
+
+function formatLeaseDetails(lease) {
+  return [
+    lease.owner,
+    lease.agentId ? `agent ${lease.agentId}` : undefined,
+    lease.taskId ? `task ${lease.taskId}` : undefined,
+    lease.heartbeatAt ? `heartbeat ${formatTime(lease.heartbeatAt)}` : undefined,
+  ].filter(Boolean).join(' · ');
+}
+
+function formatTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+}
+
+function sessionLink(sessionId) {
+  if (!sessionId) return undefined;
+  return {
+    link: true,
+    text: sessionId,
+    href: '#sessions',
+    onClick: () => showSession(sessionId),
+  };
 }
 
 function appLink(appId) {
@@ -505,6 +874,16 @@ function appLink(appId) {
     text: appId,
     href: '#apps',
     onClick: () => showApp(appId),
+  };
+}
+
+function proxyLink(proxyId) {
+  if (!proxyId) return undefined;
+  return {
+    link: true,
+    text: proxyId,
+    href: '#proxies',
+    onClick: () => showProxy(proxyId),
   };
 }
 
@@ -567,757 +946,205 @@ async function probeNetwork(networkId) {
   }
 }
 
-function renderProxies(proxies, relationships) {
-  renderCards(els.proxies, proxies.map((proxy) => ({
-    title: proxy.name ?? proxy.id,
-    subtitle: proxy.id,
-    badge: badge(proxy.running === true ? 'Running' : proxy.running === false ? 'Stopped' : proxy.managed ? 'Managed' : proxy.kind ?? 'Proxy', proxy.running === true ? 'good' : proxy.running === false ? 'bad' : 'neutral'),
-    rows: {
-      App: proxy.appId,
-      Status: proxy.running === true ? 'Running' : proxy.running === false ? 'Stopped' : 'Unknown',
-      Task: proxy.taskId,
-      Owner: proxy.owner,
-      Purpose: proxy.purpose,
-      URL: proxy.proxyUrl,
-      GUI: proxy.guiUrl ? {
-        link: true,
-        text: proxy.guiUrl,
-        href: `/proxy/${encodeURIComponent(proxy.id)}/gui/`,
-        onClick: () => window.open(
-          `/proxy/${encodeURIComponent(proxy.id)}/gui/`,
-          '_blank',
-          'noopener,noreferrer'
-        ),
-      } : undefined,
-      'Broker forward': proxy.brokerProxyForwardId,
-      Labels: joinList(proxy.labels),
-      Related: related(relationships, 'proxy', proxy.id),
-      Updated: formatDate(proxy.updatedAt),
-    },
-  })));
+function openProxyEditor(proxy) {
+  state.editingProxyId = proxy?.id;
+  els.proxyEditorTitle.textContent = proxy ? `Edit ${proxy.name ?? proxy.id}` : 'New proxy';
+  els.proxyId.value = proxy?.id ?? '';
+  els.proxyId.disabled = Boolean(proxy);
+  els.proxyName.value = proxy?.name ?? '';
+  els.proxyKind.value = proxy?.kind ?? '';
+  els.proxyUrl.value = proxy?.proxyUrl ?? '';
+  els.proxyForwardId.value = proxy?.brokerProxyForwardId ?? '';
+  els.proxyGuiUrl.value = proxy?.guiUrl ?? '';
+  els.proxyOwner.value = proxy?.owner ?? '';
+  els.proxyTaskId.value = proxy?.taskId ?? '';
+  els.proxyPurpose.value = proxy?.purpose ?? '';
+  els.proxyLabels.value = (proxy?.labels ?? []).join(', ');
+  els.proxyEditorError.textContent = '';
+  els.proxyEditor.classList.remove('hidden');
+  els.proxyId.focus();
 }
 
-async function loadVisualizers() {
-  const results = await Promise.allSettled([
-    import('https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js'),
-    import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'),
-    import('https://cdn.jsdelivr.net/npm/d3@7/+esm'),
-  ]);
-
-  const visualizers = {};
-  const [markedResult, mermaidResult, d3Result] = results;
-
-  if (markedResult.status === 'fulfilled') {
-    const { marked } = markedResult.value;
-    marked.setOptions({ gfm: true, breaks: true });
-    visualizers.marked = marked;
-  } else {
-    console.warn('Failed to load marked renderer', markedResult.reason);
-  }
-
-  if (mermaidResult.status === 'fulfilled') {
-    const mermaid = mermaidResult.value.default ?? mermaidResult.value;
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: 'loose',
-      theme: 'neutral',
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-      themeVariables: {
-        fontSize: '6px',
-      },
-    });
-    visualizers.mermaid = mermaid;
-  } else {
-    console.warn('Failed to load mermaid renderer', mermaidResult.reason);
-  }
-
-  if (d3Result.status === 'fulfilled') {
-    visualizers.d3 = d3Result.value;
-  } else {
-    console.warn('Failed to load d3 renderer', d3Result.reason);
-  }
-
-  return visualizers;
+function closeProxyEditor() {
+  state.editingProxyId = undefined;
+  els.proxyEditor.classList.add('hidden');
+  els.proxyEditorError.textContent = '';
 }
 
-async function renderMarkdown(root, markdown, token) {
-  if (!state.visualizers?.marked) {
-    root.replaceChildren();
-    const fallback = document.createElement('pre');
-    fallback.className = 'markdown-fallback';
-    fallback.textContent = markdown;
-    root.append(fallback);
-    return;
-  }
-
-  root.innerHTML = state.visualizers.marked.parse(markdown);
-  const mermaidBlocks = [...root.querySelectorAll('code.language-mermaid')];
-  for (const [index, code] of mermaidBlocks.entries()) {
-    if (token !== state.renderToken) return;
-    const pre = code.parentElement;
-    if (!pre) continue;
-    const host = document.createElement('div');
-    host.className = 'mermaid-host';
-    pre.replaceWith(host);
-    try {
-      const id = `pw-dev-topology-${token}-${index}`;
-      const { svg } = await state.visualizers.mermaid.render(id, code.textContent);
-      if (token !== state.renderToken) return;
-      host.innerHTML = svg;
-    } catch (error) {
-      host.textContent = `Mermaid render failed: ${error.message}`;
-      host.classList.add('mermaid-error');
-    }
-  }
-}
-
-function buildSnapshotMarkdown(snapshot) {
-  const lines = [
-    '### Snapshot Context',
-    '',
-    `- pw-dev server: ${snapshot.status.body?.serverUrl ?? state.pwDevUrl}`,
-    `- broker topology: ${brokerLabel(snapshot.brokerStatus)}`,
-    `- managed proxies: ${snapshot.proxies.length}`,
-    `- broker sessions: ${snapshot.sessions.length}`,
-  ];
-
-  if (snapshot.errors.length) {
-    lines.push('', '### Fetch Warnings', '');
-    for (const error of snapshot.errors) {
-      lines.push(`- ${error.url ?? error.path}: ${error.error}`);
-    }
-  }
-
-  return lines.join('\n');
-}
-
-function buildTopologyContexts(snapshot) {
-  const proxyById = new Map(snapshot.proxies.map((proxy) => [proxy.id, proxy]));
-  const networkById = new Map(snapshot.networks.map((network) => [network.id, network]));
-  return snapshot.apps.map((app) => {
-    const sessions = snapshot.sessions.filter((session) => session.appId === app.id);
-    const networkIds = new Set([
-      app.networkId,
-      ...sessions.map((session) => session.networkId),
-    ].filter(Boolean));
-    const networks = [...networkIds].map((id) => networkById.get(id)).filter(Boolean);
-    const flowSeed = sessions.length ? sessions : [undefined];
-    const flows = flowSeed.map((session) => {
-      const network = session ? networkById.get(session.networkId ?? app.networkId) : networkById.get(app.networkId);
-      const proxyCandidates = selectFlowProxies({
-        app,
-        session,
-        network,
-        proxies: snapshot.proxies,
-        proxyById,
-      });
-      return {
-        app,
-        session,
-        network,
-        proxies: proxyCandidates,
-        summary: summarizeFlow({ app, session, network, proxies: proxyCandidates }),
-      };
-    });
-
-    const proxies = new Map();
-    for (const flow of flows) {
-      for (const proxy of flow.proxies) proxies.set(proxy.id, proxy);
-    }
-    for (const proxy of snapshot.proxies) {
-      if (proxy.appId === app.id) proxies.set(proxy.id, proxy);
-    }
-
-    return {
-      app,
-      sessions,
-      networks,
-      proxies: [...proxies.values()],
-      flows,
-    };
+async function saveProxy() {
+  els.proxyEditorError.textContent = '';
+  const proxy = omitEmpty({
+    id: els.proxyId.value.trim(),
+    name: els.proxyName.value.trim(),
+    kind: els.proxyKind.value.trim(),
+    proxyUrl: els.proxyUrl.value.trim(),
+    brokerProxyForwardId: els.proxyForwardId.value.trim(),
+    guiUrl: els.proxyGuiUrl.value.trim(),
+    owner: els.proxyOwner.value.trim(),
+    taskId: els.proxyTaskId.value.trim(),
+    purpose: els.proxyPurpose.value.trim(),
+    labels: els.proxyLabels.value.split(',').map((value) => value.trim()).filter(Boolean),
   });
-}
-
-function buildTopologyGraph(snapshot, context) {
-  const nodeRegistry = new Map();
-  const edges = [];
-  const seenEdges = new Set();
-
-  const addNode = (kind, key, label, tone) => {
-    if (!key) return undefined;
-    const entityKey = `${kind}:${key}`;
-    const existing = nodeRegistry.get(entityKey);
-    if (existing) {
-      existing.labels.add(label);
-      return existing.id;
-    }
-    const node = {
-      id: mermaidNodeId(kind, key),
-      kind,
-      tone,
-      labels: new Set([label]),
-    };
-    nodeRegistry.set(entityKey, node);
-    return node.id;
-  };
-  const addEdge = (from, to, label, style = 'solid', bidirectional = false) => {
-    if (!from || !to) return;
-    const key = `${from}|${to}|${label}|${style}|${bidirectional}`;
-    if (seenEdges.has(key)) return;
-    seenEdges.add(key);
-    edges.push({ from, to, label, style, bidirectional });
-  };
-
-  const brokerNode = addNode(
-    'broker',
-    canonicalBrokerKey(snapshot.brokerStatus),
-    formatBrokerNodeLabel(snapshot, context.sessions),
-    'broker-node'
-  );
-
-  const app = context.app;
-  const appNode = addNode('app', canonicalAppKey(app), formatAppNodeLabel(app, context.sessions), 'app-node');
-  for (const proxy of context.proxies) {
-    addNode(
-      'proxy',
-      canonicalProxyKey(proxy),
-      formatProxyNodeLabel(proxy),
-      'proxy-node'
-    );
-  }
-
-  for (const network of context.networks) {
-    addNode(
-      'network',
-      canonicalNetworkKey(network),
-      `Network\n${network.id}\n${formatNetworkLabel(network)}`,
-      'network-node'
-    );
-  }
-
-  for (const flow of context.flows) {
-    const networkNode = flow.network
-      ? addNode('network', canonicalNetworkKey(flow.network), `Network\n${flow.network.id}\n${formatNetworkLabel(flow.network)}`, 'network-node')
-      : undefined;
-
-    const flowStyle = flow.session ? 'solid' : 'dotted';
-    const bidirectional = Boolean(flow.session);
-    let previousNode = appNode;
-    for (const proxy of flow.proxies) {
-      const proxyNode = addNode(
-        'proxy',
-        canonicalProxyKey(proxy),
-        formatProxyNodeLabel(proxy),
-        'proxy-node'
-      );
-      addEdge(previousNode, proxyNode, undefined, flowStyle, bidirectional);
-      previousNode = proxyNode;
-    }
-
-    if (networkNode) {
-      addEdge(previousNode, networkNode, undefined, flowStyle, bidirectional);
-      previousNode = networkNode;
-    }
-    addEdge(previousNode, brokerNode, undefined, flowStyle, bidirectional);
-  }
-
-  return {
-    nodes: [...nodeRegistry.values()].map((node) => ({
-      ...node,
-      label: mergeNodeLabels(node.labels),
-    })),
-    edges,
-  };
-}
-
-async function renderMermaidGraph(root, graph, token) {
-  if (!state.visualizers?.mermaid) {
-    root.replaceChildren(fallbackMessage('Mermaid renderer unavailable.'));
+  if (!proxy.id || (!proxy.proxyUrl && !proxy.brokerProxyForwardId)) {
+    els.proxyEditorError.textContent = 'ID and a proxy URL or broker forward ID are required.';
     return;
   }
-
-  const host = document.createElement('div');
-  host.className = 'mermaid-host';
-  root.replaceChildren(host);
+  if (proxy.proxyUrl && proxy.brokerProxyForwardId) {
+    els.proxyEditorError.textContent = 'Choose a proxy URL or broker forward ID, not both.';
+    return;
+  }
   try {
-    const id = `pw-dev-topology-${token}-${Math.random().toString(36).slice(2, 8)}`;
-    const { svg } = await state.visualizers.mermaid.render(id, buildMermaidDiagram(graph));
-    if (token !== state.renderToken) return;
-    host.innerHTML = svg;
+    await fetchJson('/api/pwdev/proxies', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(proxy),
+    });
+    closeProxyEditor();
+    await refresh();
   } catch (error) {
-    host.textContent = `Mermaid render failed: ${error.message}`;
-    host.classList.add('mermaid-error');
+    els.proxyEditorError.textContent = error.message;
   }
 }
 
-function renderD3Graph(root, graph) {
-  if (!state.visualizers?.d3) {
-    root.replaceChildren(fallbackMessage('D3 renderer unavailable.'));
-    return undefined;
-  }
-
-  const d3 = state.visualizers.d3;
-  const container = document.createElement('div');
-  container.className = 'd3-host';
-  root.replaceChildren(container);
-
-  const width = 1100;
-  const height = Math.max(520, 180 + graph.nodes.length * 56);
-  const nodeBox = { width: 192, height: 74, radius: 18 };
-  const nodes = graph.nodes.map((node) => ({ ...node }));
-  const links = graph.edges.map((edge) => ({ ...edge }));
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const layoutIndex = buildD3LayoutIndex(nodes);
-  for (const link of links) {
-    link.source = nodeById.get(link.from);
-    link.target = nodeById.get(link.to);
-  }
-
-  for (const node of nodes) {
-    node.x = xTargetForNode(node, width);
-    node.y = yTargetForNode(node, layoutIndex, height);
-  }
-
-  const color = {
-    'dev-node': '#f6c344',
-    'app-node': '#4f87c5',
-    'proxy-node': '#24a061',
-    'network-node': '#d58b29',
-    'broker-node': '#6d7a89',
-    'session-node': '#8d60d1',
-  };
-  const stroke = {
-    'dev-node': '#9d7000',
-    'app-node': '#214d7d',
-    'proxy-node': '#15603b',
-    'network-node': '#8d4f05',
-    'broker-node': '#35414d',
-    'session-node': '#5b35a6',
-  };
-  const markerId = `pw-dev-arrow-${Math.random().toString(36).slice(2, 8)}`;
-
-  const svg = d3.create('svg')
-    .attr('viewBox', [0, 0, width, height].join(' '))
-    .attr('aria-label', 'Topology graph');
-
-  const defs = svg.append('defs');
-  defs.append('marker')
-    .attr('id', markerId)
-    .attr('viewBox', '0 -5 10 10')
-    .attr('refX', 12)
-    .attr('refY', 0)
-    .attr('markerWidth', 7)
-    .attr('markerHeight', 7)
-    .attr('orient', 'auto-start-reverse')
-    .append('path')
-    .attr('d', 'M0,-5L10,0L0,5')
-    .attr('fill', '#708090');
-
-  const scene = svg.append('g');
-  const zoom = d3.zoom()
-    .scaleExtent([0.5, 1.8])
-    .on('zoom', (event) => {
-      scene.attr('transform', event.transform);
-    });
-  svg.call(zoom);
-
-  const link = scene.append('g')
-    .attr('class', 'd3-links')
-    .selectAll('g')
-    .data(links)
-    .join('g');
-
-  const linkPath = link.append('path')
-    .attr('fill', 'none')
-    .attr('stroke', '#9eabb8')
-    .attr('stroke-width', (edge) => edge.bidirectional ? 3 : 1.8)
-    .attr('stroke-dasharray', (edge) => edge.style === 'dotted' ? '5 5' : undefined)
-    .attr('stroke-linecap', 'round')
-    .attr('marker-end', `url(#${markerId})`)
-    .attr('marker-start', (edge) => edge.bidirectional ? `url(#${markerId})` : undefined);
-
-  const linkLabel = link.append('text')
-    .attr('class', 'd3-edge-label')
-    .attr('text-anchor', 'middle')
-    .attr('dominant-baseline', 'central')
-    .text((edge) => edge.label);
-
-  const node = scene.append('g')
-    .attr('class', 'd3-nodes')
-    .selectAll('g')
-    .data(nodes)
-    .join('g')
-    .attr('class', 'd3-node')
-    .call(d3.drag()
-      .on('start', dragStarted)
-      .on('drag', dragged)
-      .on('end', dragEnded));
-
-  node.append('rect')
-    .attr('x', -(nodeBox.width / 2))
-    .attr('y', -(nodeBox.height / 2))
-    .attr('width', nodeBox.width)
-    .attr('height', nodeBox.height)
-    .attr('rx', nodeBox.radius)
-    .attr('fill', (item) => color[item.tone] ?? '#d7dee6')
-    .attr('fill-opacity', 0.16)
-    .attr('stroke', (item) => stroke[item.tone] ?? '#52606d')
-    .attr('stroke-width', 2);
-
-  node.append('text')
-    .attr('class', 'd3-node-label')
-    .attr('text-anchor', 'middle')
-    .selectAll('tspan')
-    .data((item) => item.label.split('\n').slice(0, 4).map((line, index) => ({ line, index })))
-    .join('tspan')
-    .attr('x', 0)
-    .attr('y', ({ index }) => -12 + index * 15)
-    .text(({ line }) => line);
-
-  const simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id((item) => item.id).distance(220).strength(0.7))
-    .force('charge', d3.forceManyBody().strength(-1450))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collide', d3.forceCollide().radius(Math.max(nodeBox.width, nodeBox.height)))
-    .force('x', d3.forceX((item) => xTargetForNode(item, width)).strength(0.32))
-    .force('y', d3.forceY((item) => yTargetForNode(item, layoutIndex, height)).strength(0.16))
-    .on('tick', ticked);
-
-  ticked();
-  container.append(svg.node());
-
-  function ticked() {
-    link.each((edge) => {
-      edge.geometry = d3LinkPath(edge, nodeBox);
-    });
-
-    linkPath.attr('d', (edge) => edge.geometry.path);
-
-    linkLabel
-      .attr('x', (edge) => edge.geometry.label.x)
-      .attr('y', (edge) => edge.geometry.label.y);
-
-    node.attr('transform', (item) => `translate(${item.x},${item.y})`);
-  }
-
-  function dragStarted(event) {
-    if (!event.active) simulation.alphaTarget(0.2).restart();
-    event.subject.fx = event.subject.x;
-    event.subject.fy = event.subject.y;
-  }
-
-  function dragged(event) {
-    event.subject.fx = event.x;
-    event.subject.fy = event.y;
-  }
-
-  function dragEnded(event) {
-    if (!event.active) simulation.alphaTarget(0);
-    event.subject.fx = null;
-    event.subject.fy = null;
-  }
-
-  return simulation;
-}
-
-function buildD3LayoutIndex(nodes) {
-  const grouped = new Map();
-  for (const node of nodes) {
-    if (!grouped.has(node.kind)) grouped.set(node.kind, []);
-    grouped.get(node.kind).push(node);
-  }
-  const index = new Map();
-  for (const [kind, group] of grouped.entries()) {
-    group.sort((left, right) => left.label.localeCompare(right.label));
-    group.forEach((node, position) => {
-      index.set(node.id, { kind, position, total: group.length });
-    });
-  }
-  return index;
-}
-
-function xTargetForNode(node, width) {
-  const laneOrder = ['dev', 'app', 'proxy', 'network', 'broker', 'session'];
-  const laneIndex = Math.max(0, laneOrder.indexOf(node.kind));
-  return ((laneIndex + 1) / (laneOrder.length + 1)) * width;
-}
-
-function yTargetForNode(node, layoutIndex, height) {
-  const layout = layoutIndex.get(node.id);
-  if (!layout || layout.total <= 1) return height / 2;
-  const top = 96;
-  const bottom = height - 96;
-  const span = bottom - top;
-  return top + (layout.position * span) / (layout.total - 1);
-}
-
-function d3LinkPath(edge, nodeBox) {
-  const start = d3NodeAnchor(edge.source, edge.target, nodeBox);
-  const end = d3NodeAnchor(edge.target, edge.source, nodeBox);
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const distance = Math.hypot(dx, dy) || 1;
-  const normalX = -dy / distance;
-  const normalY = dx / distance;
-  const curveSign = d3CurveSign(edge, dx, dy);
-  const curveOffset = Math.min(70, Math.max(28, distance * 0.16)) * curveSign;
-  const control = {
-    x: (start.x + end.x) / 2 + normalX * curveOffset,
-    y: (start.y + end.y) / 2 + normalY * curveOffset,
-  };
-  const midpoint = d3QuadraticPoint(start, control, end, 0.5);
-  return {
-    path: `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`,
-    label: {
-      x: midpoint.x + normalX * curveSign * 12,
-      y: midpoint.y + normalY * curveSign * 12,
-    },
-  };
-}
-
-function d3NodeAnchor(source, target, nodeBox) {
-  const halfWidth = nodeBox.width / 2;
-  const halfHeight = nodeBox.height / 2;
-  const dx = (target.x ?? source.x) - (source.x ?? 0);
-  const dy = (target.y ?? source.y) - (source.y ?? 0);
-  if (!dx && !dy) {
-    return { x: source.x ?? 0, y: source.y ?? 0 };
-  }
-  const scale = Math.max(Math.abs(dx) / halfWidth, Math.abs(dy) / halfHeight);
-  return {
-    x: source.x + dx / scale,
-    y: source.y + dy / scale,
-  };
-}
-
-function d3CurveSign(edge, dx, dy) {
-  if (Math.abs(dy) > 24) return dy > 0 ? -1 : 1;
-  return hashString(`${edge.from}|${edge.to}|${edge.label}`) % 2 === 0 ? -1 : 1;
-}
-
-function d3QuadraticPoint(start, control, end, t) {
-  const inverse = 1 - t;
-  return {
-    x: (inverse * inverse * start.x) + (2 * inverse * t * control.x) + (t * t * end.x),
-    y: (inverse * inverse * start.y) + (2 * inverse * t * control.y) + (t * t * end.y),
-  };
-}
-
-function hashString(value) {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = ((hash << 5) - hash) + value.charCodeAt(index);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
-function disposeTopologySimulations() {
-  for (const simulation of state.topologySimulations) {
-    simulation.stop();
-  }
-  state.topologySimulations = [];
-}
-
-function buildMermaidDiagram(graph) {
-  const nodes = graph.nodes.map((node) => (
-    `  ${node.id}["${escapeMermaidLabel(node.label)}"]`
-  ));
-  const edges = graph.edges.map((edge) => {
-    if (edge.style === 'dotted') {
-      return edge.label
-        ? `  ${edge.from} -. ${escapeMermaidLabel(edge.label)} .-> ${edge.to}`
-        : `  ${edge.from} -.-> ${edge.to}`;
-    }
-    if (edge.bidirectional) {
-      return edge.label
-        ? `  ${edge.from} <==>|${escapeMermaidLabel(edge.label)}| ${edge.to}`
-        : `  ${edge.from} <==> ${edge.to}`;
-    }
-    return edge.label
-      ? `  ${edge.from} -->|${escapeMermaidLabel(edge.label)}| ${edge.to}`
-      : `  ${edge.from} --> ${edge.to}`;
-  });
-  const classes = graph.nodes.map((node) => `  class ${node.id} ${node.tone};`);
-
-  return [
-    'flowchart LR',
-    ...nodes,
-    '',
-    ...edges,
-    '',
-    '  classDef dev-node fill:#fff2cc,stroke:#c89b00,color:#5b4100;',
-    '  classDef app-node fill:#e7f0ff,stroke:#386cb0,color:#12314f;',
-    '  classDef proxy-node fill:#e7f7ef,stroke:#17824d,color:#0f4a2d;',
-    '  classDef network-node fill:#fff4e5,stroke:#cc7a00,color:#6a3a00;',
-    '  classDef broker-node fill:#eef0f4,stroke:#49586b,color:#1c2630;',
-    '  classDef session-node fill:#f3ebff,stroke:#7a4fc2,color:#41216f;',
-    ...classes,
-  ].join('\n');
-}
-
-function mergeNodeLabels(labels) {
-  const values = [...labels];
-  if (values.length <= 1) return values[0] ?? '';
-  return values.join('\n---\n');
-}
-
-function selectFlowProxies({ app, session, network, proxies, proxyById }) {
-  const selected = new Map();
-  const add = (proxy) => {
-    if (proxy?.id) selected.set(proxy.id, proxy);
-  };
-
-  add(proxyById.get(session?.proxyId));
-  add(proxyById.get(app?.proxyId));
-
-  if (network) {
-    for (const proxy of proxies) {
-      if (proxyMatchesNetwork(proxy, network)) add(proxy);
-    }
-  }
-
-  return [...selected.values()];
-}
-
-function proxyMatchesNetwork(proxy, network) {
-  if (!proxy?.proxyUrl || !network?.proxy) return false;
-  const proxyPort = portFromUrl(proxy.proxyUrl);
-  if (network.proxy.mode === 'direct' || network.proxy.mode === 'broker-local') {
-    return network.proxy.server === proxy.proxyUrl;
-  }
-  if (network.proxy.mode === 'ssh-peer') {
-    return proxyPort !== undefined && proxyPort === network.proxy.remotePort;
-  }
-  if (network.resolved?.proxyForwardId && proxy.brokerProxyForwardId) {
-    return network.resolved.proxyForwardId === proxy.brokerProxyForwardId;
-  }
-  return false;
-}
-
-function summarizeFlow({ app, session, network, proxies }) {
-  const parts = [];
-  if (app) {
-    parts.push(`app ${app.id}`);
-  }
-  if (proxies.length) {
-    parts.push(`proxy ${proxies.map((proxy) => proxy.id).join(' + ')}`);
-  }
-  if (network) {
-    parts.push(`network ${network.id} (${formatNetworkLabel(network)})`);
-  }
-  if (session) {
-    parts.push(`session ${session.sessionId}`);
-  }
-  return parts.join(' -> ');
-}
-
-function topologyFlowCount(snapshot) {
-  return snapshot.apps.length || 1;
-}
-
-function formatAppNodeLabel(app, sessions = []) {
-  const endpoint = app.appUrl ?? 'no app URL';
-  const sessionLabel = sessions.length ? `\nSession: app ⇔ browser` : '';
-  return `App\n${app.id}\n${endpoint}${sessionLabel}`;
-}
-
-function formatProxyNodeLabel(proxy) {
-  const stateLabel = proxy.running === true ? 'running' : proxy.running === false ? 'stopped' : 'unknown';
-  return `Proxy\n${proxy.id}\n${proxy.proxyUrl ?? proxy.brokerProxyForwardId ?? 'no proxyUrl'}\n${stateLabel}`;
-}
-
-function formatNetworkLabel(network) {
-  if (!network?.proxy) return 'no proxy config';
-  if (network.proxy.mode === 'ssh-peer') {
-    const local = network.proxy.localPort ?? portFromUrl(network.resolved?.proxyServer);
-    return `ssh-peer ${network.proxy.remotePort}${local ? ` -> ${local}` : ''}`;
-  }
-  if (network.proxy.mode === 'direct' || network.proxy.mode === 'broker-local') {
-    return `${network.proxy.mode} ${network.proxy.server}`;
-  }
-  return network.proxy.mode;
-}
-
-function networkProxyLabel(network, proxy) {
-  if (!network?.proxy) return 'network';
-  if (network.proxy.mode === 'ssh-peer') {
-    const localPort = network.proxy.localPort ?? portFromUrl(network.resolved?.proxyServer);
-    return `${proxy.proxyUrl} | ${network.proxy.remotePort}${localPort ? ` -> ${localPort}` : ''}`;
-  }
-  if (network.proxy.server) return network.proxy.server;
-  return network.proxy.mode;
-}
-
-function portFromUrl(value) {
-  if (!value) return undefined;
+async function deleteProxy(proxy) {
+  if (!window.confirm(`Delete proxy ${proxy.name ?? proxy.id}?`)) return;
   try {
-    const url = new URL(value);
-    return url.port ? Number(url.port) : undefined;
-  } catch {
-    return undefined;
+    await fetchJson(`/api/pwdev/proxies/${encodeURIComponent(proxy.id)}`, { method: 'DELETE' });
+    if (state.editingProxyId === proxy.id) closeProxyEditor();
+    await refresh();
+  } catch (error) {
+    window.alert(`Proxy delete failed: ${error.message}`);
   }
 }
 
-function mermaidNodeId(prefix, value) {
-  return `${prefix}_${String(value).replace(/[^A-Za-z0-9_]/g, '_')}`;
+function proxyUsage(proxy, browsers, apps, sessions) {
+  const browserReferences = browsers
+    .filter((browser) => browser.proxyId === proxy.id || browser.proxyIds?.includes(proxy.id))
+    .map((browser) => `browser:${browser.name ?? browser.id}`);
+  const appReferences = apps
+    .filter((app) => app.proxyId === proxy.id)
+    .map((app) => `app:${app.name ?? app.id}`);
+  const occupiedBy = sessions
+    .filter((session) => session.proxyId === proxy.id)
+    .map((session) => session.sessionId);
+  return {
+    references: [...browserReferences, ...appReferences],
+    occupiedBy,
+  };
 }
 
-function canonicalAppKey(app) {
-  if (app?.appUrl || app?.worktree || app?.profile) {
-    return `app:${app?.appUrl ?? ''}:${app?.worktree ?? ''}:${app?.profile ?? ''}`;
+function proxyActions(proxy, usage) {
+  const referenced = usage.references.length > 0;
+  const occupied = usage.occupiedBy.length > 0;
+  return actionGroup([
+    {
+      label: 'Edit',
+      disabled: referenced,
+      title: referenced ? `Cannot edit: ${usage.references.join(', ')}` : 'Edit proxy',
+      onClick: () => openProxyEditor(proxy),
+    },
+    {
+      label: 'Delete proxy',
+      disabled: referenced || occupied,
+      title: occupied
+        ? `Cannot delete: occupied by ${usage.occupiedBy.join(', ')}`
+        : referenced
+          ? `Cannot delete: referenced by ${usage.references.join(', ')}`
+          : 'Delete proxy',
+      onClick: () => deleteProxy(proxy),
+    },
+  ]);
+}
+
+function renderProxies(proxies, relationships, browsers, apps, sessions) {
+  renderTable(els.proxies, ['Proxy', 'Status', 'URL', 'GUI URL', 'Owner', 'Purpose', 'Referenced By', 'Occupied By', 'Actions'], proxies.map((proxy) => {
+    const usage = proxyUsage(proxy, browsers, apps, sessions);
+    return [
+    proxy.name ?? proxy.id,
+    usage.occupiedBy.length ? 'Occupied' : proxy.running === true ? 'Running' : proxy.running === false ? 'Stopped' : proxy.managed ? 'Managed' : proxy.kind ?? 'Proxy',
+    proxy.proxyUrl,
+    proxy.guiUrl ? proxyGuiLink(proxy.id) : undefined,
+    proxy.owner,
+    proxy.purpose,
+    usage.references.join(', ') || '—',
+    usage.occupiedBy.join(', ') || '—',
+    proxyActions(proxy, usage),
+  ];
+  }), { rowKeys: proxies.map((proxy) => proxy.id), rowKeyAttribute: 'proxyId' });
+}
+
+function proxyGuiLink(proxyId) {
+  const href = `/proxy/${encodeURIComponent(proxyId)}/gui/`;
+  return {
+    link: true,
+    newTab: true,
+    text: new URL(href, window.location.origin).href,
+    href,
+  };
+}
+
+function usedBy(browsers = [], field, id) {
+  return browsers
+    .filter((browser) => browser?.[field] === id)
+    .map((browser) => browser.name ?? browser.id)
+    .join(', ') || '—';
+}
+
+function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'sessionId' } = {}) {
+  root.replaceChildren();
+  if (!rows.length) {
+    root.append(emptyState());
+    return;
   }
-  return `id:${app?.id ?? ''}`;
-}
-
-function canonicalProxyKey(proxy) {
-  if (proxy?.proxyUrl || proxy?.brokerProxyForwardId) {
-    return `proxy:${proxy?.proxyUrl ?? ''}:${proxy?.brokerProxyForwardId ?? ''}`;
+  const table = document.createElement('table');
+  table.className = 'entity-table';
+  const head = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  for (const column of columns) {
+    const cell = document.createElement('th');
+    cell.scope = 'col';
+    cell.textContent = column;
+    headerRow.append(cell);
   }
-  return `id:${proxy?.id ?? ''}`;
-}
-
-function canonicalNetworkKey(network) {
-  if (network?.proxy || network?.resolved) {
-    return `network:${network?.proxy?.mode ?? ''}:${network?.proxy?.server ?? ''}:${network?.proxy?.remotePort ?? ''}:${network?.proxy?.localPort ?? ''}:${network?.resolved?.proxyForwardId ?? ''}:${network?.resolved?.proxyServer ?? ''}`;
+  head.append(headerRow);
+  table.append(head);
+  const body = document.createElement('tbody');
+  for (const [index, row] of rows.entries()) {
+    const tableRow = document.createElement('tr');
+    if (rowKeys[index]) {
+      tableRow.dataset[rowKeyAttribute] = rowKeys[index];
+      tableRow.tabIndex = -1;
+    }
+    for (const value of row) {
+      const cell = document.createElement('td');
+      if (isActionGroup(value)) {
+        cell.append(createActionButtons(value.actions));
+      } else if (isCardLink(value)) {
+        const link = document.createElement('a');
+        link.className = 'entity-link mono';
+        link.href = value.href ?? '#';
+        link.textContent = value.text;
+        if (value.newTab) {
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+        } else {
+          link.addEventListener('click', (event) => {
+            event.preventDefault();
+            value.onClick();
+          });
+        }
+        cell.append(link);
+      } else {
+        cell.textContent = isCopyableText(value)
+          ? value.text
+          : value === undefined || value === null || value === '' ? '—' : String(value);
+      }
+      tableRow.append(cell);
+    }
+    body.append(tableRow);
   }
-  return `id:${network?.id ?? ''}`;
-}
-
-function canonicalSessionKey(session) {
-  if (session?.browserInstanceId) return `instance:${session.browserInstanceId}`;
-  if (session?.cdpUrl) return `cdp:${session.cdpUrl}`;
-  return `session:${session?.sessionId ?? ''}:${session?.appId ?? ''}:${session?.profile ?? ''}`;
-}
-
-function canonicalBrokerKey(status) {
-  return `broker:${status?.topology?.mode ?? 'unknown'}:${status?.topology?.remote ? 'remote' : 'local'}:${status?.topology?.ssh?.target ?? ''}`;
-}
-
-function formatBrokerNodeLabel(snapshot, sessions = []) {
-  const status = snapshot.brokerStatus;
-  if (!status) return 'Broker\nunreachable';
-  const lines = ['Broker'];
-  lines.push(status.topology?.mode ? `${status.topology.mode}${status.topology?.remote ? ' remote' : ''}` : 'reachable');
-  if (sessions.length) lines.push('Session: app ⇔ browser');
-  if (status.instances?.length) lines.push(`${status.instances.length} browser${status.instances.length === 1 ? '' : 's'}`);
-  if (status.topology?.ssh?.target) lines.push(status.topology.ssh.target);
-  const remoteMachine = status.topology?.ssh?.remoteMachine;
-  if (remoteMachine?.hostname) lines.push(remoteMachine.hostname);
-  if (remoteMachine?.addresses?.length) lines.push(remoteMachine.addresses.join(', '));
-  if (remoteMachine?.platform || remoteMachine?.release) {
-    lines.push([remoteMachine.platform, remoteMachine.release].filter(Boolean).join(' '));
-  }
-  if (status.state === 'idle') lines.push('idle');
-  return lines.join('\n');
-}
-
-function escapeMermaidLabel(value) {
-  return String(value ?? '')
-    .replace(/"/g, '&quot;')
-    .replace(/\|/g, '/')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  table.append(body);
+  root.append(table);
 }
 
 function renderCards(root, cards) {
@@ -1369,10 +1196,15 @@ function renderCards(root, cards) {
         link.className = 'entity-link mono';
         link.href = value.href ?? '#';
         link.textContent = value.text;
-        link.addEventListener('click', (event) => {
-          event.preventDefault();
-          value.onClick();
-        });
+        if (value.newTab) {
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+        } else {
+          link.addEventListener('click', (event) => {
+            event.preventDefault();
+            value.onClick();
+          });
+        }
         dd.append(link);
       } else if (isCopyableText(value)) {
         const text = document.createElement('span');
@@ -1432,6 +1264,10 @@ function isCardLink(value) {
   return typeof value === 'object' && value !== null && value.link === true;
 }
 
+function isActionGroup(value) {
+  return typeof value === 'object' && value !== null && value.actionGroup === true;
+}
+
 function copyableText(text) {
   return { copyableText: true, text };
 }
@@ -1460,13 +1296,6 @@ function emptyState(message = 'No records') {
   empty.className = 'empty';
   empty.textContent = message;
   return empty;
-}
-
-function fallbackMessage(message) {
-  const node = document.createElement('div');
-  node.className = 'mermaid-error';
-  node.textContent = message;
-  return node;
 }
 
 function badge(label, tone) {

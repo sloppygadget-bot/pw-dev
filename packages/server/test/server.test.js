@@ -19,6 +19,8 @@ test('parseArgs reads server options', () => {
     '--worktree', '.',
     '--branch', 'main',
     '--app-url', 'http://127.0.0.1:5173',
+    '--browser-config-registry-file', path.join('/tmp', 'pw-dev-browser-configs.json'),
+    '--browser-registry-file', path.join('/tmp', 'pw-dev-browsers.json'),
     '--broker-url', 'http://127.0.0.1:18080',
     '--proxy-manager-url', 'http://127.0.0.1:9697',
     '--cdp-url', 'http://127.0.0.1:18080/_broker/instances/checkout-main',
@@ -34,6 +36,8 @@ test('parseArgs reads server options', () => {
   assert.equal(options.worktree, process.cwd());
   assert.equal(options.branch, 'main');
   assert.equal(options.appUrl, 'http://127.0.0.1:5173');
+  assert.equal(options.browserConfigRegistryFile, path.join('/tmp', 'pw-dev-browser-configs.json'));
+  assert.equal(options.browserRegistryFile, path.join('/tmp', 'pw-dev-browsers.json'));
   assert.equal(options.brokerUrl, 'http://127.0.0.1:18080');
   assert.equal(options.proxyManagerUrl, 'http://127.0.0.1:9697');
   assert.equal(options.cdpUrl, 'http://127.0.0.1:18080/_broker/instances/checkout-main');
@@ -174,7 +178,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /\/_pwdev\/status/);
     assert.match(instructions.body, /\/_pwdev\/browsers\/docs-crawler/);
     assert.match(instructions.body, /Use only this server/);
-    assert.match(instructions.body, /\/_pwdev\/browsers/);
+    assert.match(instructions.body, /\/_pwdev\/browser-configs/);
     assert.match(instructions.body, /create or reuse the required mapping/);
     assert.match(instructions.body, /\/_pwdev\/sessions/);
     assert.match(instructions.body, /browser\.close\(\)/);
@@ -187,7 +191,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /_pwdev\/delegates/);
     assert.match(instructions.body, new RegExp(`\\[pw-dev app API\\]\\(${escapeRegExp(server.origin)}\\/_pwdev\\/openapi\\/apps\\.json\\)`));
     assert.match(instructions.body, /\| POST \| `\/_pwdev\/apps` \| Saved app \|/);
-    assert.match(instructions.body, /\| POST \| `\/_pwdev\/browsers\/\{id\}\/start` \| Start a browser session, leasing a pooled proxy when configured \|/);
+    assert.match(instructions.body, /\| POST \| `\/_pwdev\/browsers\/\{id\}\/start` \| Start a browser session \|/);
     assert.doesNotMatch(instructions.body, /\{\{[A-Z_]+\}\}/);
 
     const openapi = await getJson(`${server.origin}/_pwdev/openapi.json`);
@@ -195,7 +199,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.equal(openapi.body.openapi, '3.1.1');
     assert.ok(openapi.body.paths['/_pwdev/instructions']);
     assert.ok(openapi.body.paths['/_pwdev/env']);
-    assert.equal(openapi.body['x-pwdev-documents'].find((document) => document.id === 'browsers').url, '/_pwdev/openapi/browsers.json');
+    assert.equal(openapi.body['x-pwdev-documents'].find((document) => document.id === 'browserConfigs').url, '/_pwdev/openapi/browser-configs.json');
 
     const proxyCatalog = await getJson(`${server.origin}/_pwdev/openapi/proxies.json`);
     assert.equal(proxyCatalog.statusCode, 200);
@@ -257,7 +261,7 @@ test('server exposes instructions and client helper source', async () => {
     assert.doesNotMatch(client.body, /createPwDevNetwork/);
     assert.match(client.body, /loadPwDevManifest/);
     assert.match(client.body, /upsertPwDevBrowser/);
-    assert.match(client.body, /loadPwDevBrowser/);
+    assert.match(client.body, /loadPwDevBrowserConfig/);
     assert.match(client.body, /browserId/);
     assert.match(client.body, /connectPwDev/);
     assert.match(client.body, /replacePwDevManagedProxyRules/);
@@ -274,14 +278,18 @@ test('server exposes a machine-readable API reference', async () => {
     const api = await getJson(`${server.origin}/_pwdev/api`);
     assert.equal(api.statusCode, 200);
     assert.equal(api.body.ok, true);
-    assert.equal(api.body.entities.browserTpls.persistent, true);
+    assert.equal(api.body.entities.browserConfigs.persistent, true);
     assert.equal(api.body.entities.sessions.sourceOfTruth, 'broker');
+    assert.equal(api.body.entities.browsers.persistent, true);
     assert.equal(api.body.endpoints.some((endpoint) => endpoint.path === '/_pwdev/browsers/:id/start'), true);
-    assert.deepEqual(api.body.details.resources, ['apps', 'browsers', 'proxies', 'sessions']);
+    assert.deepEqual(api.body.details.resources, ['apps', 'browserConfigs', 'browsers', 'proxies', 'sessions']);
 
     const proxies = await getJson(`${server.origin}/_pwdev/api/proxies`);
     assert.equal(proxies.statusCode, 200);
     assert.equal(proxies.body.resource, 'proxies');
+    const browsers = await getJson(`${server.origin}/_pwdev/openapi/browsers.json`);
+    assert.equal(browsers.statusCode, 200);
+    assert.ok(browsers.body.paths['/_pwdev/browsers/{id}/start']);
     const traffic = proxies.body.operations.find((operation) => operation.path === '/_pwdev/proxies/:id/traffic');
     assert.match(traffic.usage, /dumpCount/);
     assert.match(traffic.restrictions.join(' '), /mtype=1/);
@@ -293,7 +301,7 @@ test('server exposes a machine-readable API reference', async () => {
     });
     assert.equal(operation.statusCode, 200);
     assert.equal(operation.body.operation.path, '/_pwdev/browsers/:id/start');
-    assert.match(operation.body.operation.usage, /named session/);
+    assert.match(operation.body.operation.usage, /using its config/);
 
     const missing = await postJson(`${server.origin}/_pwdev/api`, {
       method: 'GET',
@@ -404,19 +412,24 @@ test('server persists app metadata but not browser runtime state across restart'
   }
 });
 
-test('server persists browser templates without server-owned network state', async () => {
+test('server persists browser configs without server-owned network state', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const broker = await startMockBroker();
   const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
   try {
     await postJson(`${server.origin}/_pwdev/apps`, { id: 'checkout-tax', appUrl: 'http://127.0.0.1:5174' });
-    const created = await postJson(`${server.origin}/_pwdev/browsers`, {
-      id: 'checkout-tax-browser', appId: 'checkout-tax', ignoreSslErrors: true,
+    const created = await postJson(`${server.origin}/_pwdev/browser-configs`, {
+      id: 'checkout-tax-config', ignoreSslErrors: true,
     });
     assert.equal(created.statusCode, 200);
+    const browser = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'checkout-tax-browser', browserConfigId: 'checkout-tax-config', appId: 'checkout-tax',
+    });
+    assert.equal(browser.statusCode, 200);
     const started = await postJson(`${server.origin}/_pwdev/browsers/checkout-tax-browser/start`, {});
     assert.equal(started.statusCode, 200);
-    assert.equal(started.body.browser.runtime.browserInstanceId, 'bkr_checkout-tax-browser');
+    assert.equal(started.body.session.browserId, 'checkout-tax-browser');
+    assert.equal(started.body.session.browserConfigId, 'checkout-tax-config');
   } finally {
     await server.close();
     await broker.close();
@@ -424,19 +437,30 @@ test('server persists browser templates without server-owned network state', asy
   }
 });
 
-test('server starts a standalone browser template without an app', async () => {
+test('server starts a standalone browser without an app or proxy', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const broker = await startMockBroker();
   const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
   try {
-    const created = await postJson(`${server.origin}/_pwdev/browsers`, {
-      id: 'docs-crawler', targetUrl: 'https://example.com/docs', headless: true,
+    const created = await postJson(`${server.origin}/_pwdev/browser-configs`, {
+      id: 'docs-chrome', targetUrl: 'https://example.com/docs', headless: true,
     });
     assert.equal(created.statusCode, 200);
-    assert.equal(created.body.browser.appId, undefined);
+    assert.equal(created.body.browserConfig.id, 'docs-chrome');
+    const misplacedComposition = await postJson(`${server.origin}/_pwdev/browser-configs`, {
+      id: 'invalid-config', appId: 'not-allowed',
+    });
+    assert.equal(misplacedComposition.statusCode, 400);
+    assert.match(misplacedComposition.body.error, /belongs to a browser/);
+    const browser = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'docs-crawler', browserConfigId: 'docs-chrome',
+    });
+    assert.equal(browser.statusCode, 200);
+    assert.equal(browser.body.browser.appId, undefined);
+    assert.equal(browser.body.browser.proxyId, undefined);
     const started = await postJson(`${server.origin}/_pwdev/browsers/docs-crawler/start`, {});
     assert.equal(started.statusCode, 200);
-    assert.equal(started.body.browser.targetUrl, 'https://example.com/docs');
+    assert.equal(started.body.browser.components.browserConfig.targetUrl, 'https://example.com/docs');
   } finally {
     await server.close();
     await broker.close();
@@ -460,17 +484,21 @@ test('documented app workflow reaches CDP discovery and stops the session throug
     assert.equal(registered.statusCode, 200);
     assert.match(registered.body.app.readme, /checkout devserver/);
 
-    const created = await postJson(`${server.origin}/_pwdev/browsers`, {
-      id: 'checkout-tax',
-      appId: 'checkout-tax',
+    const created = await postJson(`${server.origin}/_pwdev/browser-configs`, {
+      id: 'checkout-chrome',
       headless: true,
     });
     assert.equal(created.statusCode, 200);
+    const browser = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'checkout-tax', browserConfigId: 'checkout-chrome', appId: 'checkout-tax',
+    });
+    assert.equal(browser.statusCode, 200);
 
     const started = await postJson(`${server.origin}/_pwdev/browsers/checkout-tax/start`);
     assert.equal(started.statusCode, 200);
     assert.equal(started.body.session.sessionId, 'checkout-tax__default');
-    assert.equal(started.body.session.cdpUrl, `${server.origin}/_pwdev/broker/instances/bkr_checkout-tax`);
+    assert.equal(started.body.session.browserId, 'checkout-tax');
+    assert.equal(started.body.session.cdpUrl, `${server.origin}/_pwdev/broker/instances/bkr_checkout-chrome__checkout-tax`);
 
     const cdpDiscovery = await getJson(`${started.body.session.cdpUrl}/json/version`);
     assert.equal(cdpDiscovery.statusCode, 200);
@@ -490,30 +518,58 @@ test('documented app workflow reaches CDP discovery and stops the session throug
   }
 });
 
-test('server starts and stops isolated named sessions from one browser template', async () => {
+test('browser sessions expose claim ownership and reclaim stale leases', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const broker = await startMockBroker();
   const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
   try {
-    await postJson(`${server.origin}/_pwdev/browsers`, { id: 'checkout-worker', headless: true });
-    const first = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker/start`, { sessionId: 'shard-1' });
-    const second = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker/start`, { sessionId: 'shard-2' });
-    assert.equal(first.statusCode, 200);
-    assert.equal(second.statusCode, 200);
-    assert.equal(first.body.session.sessionId, 'checkout-worker__shard-1');
-    assert.equal(first.body.session.profile, 'checkout-worker__shard-1');
-    assert.equal(second.body.session.profile, 'checkout-worker__shard-2');
+    await postJson(`${server.origin}/_pwdev/browser-configs`, { id: 'lease-browser', headless: true });
+    await postJson(`${server.origin}/_pwdev/browsers`, { id: 'lease-test', browserConfigId: 'lease-browser' });
+    const started = await postJson(`${server.origin}/_pwdev/browsers/lease-test/start`, {
+      lease: { owner: 'agent-a', agentId: 'subagent-1', taskId: 'pw-test', ttlMs: 5000 },
+    });
+    assert.equal(started.statusCode, 200);
+    assert.equal(started.body.session.lease.owner, 'agent-a');
+    assert.equal(started.body.browser.occupancy.state, 'claimed');
 
-    const listed = await getJson(`${server.origin}/_pwdev/sessions`);
-    assert.deepEqual(listed.body.sessions.map((session) => session.sessionId), [
-      'checkout-worker__shard-1',
-      'checkout-worker__shard-2',
-    ]);
+    const browser = await getJson(`${server.origin}/_pwdev/browsers/lease-test`);
+    assert.equal(browser.body.browser.occupancy.owner, 'agent-a');
 
-    const stopped = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker/stop`, { sessionId: 'shard-1' });
-    assert.equal(stopped.statusCode, 200);
-    const remaining = await getJson(`${server.origin}/_pwdev/sessions`);
-    assert.deepEqual(remaining.body.sessions.map((session) => session.sessionId), ['checkout-worker__shard-2']);
+    const blockedBrowserDelete = await deleteJson(`${server.origin}/_pwdev/browsers/lease-test`);
+    assert.equal(blockedBrowserDelete.statusCode, 409);
+    assert.match(blockedBrowserDelete.body.error, /occupied by agent agent-a/);
+
+    const blocked = await postJson(`${server.origin}/_pwdev/sessions/lease-test__default/claim`, {
+      owner: 'agent-b', taskId: 'other-task',
+    });
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.body.session.owner, 'agent-a');
+
+    const leaseId = started.body.session.lease.leaseId;
+    const heartbeat = await postJson(`${server.origin}/_pwdev/sessions/lease-test__default/heartbeat`, {
+      leaseId, ttlMs: 5000,
+    });
+    assert.equal(heartbeat.statusCode, 200);
+    assert.equal(heartbeat.body.lease.leaseId, leaseId);
+
+    const released = await postJson(`${server.origin}/_pwdev/sessions/lease-test__default/release`, { leaseId });
+    assert.equal(released.statusCode, 200);
+    assert.equal(released.body.session.lease, undefined);
+
+    const reclaimed = await postJson(`${server.origin}/_pwdev/sessions/lease-test__default/claim`, {
+      owner: 'agent-b', taskId: 'other-task', ttlMs: 5000,
+    });
+    assert.equal(reclaimed.statusCode, 200);
+    assert.equal(reclaimed.body.lease.owner, 'agent-b');
+
+    const stale = await postJson(`${server.origin}/_pwdev/sessions/lease-test__default/heartbeat`, {
+      leaseId: reclaimed.body.lease.leaseId, ttlMs: 1,
+    });
+    assert.equal(stale.statusCode, 200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const sessions = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.equal(sessions.body.sessions[0].lease, undefined);
+    assert.equal(sessions.body.sessions[0].sessionId, 'lease-test__default');
   } finally {
     await server.close();
     await broker.close();
@@ -521,7 +577,40 @@ test('server starts and stops isolated named sessions from one browser template'
   }
 });
 
-test('browser templates lease durable managed proxies from a reusable pool', async () => {
+test('server starts parallel browsers from one browser config', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const broker = await startMockBroker();
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/browser-configs`, { id: 'checkout-worker', headless: true });
+    await postJson(`${server.origin}/_pwdev/browsers`, { id: 'checkout-worker-a', browserConfigId: 'checkout-worker' });
+    await postJson(`${server.origin}/_pwdev/browsers`, { id: 'checkout-worker-b', browserConfigId: 'checkout-worker' });
+    const first = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker-a/start`, {});
+    const second = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker-b/start`, {});
+    assert.equal(first.statusCode, 200);
+    assert.equal(second.statusCode, 200);
+    assert.equal(first.body.session.sessionId, 'checkout-worker-a__default');
+    assert.equal(first.body.session.profile, 'checkout-worker__checkout-worker-a');
+    assert.equal(second.body.session.profile, 'checkout-worker__checkout-worker-b');
+
+    const listed = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.deepEqual(listed.body.sessions.map((session) => session.sessionId), [
+      'checkout-worker-a__default',
+      'checkout-worker-b__default',
+    ]);
+
+    const stopped = await postJson(`${server.origin}/_pwdev/browsers/checkout-worker-a/stop`, {});
+    assert.equal(stopped.statusCode, 200);
+    const remaining = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.deepEqual(remaining.body.sessions.map((session) => session.sessionId), ['checkout-worker-b__default']);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('browsers reserve durable managed proxies from a reusable pool', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const broker = await startMockBroker();
   const proxyRecords = [
@@ -540,16 +629,14 @@ test('browser templates lease durable managed proxies from a reusable pool', asy
       const registered = await postJson(`${server.origin}/_pwdev/proxies`, proxy);
       assert.equal(registered.statusCode, 200);
     }
-    const created = await postJson(`${server.origin}/_pwdev/browsers`, {
-      id: 'checkout-pool',
-      targetUrl: 'http://127.0.0.1:5174',
-      proxyIds: ['traffic-a', 'traffic-b'],
-      ignoreSslErrors: true,
+    const created = await postJson(`${server.origin}/_pwdev/browser-configs`, {
+      id: 'checkout-config', targetUrl: 'http://127.0.0.1:5174', ignoreSslErrors: true,
     });
     assert.equal(created.statusCode, 200);
 
     const fixedAndPooled = await postJson(`${server.origin}/_pwdev/browsers`, {
       id: 'invalid-fixed-and-pooled',
+      browserConfigId: 'checkout-config',
       proxyId: 'traffic-a',
       proxyIds: ['traffic-b'],
     });
@@ -558,33 +645,42 @@ test('browser templates lease durable managed proxies from a reusable pool', asy
 
     const duplicatePool = await postJson(`${server.origin}/_pwdev/browsers`, {
       id: 'invalid-duplicate-pool',
+      browserConfigId: 'checkout-config',
       proxyIds: ['traffic-a', 'traffic-a'],
     });
     assert.equal(duplicatePool.statusCode, 400);
     assert.match(duplicatePool.body.error, /must not contain duplicates/);
 
-    const first = await postJson(`${server.origin}/_pwdev/browsers/checkout-pool/start`, { sessionId: 'task-a' });
-    const second = await postJson(`${server.origin}/_pwdev/browsers/checkout-pool/start`, { sessionId: 'task-b' });
+    for (const id of ['task-a', 'task-b', 'task-c']) {
+      const saved = await postJson(`${server.origin}/_pwdev/browsers`, {
+        id, browserConfigId: 'checkout-config', proxyIds: ['traffic-a', 'traffic-b'],
+      });
+      assert.equal(saved.statusCode, 200);
+    }
+    const first = await postJson(`${server.origin}/_pwdev/browsers/task-a/start`, {});
+    const second = await postJson(`${server.origin}/_pwdev/browsers/task-b/start`, {});
     assert.equal(first.statusCode, 200);
     assert.equal(second.statusCode, 200);
     assert.equal(first.body.session.proxyId, 'traffic-a');
-    assert.equal(first.body.proxyLease.proxyId, 'traffic-a');
-    assert.match(first.body.proxyLease.trafficStartTime, /^\d+$/);
+    assert.equal(first.body.session.proxyLease.proxyId, 'traffic-a');
+    assert.match(first.body.session.proxyLease.trafficStartTime, /^\d+$/);
     assert.equal(second.body.session.proxyId, 'traffic-b');
-    assert.deepEqual(second.body.browser.proxyPool.availableProxyIds, []);
 
-    const exhausted = await postJson(`${server.origin}/_pwdev/browsers/checkout-pool/start`, { sessionId: 'task-c' });
+    const exhausted = await postJson(`${server.origin}/_pwdev/browsers/task-c/start`, {});
     assert.equal(exhausted.statusCode, 409);
     assert.match(exhausted.body.error, /No proxy is available/);
 
-    const stopped = await postJson(`${server.origin}/_pwdev/browsers/checkout-pool/stop`, { sessionId: 'task-a' });
+    const stopped = await postJson(`${server.origin}/_pwdev/browsers/task-a/stop`, {});
     assert.equal(stopped.statusCode, 200);
-    assert.equal(stopped.body.releasedProxyLease.proxyId, 'traffic-a');
-    assert.deepEqual(stopped.body.browser.proxyPool.availableProxyIds, ['traffic-a']);
+    assert.equal(stopped.body.browser.proxyId, 'traffic-a');
 
-    const reused = await postJson(`${server.origin}/_pwdev/browsers/checkout-pool/start`, { sessionId: 'task-c' });
+    const stillReserved = await postJson(`${server.origin}/_pwdev/browsers/task-c/start`, {});
+    assert.equal(stillReserved.statusCode, 409);
+
+    await deleteJson(`${server.origin}/_pwdev/browsers/task-a`);
+    const reused = await postJson(`${server.origin}/_pwdev/browsers/task-c/start`, {});
     assert.equal(reused.statusCode, 200);
-    assert.equal(reused.body.proxyLease.proxyId, 'traffic-a');
+    assert.equal(reused.body.session.proxyId, 'traffic-a');
     assert.deepEqual(
       manager.requests.filter((request) => /\/start$/.test(request.path)).map((request) => request.path),
       [
@@ -597,6 +693,139 @@ test('browser templates lease durable managed proxies from a reusable pool', asy
     await server.close();
     await broker.close();
     await manager.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('browsers reserve a proxy, derive a stable profile, and release on destroy', async () => {
+  const broker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, { id: 'checkout-app', appUrl: 'http://127.0.0.1:5173' });
+    await postJson(`${server.origin}/_pwdev/browser-configs`, { id: 'checkout-browser', profile: 'work-okta' });
+    await postJson(`${server.origin}/_pwdev/proxies`, { id: 'proxy-a', proxyUrl: 'http://127.0.0.1:8899' });
+
+    const created = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'checkout-smoke',
+      browserConfigId: 'checkout-browser',
+      appId: 'checkout-app',
+      proxyIds: ['proxy-a'],
+      readme: 'Use the checkout test account.',
+    });
+    assert.equal(created.statusCode, 200);
+    assert.equal(created.body.browser.status, 'ready');
+
+    const configInUse = await deleteJson(`${server.origin}/_pwdev/browser-configs/checkout-browser`);
+    assert.equal(configInUse.statusCode, 409);
+    assert.match(configInUse.body.error, /referenced by browser/);
+
+    const configEditInUse = await postJson(`${server.origin}/_pwdev/browser-configs`, {
+      id: 'checkout-browser',
+      targetUrl: 'https://edited.example.com',
+    });
+    assert.equal(configEditInUse.statusCode, 409);
+    assert.match(configEditInUse.body.error, /referenced by browser/);
+
+    const started = await postJson(`${server.origin}/_pwdev/browsers/checkout-smoke/start`, {});
+    assert.equal(started.statusCode, 200);
+    assert.equal(started.body.session.profile, 'work-okta__checkout-smoke');
+    assert.equal(started.body.session.proxyId, 'proxy-a');
+    assert.equal(started.body.browser.status, 'occupied');
+
+    const configOccupied = await deleteJson(`${server.origin}/_pwdev/browser-configs/checkout-browser`);
+    assert.equal(configOccupied.statusCode, 409);
+    assert.match(configOccupied.body.error, /occupied by/);
+
+    const stopped = await postJson(`${server.origin}/_pwdev/browsers/checkout-smoke/stop`, {});
+    assert.equal(stopped.statusCode, 200);
+    assert.equal(stopped.body.browser.proxyId, 'proxy-a');
+    assert.equal(stopped.body.browser.sessionId, undefined);
+
+    const configStillReferenced = await deleteJson(`${server.origin}/_pwdev/browser-configs/checkout-browser`);
+    assert.equal(configStillReferenced.statusCode, 409);
+    assert.match(configStillReferenced.body.error, /referenced by browser/);
+
+    const conflicting = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'checkout-other',
+      browserConfigId: 'checkout-browser',
+      proxyId: 'proxy-a',
+    });
+    assert.equal(conflicting.statusCode, 409);
+
+    const destroyed = await deleteJson(`${server.origin}/_pwdev/browsers/checkout-smoke`);
+    assert.equal(destroyed.statusCode, 200);
+    assert.equal(broker.requests.some((request) => request.path === '/_broker/profiles/clear' && request.body.profile === 'work-okta__checkout-smoke'), true);
+    const deletedConfig = await deleteJson(`${server.origin}/_pwdev/browser-configs/checkout-browser`);
+    assert.equal(deletedConfig.statusCode, 200);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server resolves managed browser proxies for an SSH-backed broker', async () => {
+  const broker = await startMockBroker({ topology: { mode: 'ssh', remote: true } });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const proxyRecords = [{
+    id: 'ssh-proxy',
+    kind: 'whistle',
+    proxyUrl: 'http://127.0.0.1:8899',
+    guiUrl: 'http://127.0.0.1:9801',
+    managed: true,
+    running: false,
+  }];
+  const manager = await startMockProxyManager({ proxies: proxyRecords });
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin, proxyManagerUrl: manager.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/browser-configs`, { id: 'ssh-config', headless: true });
+    const created = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'ssh-browser', browserConfigId: 'ssh-config', proxyId: 'ssh-proxy',
+    });
+    assert.equal(created.statusCode, 200);
+
+    const started = await postJson(`${server.origin}/_pwdev/browsers/ssh-browser/start`, {});
+    assert.equal(started.statusCode, 200);
+    assert.deepEqual(broker.requests.find((request) => request.path === '/_broker/start').body, {
+      profile: 'ssh-config__ssh-browser',
+      proxyServer: 'http://127.0.0.1:8899',
+      proxyPeer: 'ssh-peer',
+      proxyName: 'ssh-proxy',
+      headless: true,
+    });
+  } finally {
+    await server.close();
+    await broker.close();
+    await manager.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server persists browser configuration but not its transient session', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const first = await startPwDevServer({ root, port: 0 });
+  try {
+    await postJson(`${first.origin}/_pwdev/browser-configs`, { id: 'persistent-browser', profile: 'work-okta' });
+    const created = await postJson(`${first.origin}/_pwdev/browsers`, {
+      id: 'persistent-browser',
+      browserConfigId: 'persistent-browser',
+      readme: 'Keep this workflow reusable.',
+    });
+    assert.equal(created.statusCode, 200);
+  } finally {
+    await first.close();
+  }
+
+  const second = await startPwDevServer({ root, port: 0 });
+  try {
+    const listed = await getJson(`${second.origin}/_pwdev/browsers`);
+    assert.equal(listed.statusCode, 200);
+    assert.equal(listed.body.browsers[0].id, 'persistent-browser');
+    assert.equal(listed.body.browsers[0].readme, 'Keep this workflow reusable.');
+    assert.equal(listed.body.browsers[0].sessionId, undefined);
+  } finally {
+    await second.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -669,6 +898,53 @@ test('server manages reusable proxy registrations', async () => {
     assert.equal(missing.statusCode, 404);
   } finally {
     await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server protects referenced and occupied proxies during CRUD', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const broker = await startMockBroker();
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin, proxyManagerUrl: 'http://127.0.0.1:1' });
+  try {
+    const created = await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'proxy-guard', proxyUrl: 'http://127.0.0.1:8899', name: 'Original proxy',
+    });
+    assert.equal(created.statusCode, 200);
+
+    const edited = await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'proxy-guard', proxyUrl: 'http://127.0.0.1:8898', name: 'Edited proxy',
+    });
+    assert.equal(edited.statusCode, 200);
+
+    await postJson(`${server.origin}/_pwdev/browser-configs`, { id: 'proxy-guard-config', headless: true });
+    await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'proxy-guard-browser', browserConfigId: 'proxy-guard-config', proxyId: 'proxy-guard',
+    });
+
+    const referencedEdit = await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'proxy-guard', proxyUrl: 'http://127.0.0.1:8897',
+    });
+    assert.equal(referencedEdit.statusCode, 409);
+    assert.match(referencedEdit.body.error, /referenced by browser:proxy-guard-browser/);
+
+    const referencedDelete = await deleteJson(`${server.origin}/_pwdev/proxies/proxy-guard`);
+    assert.equal(referencedDelete.statusCode, 409);
+    assert.match(referencedDelete.body.error, /referenced by browser:proxy-guard-browser/);
+
+    const started = await postJson(`${server.origin}/_pwdev/browsers/proxy-guard-browser/start`, {});
+    assert.equal(started.statusCode, 200);
+    const occupiedDelete = await deleteJson(`${server.origin}/_pwdev/proxies/proxy-guard`);
+    assert.equal(occupiedDelete.statusCode, 409);
+    assert.match(occupiedDelete.body.error, /occupied by proxy-guard-browser__default/);
+
+    await postJson(`${server.origin}/_pwdev/browsers/proxy-guard-browser/stop`, {});
+    await deleteJson(`${server.origin}/_pwdev/browsers/proxy-guard-browser`);
+    const deleted = await deleteJson(`${server.origin}/_pwdev/proxies/proxy-guard`);
+    assert.equal(deleted.statusCode, 200);
+  } finally {
+    await server.close();
+    await broker.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1606,6 +1882,11 @@ function startMockBroker({ topology } = {}) {
     if (req.url === '/_broker/stop' && req.method === 'POST') {
       instances.delete(body.instanceId);
       writeTestJson(res, 200, { ok: true, stopped: body.instanceId });
+      return;
+    }
+
+    if (req.url === '/_broker/profiles/clear' && req.method === 'POST') {
+      writeTestJson(res, 200, { ok: true, profile: body.profile, cleared: true });
       return;
     }
 

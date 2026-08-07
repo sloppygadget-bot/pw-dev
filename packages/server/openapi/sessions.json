@@ -1,1 +1,53 @@
-{"openapi":"3.1.1","info":{"title":"pw-dev session API","version":"1.0.0","description":"Transient broker-backed sessions. Sessions created from a browserTpl proxyIds pool hold an exclusive proxyLease until stopped."},"servers":[{"url":"/"}],"paths":{"/_pwdev/sessions":{"get":{"operationId":"listSessions","responses":{"200":{"description":"Live broker sessions, including proxyLease when pooled"}}}},"/_pwdev/sessions/{id}/stop":{"post":{"operationId":"stopSession","description":"Stop the browser session and release its proxy lease without stopping or deleting the durable proxy profile.","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"Stopped session with releasedProxyLease when applicable"}}}}}}
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "pw-dev session API",
+    "version": "1.0.0",
+    "description": "Transient broker-backed sessions created by durable browsers. Sessions identify both browserId and browserConfigId and may carry a short-lived Playwright agent lease."
+  },
+  "servers": [{ "url": "/" }],
+  "paths": {
+    "/_pwdev/sessions": {
+      "get": { "operationId": "listSessions", "responses": { "200": { "description": "Live browser sessions, including occupancy and lease metadata" } } }
+    },
+    "/_pwdev/sessions/{id}/stop": {
+      "post": { "operationId": "stopSession", "description": "Stop the browser session without deleting its durable browser, browser config, or proxy profile.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Stopped session" } } }
+    },
+    "/_pwdev/sessions/{id}/claim": {
+      "post": { "operationId": "claimSession", "summary": "Claim a live session", "description": "Claims an unleased session for one agent. A live claim by another owner returns 409.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeaseClaim" } } } }, "responses": { "200": { "description": "Claimed session" }, "409": { "description": "Session is leased by another owner" } } }
+    },
+    "/_pwdev/sessions/{id}/heartbeat": {
+      "post": { "operationId": "heartbeatSession", "summary": "Heartbeat a session lease", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeaseHeartbeat" } } } }, "responses": { "200": { "description": "Lease extended" }, "409": { "description": "Missing, invalid, or expired lease" } } }
+    },
+    "/_pwdev/sessions/{id}/release": {
+      "post": { "operationId": "releaseSession", "summary": "Release a session lease", "description": "Releases ownership without stopping Chrome.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeaseRelease" } } } }, "responses": { "200": { "description": "Lease released" }, "409": { "description": "Missing or invalid lease" } } }
+    }
+  },
+  "components": {
+    "schemas": {
+      "LeaseClaim": {
+        "type": "object",
+        "required": ["owner"],
+        "properties": {
+          "owner": { "type": "string" },
+          "agentId": { "type": "string" },
+          "taskId": { "type": "string" },
+          "ttlMs": { "type": "integer", "minimum": 1, "maximum": 3600000, "default": 30000 }
+        }
+      },
+      "LeaseHeartbeat": {
+        "type": "object",
+        "required": ["leaseId"],
+        "properties": {
+          "leaseId": { "type": "string" },
+          "ttlMs": { "type": "integer", "minimum": 1, "maximum": 3600000, "default": 30000 }
+        }
+      },
+      "LeaseRelease": {
+        "type": "object",
+        "required": ["leaseId"],
+        "properties": { "leaseId": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -22,7 +22,7 @@ packages/
     Optional Whistle process manager for external-agent supplied rulesets.
 
   gui/
-    Read-only local dashboard for pw-dev entities, status, and referers.
+    Local dashboard for pw-dev entities, status, browser CRUD, and sessions.
 
   cli/
     Root command dispatcher for `pw-dev broker`, `pw-dev server`,
@@ -129,12 +129,12 @@ the manager, or releasing a browser lease preserves configuration, rules, and
 traffic. Only `DELETE /_pwdev/proxy/proxies/:id` removes the profile.
 
 For task-isolated traffic, create several managed profiles without `appId` and
-put their ids in a browser template's `proxyIds`. Each active template session
-leases one available proxy exclusively and releases it when the session stops.
+put their ids in a browser's `proxyIds`. Each browser selects and reserves one
+available proxy until that browser is destroyed.
 The returned `proxyLease.trafficStartTime` can be passed to the proxy traffic
 endpoint as `startTime` to read traffic from that lease boundary.
 
-Start the read-only local dashboard:
+Start the local dashboard:
 
 ```bash
 npm start -- gui --port 9797
@@ -163,7 +163,7 @@ peer as the broker's remote network side.
 
 `GET /_pwdev/openapi.json` is the compact progressive-discovery catalog. Read
 its `x-pwdev-documents` links and fetch only the relevant domain document, such
-as `GET /_pwdev/openapi/browsers.json` or `GET /_pwdev/openapi/proxies.json`.
+as `GET /_pwdev/openapi/browser-configs.json` or `GET /_pwdev/openapi/proxies.json`.
 For proxy-manager lifecycle or rules, first read `GET /_pwdev/delegates`, then
 fetch the proxy delegate's linked OpenAPI document. Agents use its declared
 `/_pwdev/proxy/*` paths, never the proxy-manager port directly.
@@ -216,6 +216,10 @@ POST   /_pwdev/apps
 GET    /_pwdev/apps/:id
 DELETE /_pwdev/apps/:id
 GET    /_pwdev/apps/:id/manifest
+GET    /_pwdev/browser-configs
+POST   /_pwdev/browser-configs
+GET    /_pwdev/browser-configs/:id
+DELETE /_pwdev/browser-configs/:id
 GET    /_pwdev/browsers
 POST   /_pwdev/browsers
 GET    /_pwdev/browsers/:id
@@ -244,7 +248,7 @@ up to six request-header filters (`name`/`value` through `name5`/`value5`) are
 supported; use `mtype=1` for exact header values. Use the returned
 `traffic.data.lastId` as `startTime` to poll for later entries.
 
-Agents attach through the `session.cdpUrl` returned by a browser-template start.
+Agents attach through the `session.cdpUrl` returned by a browser start.
 Use `/_pwdev/browsers/*` and `/_pwdev/sessions/*` for ordinary lifecycle work.
 Broker APIs are proxied under `/_pwdev/broker/*`, so the returned CDP URL can
 point at the pw-dev server instead of exposing the broker port.
@@ -259,22 +263,32 @@ not need proxy-forward IDs or mapped ports.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 
-To start an isolated named browser session from one template, send `sessionId`.
-The default profile is `<template id>__<session id>` unless `profile` is
-explicitly supplied:
+For isolated parallel work, create multiple browsers that reference one
+browser config. Each browser can optionally link an app and fixed or pooled
+proxy configuration:
 
 ```json
 {
-  "sessionId": "smoke-login-20260629"
+  "id": "smoke-login-20260629",
+  "browserConfigId": "checkout-chrome",
+  "appId": "checkout-main",
+  "proxyIds": ["traffic-a", "traffic-b"]
 }
 ```
 
-The start response always includes `session.cdpUrl`; attach Playwright to that
-URL. When the template has `proxyIds`, the session also receives a proxy lease.
+The browser start response includes `session.cdpUrl`; attach Playwright to that
+URL. Include `{ "lease": { "owner": "agent-name", "taskId": "pw-task" } }`
+in the start body to make the Playwright owner visible to other agents. The
+session returns an opaque `leaseId`; heartbeat it through
+`POST /_pwdev/sessions/:id/heartbeat` while the script runs and release it with
+`POST /_pwdev/sessions/:id/release` when done. `GET /_pwdev/browsers/:id`
+reports `status: "occupied"` and the current `occupancy` owner/task/heartbeat;
+an expired lease is reclaimable without stopping Chrome. When the browser
+selects a proxy, the session also records that lease.
 
-Duplicate starts for the same default slot or named session return `409
-Conflict`. End completed sessions explicitly with
-`POST /_pwdev/browsers/:id/stop`; app registrations, browser profiles, and
+Duplicate starts for the same browser return `409 Conflict`. End completed
+sessions explicitly with `POST /_pwdev/browsers/:id/stop`; app registrations,
+browser profiles, browser configs, and
 managed proxy profiles remain available for later work.
 
 ## Tests

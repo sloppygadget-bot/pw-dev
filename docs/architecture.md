@@ -18,7 +18,8 @@ flowchart LR
   App["App devserver<br/>http://127.0.0.1:5173"]
   Server["pw-dev/server<br/>persisted control plane + CDP proxy"]
   AppRecord["App record<br/>worktree + README + accounts"]
-  BrowserTemplate["Browser template<br/>targetUrl + profile + network/proxy"]
+  BrowserConfig["Browser config<br/>targetUrl + Chrome launch settings"]
+  Browser["Browser<br/>config + optional app/proxy"]
   Session["Transient session<br/>cdpUrl + broker instance"]
   Network["Network record<br/>broker-owned routing config"]
   Proxy["Proxy record<br/>ruleset / proxy URL"]
@@ -33,15 +34,18 @@ flowchart LR
   Human -->|starts with profile| Broker
 
   Server -->|persists| AppRecord
-  Server -->|persists| BrowserTemplate
+  Server -->|persists| BrowserConfig
+  Server -->|persists| Browser
   Server -->|persists| Network
   Server -->|persists| Proxy
-  AppRecord -. optional appId .-> BrowserTemplate
-  BrowserTemplate -->|start using targetUrl + launch config| Server
+  AppRecord -. optional appId .-> Browser
+  BrowserConfig -->|required browserConfigId| Browser
+  Proxy -. optional proxyId / proxyIds .-> Browser
+  Browser -->|start using composed settings| Server
   Server -->|recreates network; resolves proxy; starts| Broker
   Broker -->|reports live instance| Session
   Server -->|reconciles; proxies cdpUrl| Session
-  BrowserTemplate -. produces .-> Session
+  Browser -. produces .-> Session
   Server -->|proxies /_pwdev/proxy/*| ProxyManager
   Proxy -->|managed config| ProxyManager
   ProxyManager -->|starts/stops| Whistle
@@ -65,7 +69,8 @@ sequenceDiagram
   Human->>App: start app devserver on app port
   Human->>Server: start central pw-dev server paired with brokerUrl
   Human->>Server: POST /_pwdev/apps with worktree and operating README
-  Human->>Server: POST /_pwdev/browsers with appId, targetUrl, profile, and network/proxy metadata
+  Human->>Server: POST /_pwdev/browser-configs with Chrome launch settings
+  Human->>Server: POST /_pwdev/browsers with browserConfigId and optional app/proxy
   Human->>Server: POST /_pwdev/browsers/:id/start
   Server->>Broker: POST /_broker/start with persistent profile/proxy metadata
   Broker->>Chrome: launch Chrome with persistent user-data-dir
@@ -90,11 +95,11 @@ sequenceDiagram
 ## Multi-App Flow
 
 For multiple worktrees, each app has its own app devserver. A central
-`pw-dev/server` registry tracks persisted apps and browser templates. By
+`pw-dev/server` registry tracks persisted apps and browser configs. By
 default they share one `pw-dev/broker` process. The server asks the broker to
-start one Chrome instance/profile per browser-template session; the returned
+start one Chrome instance/profile per browser; the returned
 server-proxied, instance-scoped CDP URL belongs to the transient session, not
-the app or template.
+the app or config.
 
 ```mermaid
 flowchart TD
@@ -104,37 +109,43 @@ flowchart TD
 
   subgraph WorktreeA["worktree: checkout-main"]
     AppA["App devserver A<br/>http://127.0.0.1:5173"]
-    TemplateA["Browser template A<br/>targetUrl + profile/network/proxy"]
+    ConfigA["Browser config A<br/>targetUrl + launch settings"]
+    BrowserA["Browser A<br/>config + app/proxy"]
     SessionA["Transient session A<br/>cdpUrl → bkr_a"]
     ChromeA["Chrome instance A<br/>profile: checkout-main"]
   end
 
   subgraph WorktreeB["worktree: checkout-feature-tax"]
     AppB["App devserver B<br/>http://127.0.0.1:5174"]
-    TemplateB["Browser template B<br/>targetUrl + profile/network/proxy"]
+    ConfigB["Browser config B<br/>targetUrl + launch settings"]
+    BrowserB["Browser B<br/>config + app/proxy"]
     SessionB["Transient session B<br/>cdpUrl → bkr_b"]
     ChromeB["Chrome instance B<br/>profile: checkout-feature-tax"]
   end
 
-  Human -->|register apps/templates| Server
-  Human -->|start template sessions| Server
+  Human -->|register apps/configs/browsers| Server
+  Human -->|start browsers| Server
 
-  Server -->|persists| TemplateA
-  TemplateA -. optional app link .-> AppA
+  Server -->|persists| ConfigA
+  Server -->|persists| BrowserA
+  ConfigA --> BrowserA
+  BrowserA -. optional app link .-> AppA
   Server -->|start A| Broker
   Broker -->|owns bkr_a| ChromeA
   Broker -->|reports bkr_a| SessionA
   Server -->|proxies CDP| SessionA
-  TemplateA -->|produces| SessionA
+  BrowserA -->|produces| SessionA
   ChromeA -->|loads| AppA
 
-  Server -->|persists| TemplateB
-  TemplateB -. optional app link .-> AppB
+  Server -->|persists| ConfigB
+  Server -->|persists| BrowserB
+  ConfigB --> BrowserB
+  BrowserB -. optional app link .-> AppB
   Server -->|start B| Broker
   Broker -->|owns bkr_b| ChromeB
   Broker -->|reports bkr_b| SessionB
   Server -->|proxies CDP| SessionB
-  TemplateB -->|produces| SessionB
+  BrowserB -->|produces| SessionB
   ChromeB -->|loads| AppB
 ```
 
@@ -168,6 +179,10 @@ POST /_pwdev/apps
 GET /_pwdev/apps/:id
 DELETE /_pwdev/apps/:id
 GET /_pwdev/apps/:id/manifest
+GET /_pwdev/browser-configs
+POST /_pwdev/browser-configs
+GET /_pwdev/browser-configs/:id
+DELETE /_pwdev/browser-configs/:id
 GET /_pwdev/browsers
 POST /_pwdev/browsers
 GET /_pwdev/browsers/:id
@@ -186,8 +201,9 @@ POST /_pwdev/proxy/proxies/:id/stop
 POST /_pwdev/proxy/stop-all
 ```
 
-Apps are project metadata; browser templates own launch and target settings;
-sessions are transient broker-backed runtime records. The app manifest remains
+Apps are project metadata; browser configs own launch and target settings;
+browsers compose a required config with optional app/proxy references; sessions
+are transient broker-backed runtime records. The app manifest remains
 useful for app metadata, but it does not provide a live browser CDP URL:
 
 ```json
@@ -208,7 +224,7 @@ useful for app metadata, but it does not provide a live browser CDP URL:
 ```
 
 The agent should use the API for discovery and its own Playwright client for
-browser operations. Start a browser template and connect to the returned
+browser operations. Start a browser and connect to the returned
 session `cdpUrl`; it points at the pw-dev server's broker proxy:
 
 ```js
@@ -223,7 +239,7 @@ const browser = await chromium.connectOverCDP(started.session.cdpUrl);
 const context = browser.contexts()[0];
 const page = context.pages()[0] ?? await context.newPage();
 
-await page.goto(started.browser.targetUrl);
+await page.goto(started.browser.components.browserConfig.targetUrl);
 ```
 
 ## Design Rules
@@ -231,7 +247,7 @@ await page.goto(started.browser.targetUrl);
 - CLI starts and stops things for humans.
 - API exposes structured discovery and control for agents.
 - The server does not import Playwright by default.
-- The server persists app, browser-template, network, and proxy metadata; it
+- The server persists app, browser config, browser, network, and proxy metadata; it
   is not an app runner or proxy runner. Sessions are transient. Account
   metadata is for non-production test accounts only.
 - `proxy` is the optional runner for managed Whistle proxies. It accepts
@@ -241,8 +257,7 @@ await page.goto(started.browser.targetUrl);
 - The broker owns Chrome and persistent profile state.
 - The agent attaches to the broker and does not close the browser unless asked.
 - One broker process can own multiple Chrome instances/profiles.
-- A browser template can start a default session or named parallel sessions;
-  named sessions get isolated profiles by default.
-- A browser template can own an ordered `proxyIds` pool. Active sessions lease
-  proxies exclusively and release them on stop without stopping or deleting
-  the reusable Whistle profile.
+- A browser owns at most one active session. Multiple browsers can share one
+  browser config and receive isolated profiles.
+- A browser can own an ordered `proxyIds` pool. It reserves one proxy until the
+  browser is destroyed without stopping or deleting the reusable Whistle profile.

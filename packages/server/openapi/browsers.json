@@ -1,72 +1,61 @@
 {
   "openapi": "3.1.1",
   "info": {
-    "title": "pw-dev browserTpl API",
+    "title": "pw-dev browser API",
     "version": "1.0.0",
-    "description": "Persistent browserTpl records and transient browser sessions. A template can select one fixed proxyId or lease exclusively from proxyIds."
+    "description": "Durable reusable browsers. A browser requires one browser config, may reference an app and a fixed proxy or proxy pool, and owns one transient session plus its stable Chrome profile."
   },
   "servers": [{ "url": "/" }],
   "paths": {
     "/_pwdev/browsers": {
-      "get": {
-        "operationId": "listBrowserTemplates",
-        "summary": "List templates with sessions and proxy-pool availability",
-        "responses": { "200": { "description": "Browser templates and transient runtime state" } }
-      },
+      "get": { "operationId": "listBrowsers", "summary": "List browsers with resolved components", "responses": { "200": { "description": "Browsers and app/proxy/config/session summaries" } } },
       "post": {
-        "operationId": "upsertBrowserTemplate",
-        "summary": "Create or update a persistent browser template",
-        "description": "Use proxyId for a fixed proxy or proxyIds for an exclusive reusable pool. The fields are mutually exclusive.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                  "id": { "type": "string" },
-                  "appId": { "type": "string" },
-                  "targetUrl": { "type": "string" },
-                  "profile": { "type": "string" },
-                  "proxyId": { "type": "string", "description": "Fixed reusable proxy." },
-                  "proxyIds": {
-                    "type": "array",
-                    "minItems": 1,
-                    "uniqueItems": true,
-                    "items": { "type": "string" },
-                    "description": "Ordered pool of durable proxies leased exclusively per active session."
-                  }
-                }
-              }
-            }
+        "operationId": "upsertBrowser",
+        "summary": "Create or update a browser",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object",
+          "required": ["id", "browserConfigId"],
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "readme": { "type": "string" },
+            "browserConfigId": { "type": "string" },
+            "appId": { "type": "string" },
+            "proxyId": { "type": "string" },
+            "proxyIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+            "profile": { "type": "string", "description": "Optional stable profile override; otherwise base browser profile plus browser id." }
           }
-        },
-        "responses": { "200": { "description": "Saved template" } }
+        } } } },
+        "responses": { "200": { "description": "Saved browser" }, "409": { "description": "Referenced proxy is already reserved" } }
       }
+    },
+    "/_pwdev/browsers/{id}": {
+      "get": { "operationId": "getBrowser", "summary": "Get one browser and its components", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Browser details, including occupancy and optional lease owner" } } },
+      "delete": { "operationId": "destroyBrowser", "summary": "Stop and destroy a browser", "description": "Stops an active session, clears the derived profile through the broker, releases the reserved proxy, and removes the browser record.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Destroyed browser" } } }
     },
     "/_pwdev/browsers/{id}/start": {
-      "post": {
-        "operationId": "startBrowser",
-        "summary": "Start a browser session, leasing a pooled proxy when configured",
-        "description": "Managed proxies are started idempotently when selected. The response proxyLease includes trafficStartTime for lease-scoped traffic reads.",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": {
-          "200": { "description": "Started session containing cdpUrl and an optional proxyLease" },
-          "409": { "description": "Session already exists or the proxy pool is exhausted" }
-        }
-      }
+      "post": { "operationId": "startBrowser", "summary": "Start a browser session", "description": "Starts one broker instance using the browser's stable profile. A proxy pool selects and reserves one proxy for the browser. Optionally include lease metadata to identify the Playwright agent immediately.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeaseStart" } } } }, "responses": { "200": { "description": "Started session with cdpUrl and optional lease" }, "409": { "description": "Browser occupied or no proxy is available" } } }
     },
     "/_pwdev/browsers/{id}/stop": {
-      "post": {
-        "operationId": "stopBrowser",
-        "summary": "Stop a session, releasing its pooled proxy when present",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Stopped session with releasedProxyLease when applicable" } }
-      }
+      "post": { "operationId": "stopBrowser", "summary": "Stop a browser session", "description": "Stops the broker instance but preserves the derived profile and proxy reservation.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Stopped session" } } }
     }
   },
-  "x-pwdev-documents": [
-    { "id": "sessions", "url": "/_pwdev/openapi/sessions.json", "whenToUse": "Inspect or stop a session directly." }
-  ]
+  "components": {
+    "schemas": {
+      "LeaseStart": {
+        "type": "object",
+        "properties": { "lease": { "$ref": "#/components/schemas/LeaseClaim" } }
+      },
+      "LeaseClaim": {
+        "type": "object",
+        "required": ["owner"],
+        "properties": {
+          "owner": { "type": "string" },
+          "agentId": { "type": "string" },
+          "taskId": { "type": "string" },
+          "ttlMs": { "type": "integer", "minimum": 1, "maximum": 3600000, "default": 30000 }
+        }
+      }
+    }
+  }
 }

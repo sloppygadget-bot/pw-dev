@@ -38,10 +38,17 @@ test('gui serves static app and read-only config', async () => {
     const index = await get(`${server.origin}/`);
     assert.equal(index.statusCode, 200);
     assert.match(index.body, /<h1>pw-dev<\/h1>/);
-    assert.match(index.body, /Topology/);
+    assert.match(index.body, /Browsers/);
+    assert.doesNotMatch(index.body, /data-view="topology"/);
     assert.match(index.body, /data-view="broker"/);
-    assert.match(index.body, /Mermaid/);
-    assert.match(index.body, /D3/);
+    assert.match(index.body, /data-browser-view="diagram"/);
+    assert.match(index.body, /data-browser-view="table"/);
+    assert.match(index.body, /id="new-browser"/);
+    assert.match(index.body, /id="browser-editor"/);
+    assert.match(index.body, /id="new-browser-config"/);
+    assert.match(index.body, /id="browser-config-editor"/);
+    assert.match(index.body, /id="new-proxy"/);
+    assert.match(index.body, /id="proxy-editor"/);
     assert.match(index.body, /href="\/api-docs"/);
     assert.doesNotMatch(index.body, /data-view="networks"/);
 
@@ -55,8 +62,25 @@ test('gui serves static app and read-only config', async () => {
 
     const appScript = await get(`${server.origin}/app.js`);
     assert.equal(appScript.statusCode, 200);
-    assert.match(appScript.body, /Related src app/);
+    assert.match(appScript.body, /function renderTable/);
+    assert.match(appScript.body, /Used By/);
     assert.match(appScript.body, /function showApp/);
+    assert.match(appScript.body, /function showProxy/);
+    assert.match(appScript.body, /function showSession/);
+    assert.match(appScript.body, /function sessionLink/);
+    assert.match(appScript.body, /function appLink/);
+    assert.match(appScript.body, /function proxyLink/);
+    assert.match(appScript.body, /session-target/);
+    assert.match(appScript.body, /GUI URL/);
+    assert.match(appScript.body, /function proxyGuiLink/);
+    assert.match(appScript.body, /function saveBrowser/);
+    assert.match(appScript.body, /function browserActions/);
+    assert.match(appScript.body, /function saveBrowserConfig/);
+    assert.match(appScript.body, /function browserConfigActions/);
+    assert.match(appScript.body, /function saveProxy/);
+    assert.match(appScript.body, /function proxyActions/);
+    assert.match(appScript.body, /Create session/);
+    assert.match(appScript.body, /Delete session/);
     assert.match(appScript.body, /Remote IP addresses/);
     assert.match(appScript.body, /Remote OS \/ kernel/);
 
@@ -69,6 +93,63 @@ test('gui serves static app and read-only config', async () => {
     assert.match(rejected.body.error, /read-only/);
   } finally {
     await server.close();
+  }
+});
+
+test('gui proxies asset mutations while keeping other pw-dev mutations read-only', async () => {
+  let received;
+  const pwdev = http.createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      received = { method: req.method, url: req.url, body };
+      writeJson(res, 200, { ok: true, browser: body ? JSON.parse(body) : undefined });
+    });
+  });
+  await new Promise((resolve) => pwdev.listen(0, '127.0.0.1', resolve));
+  const pwdevUrl = `http://127.0.0.1:${pwdev.address().port}`;
+  const gui = await startPwDevGuiServer({ port: 0, pwDevUrl: pwdevUrl });
+
+  try {
+    const configCreated = await postJson(`${gui.origin}/api/pwdev/browser-configs`, { id: 'gui-config', headless: true });
+    assert.equal(configCreated.statusCode, 200);
+    assert.deepEqual(received, {
+      method: 'POST',
+      url: '/_pwdev/browser-configs',
+      body: '{"id":"gui-config","headless":true}',
+    });
+
+    const configDeleted = await request(`${gui.origin}/api/pwdev/browser-configs/gui-config`, { method: 'DELETE' });
+    assert.equal(configDeleted.statusCode, 200);
+    assert.equal(received.method, 'DELETE');
+    assert.equal(received.url, '/_pwdev/browser-configs/gui-config');
+
+    const created = await postJson(`${gui.origin}/api/pwdev/browsers`, { id: 'gui-browser', browserConfigId: 'gui-config' });
+    assert.equal(created.statusCode, 200);
+    assert.deepEqual(received, {
+      method: 'POST',
+      url: '/_pwdev/browsers',
+      body: '{"id":"gui-browser","browserConfigId":"gui-config"}',
+    });
+
+    const deleted = await request(`${gui.origin}/api/pwdev/browsers/gui-browser`, { method: 'DELETE' });
+    assert.equal(deleted.statusCode, 200);
+    assert.equal(received.method, 'DELETE');
+    assert.equal(received.url, '/_pwdev/browsers/gui-browser');
+
+    const proxyCreated = await postJson(`${gui.origin}/api/pwdev/proxies`, { id: 'gui-proxy', proxyUrl: 'http://127.0.0.1:8899' });
+    assert.equal(proxyCreated.statusCode, 200);
+    assert.equal(received.url, '/_pwdev/proxies');
+    const proxyDeleted = await request(`${gui.origin}/api/pwdev/proxies/gui-proxy`, { method: 'DELETE' });
+    assert.equal(proxyDeleted.statusCode, 200);
+    assert.equal(received.url, '/_pwdev/proxies/gui-proxy');
+
+    const rejected = await postJson(`${gui.origin}/api/pwdev/apps`, { id: 'nope' });
+    assert.equal(rejected.statusCode, 405);
+  } finally {
+    await gui.close();
+    await new Promise((resolve) => pwdev.close(resolve));
   }
 });
 
@@ -123,9 +204,13 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
       ok: true,
       apps: [{ id: 'main', networkId: 'agent-whistle' }],
     },
+    '/_pwdev/browser-configs': {
+      ok: true,
+      browserConfigs: [{ id: 'main-browser', profile: 'work-okta' }],
+    },
     '/_pwdev/browsers': {
       ok: true,
-      browsers: [{ id: 'main-browser', appId: 'main', networkId: 'agent-whistle' }],
+      browsers: [{ id: 'checkout-smoke', browserConfigId: 'main-browser', appId: 'main', proxyId: 'proxy-main' }],
     },
     '/_pwdev/proxies': { ok: true, proxies: [{ id: 'proxy-main' }] },
     '/_pwdev/networks': { ok: true, networks: [{ id: 'agent-whistle' }] },
@@ -156,7 +241,8 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     assert.equal(snapshot.statusCode, 200);
     assert.equal(snapshot.body.ok, true);
     assert.equal(snapshot.body.server.apps.body.apps[0].id, 'main');
-    assert.equal(snapshot.body.server.browsers.body.browsers[0].id, 'main-browser');
+    assert.equal(snapshot.body.server.browserConfigs.body.browserConfigs[0].id, 'main-browser');
+    assert.equal(snapshot.body.server.browsers.body.browsers[0].id, 'checkout-smoke');
     assert.deepEqual(snapshot.body.server.proxyStatuses, [{ id: 'proxy-main', running: true }]);
     assert.equal(snapshot.body.broker.status.body.state, 'active');
     assert.equal(snapshot.body.broker.status.body.instanceCount, 1);
@@ -191,7 +277,7 @@ test('gui snapshot keeps SSH topology reported through pw-dev server', async () 
       manifest: { ok: true, id: 'main' },
     },
     '/_pwdev/apps': { ok: true, apps: [] },
-    '/_pwdev/browsers': { ok: true, browsers: [] },
+    '/_pwdev/browser-configs': { ok: true, browserConfigs: [] },
     '/_pwdev/proxies': { ok: true, proxies: [] },
     '/_pwdev/networks': { ok: true, networks: [] },
   });
@@ -252,7 +338,7 @@ test('gui snapshot discovers multiple brokers from server sessions', async () =>
       manifest: { ok: true, id: 'main' },
     },
     '/_pwdev/apps': { ok: true, apps: [] },
-    '/_pwdev/browsers': { ok: true, browsers: [] },
+    '/_pwdev/browser-configs': { ok: true, browserConfigs: [] },
     '/_pwdev/sessions': {
       ok: true,
       sessions: [{ sessionId: 'session-2', brokerUrl: broker2.origin }],

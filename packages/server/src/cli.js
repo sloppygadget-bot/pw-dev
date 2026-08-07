@@ -113,6 +113,10 @@ export function parseArgs(argv) {
       options.appUrl = readValue(argv, ++i, arg);
     } else if (arg === '--app-registry-file') {
       options.appRegistryFile = path.resolve(readValue(argv, ++i, arg));
+    } else if (arg === '--browser-config-registry-file') {
+      options.browserConfigRegistryFile = path.resolve(readValue(argv, ++i, arg));
+    } else if (arg === '--browser-registry-file') {
+      options.browserRegistryFile = path.resolve(readValue(argv, ++i, arg));
     } else if (arg === '--broker-url') {
       options.brokerUrl = readValue(argv, ++i, arg);
     } else if (arg === '--proxy-manager-url') {
@@ -168,6 +172,10 @@ Options:
   --app-url <url>  App URL. Default: this server origin
   --app-registry-file <file>
                   Durable app registry. Default: <worktree>/.pw-dev/apps.json
+  --browser-config-registry-file <file>
+                  Durable browser config registry. Default: <worktree>/.pw-dev/browser-configs.json
+  --browser-registry-file <file>
+                  Durable browser registry. Default: <worktree>/.pw-dev/browsers.json
   --broker-url <url>
                   Broker URL. Default: http://127.0.0.1:18080
   --proxy-manager-url <url>

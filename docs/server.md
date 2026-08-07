@@ -48,19 +48,19 @@ The app registry persists in `<worktree>/.pw-dev/apps.json` by default. Pass
 broker-owned runtime state and are intentionally not restored after a server
 restart.
 
-Browser templates persist in `<worktree>/.pw-dev/browsers.json`. A template
-contains `id`, optional `appId` and `targetUrl`, optional `profile`,
-one fixed `proxyId` or a reusable `proxyIds` pool, broker override, and browser
-launch options. `appId`
-links an app's instructions/accounts/defaults when applicable; omit it for a
-standalone crawler or generic automation browser. Its live broker instance is transient:
-after a broker restart, start the same template again rather than recreating
-its configuration.
+Browser configs persist in `<worktree>/.pw-dev/browser-configs.json`. A config
+contains reusable Chrome launch settings such as `targetUrl`, `profile`, broker
+override, SSL handling, and headless mode. It cannot be started directly.
+Browsers persist in `<worktree>/.pw-dev/browsers.json`; each browser requires a
+`browserConfigId` and may reference an app and one fixed proxy or proxy pool.
 
 ```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/browser-configs \
+  -H 'content-type: application/json' \
+  -d '{"id":"checkout-chrome","ignoreSslErrors":true}'
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
   -H 'content-type: application/json' \
-  -d '{"id":"checkout-tax","appId":"checkout-tax","proxyId":"whistle-main","ignoreSslErrors":true}'
+  -d '{"id":"checkout-tax","browserConfigId":"checkout-chrome","appId":"checkout-tax","proxyId":"whistle-main"}'
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop
 ```
@@ -87,10 +87,9 @@ external manager with `--proxy-manager-url`. The standalone `npm start -- proxy`
 command remains available for that setup.
 
 Managed proxies are durable and reusable. For task/test isolation, create a
-small pool of profiles and configure the browser template with `proxyIds`.
-Starting a template session leases one available proxy exclusively; stopping
-the session releases the lease but leaves the Whistle process and profile
-available for another task. The manager starts a stopped managed proxy
+small pool of profiles and configure each browser with `proxyIds`.
+Starting a browser selects one available proxy exclusively. Stopping preserves
+that reservation; destroying the browser releases it. The manager starts a stopped managed proxy
 idempotently when it is leased. Only explicit proxy deletion removes its
 profile. Processes under the configured storage root that have no valid
 pw-dev profile are treated as orphans; unrelated Whistle instances are not
@@ -248,9 +247,12 @@ managed proxy by `proxyId` when starting the browser. The broker maps the proxy
 on its SSH peer automatically and reuses that mapping for later starts.
 
 ```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/browser-configs \
+  -H 'content-type: application/json' \
+  -d '{"id":"checkout-chrome","ignoreSslErrors":true}'
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
   -H 'content-type: application/json' \
-  -d '{"id":"checkout-tax","appId":"checkout-tax","proxyId":"whistle-main","ignoreSslErrors":true}'
+  -d '{"id":"checkout-tax","browserConfigId":"checkout-chrome","appId":"checkout-tax","proxyId":"whistle-main"}'
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start
 ```
 
@@ -285,38 +287,55 @@ how to apply the finished rules through the server-proxied proxy API.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
 
-## Browser templates and sessions
+## Browser configs, browsers, and sessions
 
-Create a persisted browser template, then start it without a launch payload:
+Create a persisted browser config, compose it into a browser, then start the
+browser without a launch payload:
 
 ```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/browser-configs \
+  -H 'content-type: application/json' \
+  -d '{"id":"checkout-chrome","targetUrl":"http://127.0.0.1:5174","profile":"checkout-tax","ignoreSslErrors":true}'
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
   -H 'content-type: application/json' \
-  -d '{"id":"checkout-tax","appId":"checkout-tax","targetUrl":"http://127.0.0.1:5174","profile":"checkout-tax","ignoreSslErrors":true}'
+  -d '{"id":"checkout-tax","browserConfigId":"checkout-chrome","appId":"checkout-tax"}'
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start
 ```
 
 The response contains a transient session with its `cdpUrl`. Attach Playwright
-to that URL and navigate to `browser.targetUrl` when present. Sessions are the
+to that URL and navigate to `browser.components.browserConfig.targetUrl` when
+present. Pass `lease` metadata in the start body to identify the agent running
+the script:
+
+```json
+{
+  "lease": { "owner": "agent-name", "agentId": "subagent-1", "taskId": "pw-task", "ttlMs": 30000 }
+}
+```
+
+The response includes `session.lease.leaseId`. Heartbeat it with
+`POST /_pwdev/sessions/:id/heartbeat` and `{ "leaseId": "..." }` while the
+script runs, then release it with `POST /_pwdev/sessions/:id/release` when
+done. A stale lease expires without stopping Chrome, and another agent can
+claim the still-running session. Inspect `GET /_pwdev/browsers/:id` for
+`status: "occupied"` plus `occupancy.owner`, `occupancy.taskId`, and
+`occupancy.heartbeatAt`. Sessions are the
 server's reconciled view of live broker instances; broker status remains the
-source of truth. Stop the template or its session explicitly:
+source of truth. Stop the browser or its session explicitly:
 
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop
 curl -X POST http://127.0.0.1:9696/_pwdev/sessions/checkout-tax__default/stop
 ```
 
-For parallel isolated instances from one template, pass a `sessionId`. pw-dev
-derives a separate persistent profile (`<template-id>__<session-id>`) unless a
-different `profile` is supplied:
+For parallel isolated instances, create multiple browsers that reference one
+browser config. pw-dev derives a separate persistent profile for each browser:
 
 ```bash
-curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/start \
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
   -H 'content-type: application/json' \
-  -d '{"sessionId":"shard-1"}'
-curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop \
-  -H 'content-type: application/json' \
-  -d '{"sessionId":"shard-1"}'
+  -d '{"id":"checkout-shard-1","browserConfigId":"checkout-chrome","appId":"checkout-tax"}'
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-shard-1/start
 ```
 
 To give concurrent tasks separate Whistle traffic contexts, configure a proxy
@@ -325,18 +344,57 @@ pool instead of one fixed `proxyId`:
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
   -H 'content-type: application/json' \
-  -d '{"id":"checkout-tax","appId":"checkout-tax","proxyIds":["checkout-traffic-a","checkout-traffic-b"]}'
+  -d '{"id":"checkout-shard-1","browserConfigId":"checkout-chrome","appId":"checkout-tax","proxyIds":["checkout-traffic-a","checkout-traffic-b"]}'
 ```
 
 Each active session receives `session.proxyLease`. Use its
 `trafficStartTime` as the `startTime` query value when reading
-`/_pwdev/proxies/:id/traffic`. Stopping the browser template or session releases
-the lease; it does not stop or delete the durable proxy.
-Leases are transient like sessions; stop active template sessions before
-restarting the pw-dev server.
+`/_pwdev/proxies/:id/traffic`. Stopping preserves the browser's proxy
+reservation; destroying the browser releases it without deleting the durable
+proxy profile.
 
 Apps no longer own browser lifecycle. The retired
 `/_pwdev/apps/:id/browser/*` routes return `410 Gone`.
+
+## Browsers
+
+A browser is a durable reusable browser suite. It references one required
+browser config and may reference an app plus either one fixed proxy or a pool
+of proxies. It also carries a workflow-specific `readme`.
+
+The browser derives a stable Chrome profile from the browser config base
+profile and browser id, for example:
+
+```text
+work-okta__checkout-smoke
+```
+
+The same browser can be stopped and started again without logging in again.
+Only one session may occupy a browser. A proxy selected for a browser
+is reserved for that browser even while its session is stopped. A proxy
+pool selects one available proxy on first start and keeps that reservation.
+
+```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
+  -H 'content-type: application/json' \
+  -d '{
+    "id": "checkout-smoke",
+    "browserConfigId": "checkout-browser",
+    "appId": "checkout-main",
+    "proxyIds": ["checkout-proxy-a", "checkout-proxy-b"],
+    "readme": "Use the checkout test account; do not submit real orders."
+  }'
+
+curl http://127.0.0.1:9696/_pwdev/browsers/checkout-smoke
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-smoke/start
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-smoke/stop
+curl -X DELETE http://127.0.0.1:9696/_pwdev/browsers/checkout-smoke
+```
+
+Stopping releases the broker instance but preserves the profile and proxy
+reservation. Destroying stops the session, clears the derived broker profile,
+releases the proxy reservation, and removes only the browser record. The
+referenced app, proxy, and browser config remain reusable.
 
 ## Endpoints
 
@@ -354,12 +412,20 @@ GET    /_pwdev/proxies/:id/traffic
 GET    /_pwdev/sessions
 GET    /_pwdev/sessions/:id
 POST   /_pwdev/sessions/:id/stop
+POST   /_pwdev/sessions/:id/claim
+POST   /_pwdev/sessions/:id/heartbeat
+POST   /_pwdev/sessions/:id/release
 
 GET    /_pwdev/apps
 POST   /_pwdev/apps
 GET    /_pwdev/apps/:id
 DELETE /_pwdev/apps/:id
 GET    /_pwdev/apps/:id/manifest
+
+GET    /_pwdev/browser-configs
+POST   /_pwdev/browser-configs
+GET    /_pwdev/browser-configs/:id
+DELETE /_pwdev/browser-configs/:id
 
 GET    /_pwdev/browsers
 POST   /_pwdev/browsers

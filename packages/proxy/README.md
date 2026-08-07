@@ -18,7 +18,7 @@ own managed proxy configuration.
 - Delete is the only operation that removes a managed profile.
 
 Profiles can exist without an app association. This makes them reusable across
-apps, browser templates, tests, and tasks.
+apps, browser configs, tests, and tasks.
 
 ## Start
 
@@ -34,8 +34,8 @@ directly.
 
 ## Reusable browser pools
 
-Create several durable proxies, then put their ids in a browser template's
-`proxyIds` field. Each active template session leases one proxy exclusively.
+Create several durable proxies, then put their ids in a browser config's
+`proxyIds` field. Each durable browser reserves one proxy exclusively.
 Stopping the browser session releases the lease while leaving the proxy running
 and reusable.
 

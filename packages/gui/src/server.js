@@ -116,8 +116,9 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   const [
     serverStatus,
     apps,
-    browsers,
+    browserConfigs,
     sessions,
+    browsers,
     serverProxies,
     serverNetworks,
     brokerStatus,
@@ -127,8 +128,9 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   ] = await Promise.all([
     fetchJsonFrom(`${pwDevUrl}/_pwdev/status`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/apps`),
-    fetchJsonFrom(`${pwDevUrl}/_pwdev/browsers`),
+    fetchJsonFrom(`${pwDevUrl}/_pwdev/browser-configs`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/sessions`),
+    fetchJsonFrom(`${pwDevUrl}/_pwdev/browsers`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/proxies`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/networks`),
     fetchJsonFrom(`${brokerUrl}/_broker/status`),
@@ -136,7 +138,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
     fetchJsonFrom(`${brokerUrl}/_broker/proxy-forwards`),
     fetchJsonFrom(`${proxyManagerUrl}/_proxy/status`),
   ]);
-  const brokerUrls = discoverBrokerUrls({ brokerUrl, serverStatus, browsers, sessions });
+  const brokerUrls = discoverBrokerUrls({ brokerUrl, serverStatus, browserConfigs, sessions });
   const brokers = await Promise.all(brokerUrls.map((url) => collectBrokerSnapshot(url)));
   const primaryBroker = brokers.find((broker) => broker.url === brokerUrl) ?? brokers[0];
   const proxyStatuses = await collectProxyStatuses(serverProxies.body?.proxies, proxyStatus.body?.proxies);
@@ -148,8 +150,9 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
     server: {
       status: serverStatus,
       apps,
-      browsers,
+      browserConfigs,
       sessions,
+      browsers,
       proxies: serverProxies,
       proxyStatuses,
       networks: serverNetworks,
@@ -166,7 +169,7 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   };
 }
 
-function discoverBrokerUrls({ brokerUrl, serverStatus, browsers, sessions }) {
+function discoverBrokerUrls({ brokerUrl, serverStatus, browserConfigs, sessions }) {
   const urls = new Set();
   const add = (value) => {
     if (!value) return;
@@ -181,7 +184,7 @@ function discoverBrokerUrls({ brokerUrl, serverStatus, browsers, sessions }) {
   add(brokerUrl);
   add(serverStatus.body?.broker?.url);
   for (const session of sessions.body?.sessions ?? []) add(session.brokerUrl);
-  for (const browser of browsers.body?.browsers ?? []) add(browser.brokerUrl);
+  for (const browserConfig of browserConfigs.body?.browserConfigs ?? []) add(browserConfig.brokerUrl);
   return [...urls];
 }
 
@@ -274,18 +277,27 @@ function fetchJsonFrom(rawUrl) {
 }
 
 async function proxyPwDevRequest({ req, res, requestUrl, pwDevUrl }) {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
+  const isGuiApiPath = requestUrl.pathname === '/api/pwdev' || requestUrl.pathname.startsWith('/api/pwdev/');
+  const suffix = isGuiApiPath ? requestUrl.pathname.slice('/api/pwdev'.length) : requestUrl.pathname;
+  const upstreamPath = isGuiApiPath ? `/_pwdev${suffix || ''}` : suffix;
+  const assetMutation = isGuiApiPath && (
+    upstreamPath === '/_pwdev/browser-configs' || upstreamPath.startsWith('/_pwdev/browser-configs/') ||
+    upstreamPath === '/_pwdev/browsers' || upstreamPath.startsWith('/_pwdev/browsers/') ||
+    upstreamPath === '/_pwdev/proxies' || upstreamPath.startsWith('/_pwdev/proxies/')
+  ) && ['POST', 'DELETE'].includes(req.method);
+  if (req.method !== 'GET' && req.method !== 'HEAD' && !assetMutation) {
     writeJson(res, 405, { ok: false, error: 'pw-dev GUI is read-only' });
     return;
   }
 
-  const isGuiApiPath = requestUrl.pathname === '/api/pwdev' || requestUrl.pathname.startsWith('/api/pwdev/');
-  const suffix = isGuiApiPath ? requestUrl.pathname.slice('/api/pwdev'.length) : requestUrl.pathname;
-  const upstreamPath = isGuiApiPath ? `/_pwdev${suffix || ''}` : suffix;
   const upstreamUrl = new URL(`${upstreamPath}${requestUrl.search}`, ensureTrailingSlash(pwDevUrl));
   const upstream = http.request(upstreamUrl, {
     method: req.method,
-    headers: { accept: req.headers.accept || 'application/json' },
+    headers: {
+      accept: req.headers.accept || 'application/json',
+      ...(req.headers['content-type'] ? { 'content-type': req.headers['content-type'] } : {}),
+      ...(req.headers['content-length'] ? { 'content-length': req.headers['content-length'] } : {}),
+    },
   }, (response) => {
     const headers = {
       ...response.headers,
@@ -301,7 +313,8 @@ async function proxyPwDevRequest({ req, res, requestUrl, pwDevUrl }) {
       error: `pw-dev server is unreachable at ${pwDevUrl}: ${error.message}`,
     });
   });
-  upstream.end();
+  if (assetMutation) req.pipe(upstream);
+  else upstream.end();
 }
 
 async function serveStaticFile({ req, res, filePath, contentType }) {

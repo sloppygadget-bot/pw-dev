@@ -11,6 +11,7 @@
 
 import fs from 'node:fs/promises';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 import net from 'node:net';
@@ -38,6 +39,8 @@ const MIME_TYPES = new Map([
 
 const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
 const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
+const DEFAULT_SESSION_LEASE_TTL_MS = 30_000;
+const MAX_SESSION_LEASE_TTL_MS = 60 * 60 * 1000;
 
 /**
  * Options for `startPwDevServer`.
@@ -64,8 +67,9 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {string=} proxyServer Optional Chrome proxy server URL.
  * @property {string=} appRegistryFile Durable app registry JSON path. Defaults to `<worktree>/.pw-dev/apps.json`.
  * @property {string=} proxyRegistryFile Durable proxy registry JSON path. Defaults to `<worktree>/.pw-dev/proxies.json`.
- * @property {string=} browserRegistryFile Durable browser template JSON path. Defaults to `<worktree>/.pw-dev/browsers.json`.
+ * @property {string=} browserConfigRegistryFile Durable browser config JSON path. Defaults to `<worktree>/.pw-dev/browser-configs.json`.
  * @property {boolean=} registerDefaultApp Register the root manifest in `/_pwdev/apps`. Defaults to false.
+ * @property {string=} browserRegistryFile Durable browser JSON path. Defaults to `<worktree>/.pw-dev/browsers.json`.
  */
 
 /**
@@ -167,6 +171,33 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  */
 
 /**
+ * Durable reusable browser suite.
+ *
+ * @typedef {object} PwDevBrowser
+ * @property {string} id Stable browser id.
+ * @property {string=} name Human-readable name.
+ * @property {string=} readme Workflow-specific agent instructions.
+ * @property {string} browserConfigId Required reusable browser config.
+ * @property {string=} appId Optional app reference.
+ * @property {string=} proxyId Fixed or currently selected reserved proxy.
+ * @property {string[]=} proxyIds Optional pool used for automatic selection.
+ * @property {string=} profile Stable derived or explicitly overridden Chrome profile.
+ * @property {string=} sessionId Current transient session id.
+ * @property {PwDevSessionLease=} lease Agent lease identifying the current Playwright owner.
+ * @property {string=} createdAt Registry creation timestamp.
+ * @property {string=} updatedAt Registry update timestamp.
+ */
+
+/**
+ * @typedef {object} PwDevBrowserRegistry
+ * @property {() => PwDevBrowser[]} list
+ * @property {(id: string) => (PwDevBrowser | undefined)} get
+ * @property {(raw: Record<string, unknown>) => PwDevBrowser} upsert
+ * @property {(id: string, patch: Record<string, unknown>) => (PwDevBrowser | undefined)} update
+ * @property {(id: string) => boolean} delete
+ */
+
+/**
  * Agent/user task metadata attached to an active app browser session.
  *
  * This lives at the server layer because it explains why a browser exists. The
@@ -184,7 +215,9 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  *
  * @typedef {object} PwDevBrowserSession
  * @property {string} sessionId Stable session id.
- * @property {string} appId App that owns this session.
+ * @property {string=} browserId Durable browser that owns this session.
+ * @property {string=} browserConfigId Browser config used to launch the session.
+ * @property {string=} appId App associated with this session.
  * @property {'default'|'task'} scope Session scope for app lifecycle compatibility.
  * @property {string=} taskId Task id that owns the session when `scope === "task"`.
  * @property {PwDevActiveTask=} activeTask Task metadata that owns the session.
@@ -198,6 +231,22 @@ const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
  * @property {{ proxyId: string, sessionId: string, leasedAt: string, trafficStartTime: string }=} proxyLease Exclusive proxy-pool lease and Whistle traffic cursor held for this session.
  * @property {string=} proxyForwardId Broker proxy-forward id associated with the session.
  * @property {string=} proxyServer Explicit Chrome proxy server URL associated with the session.
+ * @property {PwDevSessionLease=} lease Agent lease identifying the current Playwright owner.
+ */
+
+/**
+ * A short-lived agent lease for a browser session. The lease is separate from
+ * the browser session itself: expiry makes the session claimable again but
+ * does not stop Chrome.
+ *
+ * @typedef {object} PwDevSessionLease
+ * @property {string} leaseId Opaque token required for heartbeat and release.
+ * @property {string} owner Agent/user/tool that claimed the session.
+ * @property {string=} agentId Stable subagent or runner identity.
+ * @property {string=} taskId Task or Playwright script identity.
+ * @property {string} claimedAt ISO timestamp when the lease was created.
+ * @property {string} heartbeatAt ISO timestamp of the last claim/heartbeat.
+ * @property {string} expiresAt ISO timestamp after which the lease may be reclaimed.
  */
 
 /**
@@ -284,22 +333,25 @@ export async function startPwDevServer(options = {}) {
   const apps = createAppRegistry(loadPersistedApps(appRegistryFile), {
     persist: (registeredApps) => persistApps(appRegistryFile, registeredApps),
   });
-  const browserRegistryFile = path.resolve(options.browserRegistryFile ?? path.join(worktree, '.pw-dev', 'browsers.json'));
-  const browsers = createBrowserRegistry(loadPersistedBrowsers(browserRegistryFile), {
-    persist: (registeredBrowsers) => persistRegistryFile(browserRegistryFile, { version: 1, browsers: registeredBrowsers }),
+  const browserConfigRegistryFile = path.resolve(options.browserConfigRegistryFile ?? path.join(worktree, '.pw-dev', 'browser-configs.json'));
+  const browserConfigs = createBrowserConfigRegistry(loadPersistedBrowserConfigs(browserConfigRegistryFile), {
+    persist: (registeredBrowserConfigs) => persistRegistryFile(browserConfigRegistryFile, { version: 1, browserConfigs: registeredBrowserConfigs }),
   });
   const proxyRegistryFile = path.resolve(options.proxyRegistryFile ?? path.join(worktree, '.pw-dev', 'proxies.json'));
   const proxies = createProxyRegistry(loadPersistedProxies(proxyRegistryFile), {
     persist: (registeredProxies) => persistProxies(proxyRegistryFile, registeredProxies),
   });
   const sessions = createSessionRegistry();
-  const pendingProxyLeases = new Map();
+  const browserRegistryFile = path.resolve(options.browserRegistryFile ?? path.join(worktree, '.pw-dev', 'browsers.json'));
+  const browsers = createBrowserRegistry(loadPersistedBrowsers(browserRegistryFile), {
+    persist: (registeredBrowsers) => persistBrowsers(browserRegistryFile, registeredBrowsers),
+  });
   let origin;
 
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browsers, proxies, sessions, pendingProxyLeases, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -367,6 +419,8 @@ export async function startPwDevServer(options = {}) {
  * - `GET|POST /_pwdev/apps`
  * - `GET|DELETE /_pwdev/apps/:id`
  * - `GET /_pwdev/apps/:id/manifest`
+ * - `GET|POST /_pwdev/browser-configs`
+ * - `GET|DELETE /_pwdev/browser-configs/:id`
  * - `GET|POST /_pwdev/browsers`
  * - `GET|DELETE /_pwdev/browsers/:id`
  * - `POST /_pwdev/browsers/:id/start`
@@ -385,15 +439,15 @@ export async function startPwDevServer(options = {}) {
  *   metadata: Record<string, string | undefined>,
  *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
+ *   browsers: PwDevBrowserRegistry,
  *   sessions: PwDevSessionRegistry,
- *   pendingProxyLeases: Map<string, { proxyId: string, sessionId: string, leasedAt: string, trafficStartTime: string }>,
  *   broker: PwDevBrokerPairing,
  *   proxyManagerUrl: string,
  *   ensureProxyManager?: () => Promise<unknown>,
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browsers, proxies, sessions, pendingProxyLeases = new Map(), broker, proxyManagerUrl, ensureProxyManager }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -440,8 +494,13 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
     return;
   }
 
+  if (requestUrl.pathname === '/_pwdev/browser-configs' || requestUrl.pathname.startsWith('/_pwdev/browser-configs/')) {
+    await handleBrowserConfigsRequest({ req, res, requestUrl, browserConfigs, browsers, sessions, writeBody });
+    return;
+  }
+
   if (requestUrl.pathname === '/_pwdev/browsers' || requestUrl.pathname.startsWith('/_pwdev/browsers/')) {
-    await handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, pendingProxyLeases, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody });
+    await handleBrowsersRequest({ req, res, requestUrl, apps, browserConfigs, proxies, browsers, sessions, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody });
     return;
   }
 
@@ -451,12 +510,12 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/sessions')) {
-    await handleSessionsRequest({ req, res, requestUrl, apps, sessions, broker, serverUrl, writeBody });
+    await handleSessionsRequest({ req, res, requestUrl, apps, browsers, sessions, broker, serverUrl, writeBody });
     return;
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/proxies')) {
-    await handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxyManagerUrl, writeBody });
+    await handleProxiesRequest({ req, res, requestUrl, apps, browsers, sessions, broker, proxies, proxyManagerUrl, writeBody });
     return;
   }
 
@@ -730,18 +789,58 @@ function persistedNetwork(network) {
   return persistent;
 }
 
-function createBrowserRegistry(initialBrowsers = [], options = {}) {
-  const browsers = new Map(initialBrowsers.map((browser) => [browser.id, browser]));
-  const persist = () => options.persist?.(Array.from(browsers.values()));
+function createBrowserConfigRegistry(initialBrowserConfigs = [], options = {}) {
+  const browserConfigs = new Map(initialBrowserConfigs.map((browserConfig) => [browserConfig.id, browserConfig]));
+  const persist = () => options.persist?.(Array.from(browserConfigs.values()));
   return {
-    list: () => Array.from(browsers.values()).sort((a, b) => a.id.localeCompare(b.id)).map((browser) => ({ ...browser })),
+    list: () => Array.from(browserConfigs.values()).sort((a, b) => a.id.localeCompare(b.id)).map((browserConfig) => ({ ...browserConfig })),
+    get: (id) => browserConfigs.has(id) ? { ...browserConfigs.get(id) } : undefined,
+    upsert(raw) {
+      const browserConfig = validateBrowserConfig(raw);
+      const existing = browserConfigs.get(browserConfig.id);
+      const saved = { ...existing, ...browserConfig, updatedAt: new Date().toISOString() };
+      if (!existing?.createdAt) saved.createdAt = saved.updatedAt;
+      browserConfigs.set(saved.id, saved);
+      persist();
+      return { ...saved };
+    },
+    delete(id) {
+      const deleted = browserConfigs.delete(id);
+      if (deleted) persist();
+      return deleted;
+    },
+  };
+}
+
+/**
+ * Durable reusable browser registry. A browser references existing
+ * assets; only its selected proxy reservation and derived profile are stored.
+ * @param {Record<string, unknown>[]=} initialBrowsers
+ * @param {{ persist?: (browsers: Record<string, unknown>[]) => void }} options
+ * @returns {PwDevBrowserRegistry}
+ */
+export function createBrowserRegistry(initialBrowsers = [], options = {}) {
+  const browsers = new Map();
+  const persist = () => options.persist?.(Array.from(browsers.values()).map((item) => ({ ...item })));
+  const registry = {
+    list: () => Array.from(browsers.values()).sort((a, b) => a.id.localeCompare(b.id)).map((item) => ({ ...item })),
     get: (id) => browsers.has(id) ? { ...browsers.get(id) } : undefined,
     upsert(raw) {
-      const browser = validateBrowserTemplate(raw);
+      const browser = validateBrowserRegistration(raw);
       const existing = browsers.get(browser.id);
       const saved = { ...existing, ...browser, updatedAt: new Date().toISOString() };
       if (!existing?.createdAt) saved.createdAt = saved.updatedAt;
       browsers.set(saved.id, saved);
+      persist();
+      return { ...saved };
+    },
+    update(id, patch) {
+      const existing = browsers.get(id);
+      if (!existing) return undefined;
+      const saved = validateBrowserRegistration({ ...existing, ...patch, id });
+      saved.createdAt = existing.createdAt;
+      saved.updatedAt = new Date().toISOString();
+      browsers.set(id, saved);
       persist();
       return { ...saved };
     },
@@ -751,6 +850,8 @@ function createBrowserRegistry(initialBrowsers = [], options = {}) {
       return deleted;
     },
   };
+  for (const item of initialBrowsers) registry.upsert(item);
+  return registry;
 }
 
 function loadPersistedBrowsers(file) {
@@ -758,7 +859,25 @@ function loadPersistedBrowsers(file) {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'));
     if (!parsed || !Array.isArray(parsed.browsers)) throw new Error('expected an object with a browsers array');
-    return parsed.browsers.map(validateBrowserTemplate);
+    return parsed.browsers.map(validateBrowserRegistration);
+  } catch (error) {
+    throw new Error(`Could not load browser registry ${file}: ${error.message}`);
+  }
+}
+
+function persistBrowsers(file, browsers) {
+  persistRegistryFile(file, {
+    version: 1,
+    browsers: browsers.map(({ sessionId: _sessionId, ...browser }) => browser),
+  });
+}
+
+function loadPersistedBrowserConfigs(file) {
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'));
+    if (!parsed || !Array.isArray(parsed.browserConfigs)) throw new Error('expected an object with a browserConfigs array');
+    return parsed.browserConfigs.map(validateBrowserConfig);
   } catch (error) {
     throw new Error(`Could not load browser registry ${file}: ${error.message}`);
   }
@@ -811,6 +930,7 @@ function cloneBrowserSessions(sessions) {
       ...session,
       ...(session.activeTask ? { activeTask: { ...session.activeTask } } : {}),
       ...(session.proxyLease ? { proxyLease: { ...session.proxyLease } } : {}),
+      ...(session.lease ? { lease: { ...session.lease } } : {}),
     },
   ]));
 }
@@ -820,6 +940,82 @@ function cloneSession(session) {
     ...session,
     ...(session.activeTask ? { activeTask: { ...session.activeTask } } : {}),
     ...(session.proxyLease ? { proxyLease: { ...session.proxyLease } } : {}),
+    ...(session.lease ? { lease: { ...session.lease } } : {}),
+  };
+}
+
+/**
+ * Remove expired agent leases while preserving their broker-owned sessions.
+ * This is reconciliation-on-read so a crashed agent does not leave an
+ * in-memory lock behind and the server does not need a timer per session.
+ *
+ * @param {PwDevSessionRegistry} sessions
+ * @param {number=} now
+ */
+function reconcileSessionLeases(sessions, now = Date.now()) {
+  for (const session of sessions.list()) {
+    if (session.lease && isSessionLeaseExpired(session.lease, now)) {
+      sessions.update(session.sessionId, { lease: undefined });
+    }
+  }
+}
+
+function isSessionLeaseExpired(lease, now = Date.now()) {
+  const expiresAt = Date.parse(lease?.expiresAt ?? '');
+  return Number.isFinite(expiresAt) && expiresAt <= now;
+}
+
+function sessionLeaseInput(rawLease, { requireOwner = true } = {}) {
+  if (rawLease === undefined || rawLease === null) return undefined;
+  if (!rawLease || typeof rawLease !== 'object' || Array.isArray(rawLease)) {
+    throwValidationError('lease must be an object');
+  }
+  const owner = optionalString(rawLease.owner, 'lease.owner');
+  if (requireOwner && !owner) throwValidationError('lease.owner must be a non-empty string');
+  const ttlMs = rawLease.ttlMs === undefined
+    ? DEFAULT_SESSION_LEASE_TTL_MS
+    : requiredPositiveInteger(rawLease.ttlMs, 'lease.ttlMs');
+  if (ttlMs > MAX_SESSION_LEASE_TTL_MS) {
+    throwValidationError(`lease.ttlMs must be at most ${MAX_SESSION_LEASE_TTL_MS}`);
+  }
+  return omitUndefined({
+    owner,
+    agentId: optionalString(rawLease.agentId, 'lease.agentId'),
+    taskId: optionalString(rawLease.taskId, 'lease.taskId'),
+    ttlMs,
+  });
+}
+
+function createSessionLease(input, now = new Date()) {
+  const claimedAt = now.toISOString();
+  return {
+    leaseId: `lease_${randomUUID()}`,
+    owner: input.owner,
+    agentId: input.agentId,
+    taskId: input.taskId,
+    claimedAt,
+    heartbeatAt: claimedAt,
+    expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
+  };
+}
+
+function refreshSessionLease(session, input, now = new Date()) {
+  const lease = session.lease;
+  if (!lease || lease.leaseId !== input.leaseId) {
+    const error = new Error('Session lease is missing or does not belong to this client');
+    error.statusCode = 409;
+    throw error;
+  }
+  if (isSessionLeaseExpired(lease, now.getTime())) {
+    const error = new Error('Session lease has expired');
+    error.statusCode = 409;
+    throw error;
+  }
+  const heartbeatAt = now.toISOString();
+  return {
+    ...lease,
+    heartbeatAt,
+    expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
   };
 }
 
@@ -874,9 +1070,9 @@ export function createSessionRegistry(initialSessions = []) {
         .sort((a, b) => a.sessionId.localeCompare(b.sessionId))
         .map((session) => cloneSession(session));
     },
-    listByBrowser(browserId) {
+    listByBrowser(browserConfigId) {
       return Array.from(sessions.values())
-        .filter((session) => session.browserId === browserId)
+        .filter((session) => session.browserConfigId === browserConfigId)
         .sort((a, b) => a.sessionId.localeCompare(b.sessionId))
         .map((session) => cloneSession(session));
     },
@@ -1011,12 +1207,15 @@ function managedProxyRegistration(proxy) {
  *   requestUrl: URL,
  *   apps: PwDevAppRegistry,
  *   proxies: PwDevProxyRegistry,
+ *   browsers: PwDevBrowserRegistry,
+ *   sessions: PwDevSessionRegistry,
+ *   broker: PwDevBrokerPairing,
  *   proxyManagerUrl: string,
  *   writeBody: boolean,
  * }} options
  * @returns {Promise<void>}
  */
-async function handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxyManagerUrl, writeBody }) {
+async function handleProxiesRequest({ req, res, requestUrl, apps, browsers, sessions, broker, proxies, proxyManagerUrl, writeBody }) {
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
 
   if (pathParts.length === 2 && pathParts[0] === '_pwdev' && pathParts[1] === 'proxies') {
@@ -1028,6 +1227,14 @@ async function handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxy
 
     if (req.method === 'POST') {
       const payload = await readJsonBody(req);
+      await reconcileManagedProxies({ apps, proxies, proxyManagerUrl });
+      const existing = proxies.get(payload.id);
+      const references = existing ? proxyReferences(existing.id, { apps, browsers }) : [];
+      if (existing && references.length) {
+        const error = new Error(`Proxy is referenced by ${references.join(', ')}`);
+        error.statusCode = 409;
+        throw error;
+      }
       const proxy = proxies.upsert(payload);
       writeJson(res, 200, { ok: true, proxy });
       return;
@@ -1076,6 +1283,20 @@ async function handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxy
   }
 
   if (req.method === 'DELETE') {
+    await reconcileManagedProxies({ apps, proxies, proxyManagerUrl });
+    await reconcileSessionsBestEffort({ sessions, broker });
+    const references = proxyReferences(id, { apps, browsers });
+    const occupants = proxyOccupants(id, sessions);
+    if (occupants.length) {
+      const error = new Error(`Proxy is occupied by ${occupants.join(', ')}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    if (references.length) {
+      const error = new Error(`Proxy is referenced by ${references.join(', ')}`);
+      error.statusCode = 409;
+      throw error;
+    }
     const deleted = proxies.delete(id);
     writeJson(res, deleted ? 200 : 404, deleted
       ? { ok: true, id }
@@ -1085,6 +1306,23 @@ async function handleProxiesRequest({ req, res, requestUrl, apps, proxies, proxy
 
   res.writeHead(405, { allow: 'GET, HEAD, DELETE' });
   res.end('Method Not Allowed');
+}
+
+function proxyReferences(proxyId, { apps, browsers }) {
+  return [
+    ...apps.list()
+      .filter((app) => app.proxyId === proxyId)
+      .map((app) => `app:${app.id}`),
+    ...browsers.list()
+      .filter((browser) => browser.proxyId === proxyId || browser.proxyIds?.includes(proxyId))
+      .map((browser) => `browser:${browser.id}`),
+  ];
+}
+
+function proxyOccupants(proxyId, sessions) {
+  return sessions.list()
+    .filter((session) => session.proxyId === proxyId)
+    .map((session) => session.sessionId);
 }
 
 /**
@@ -1224,6 +1462,7 @@ async function reconcileAppBrowserSessionsBestEffort({ apps, sessions, broker, a
  *   res: http.ServerResponse,
  *   requestUrl: URL,
  *   apps: PwDevAppRegistry,
+ *   browsers: PwDevBrowserRegistry,
  *   sessions: PwDevSessionRegistry,
  *   broker: PwDevBrokerPairing,
  *   serverUrl: string,
@@ -1231,7 +1470,7 @@ async function reconcileAppBrowserSessionsBestEffort({ apps, sessions, broker, a
  * }} options
  * @returns {Promise<void>}
  */
-async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, broker, serverUrl, writeBody }) {
+async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, sessions, broker, serverUrl, writeBody }) {
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
 
   if (pathParts.length === 2 && pathParts[0] === '_pwdev' && pathParts[1] === 'sessions') {
@@ -1241,6 +1480,7 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
       return;
     }
     await reconcileSessionsBestEffort({ sessions, broker });
+    reconcileSessionLeases(sessions);
     writeJson(res, 200, { ok: true, sessions: sessions.list() }, writeBody);
     return;
   }
@@ -1258,6 +1498,7 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
       return;
     }
     await reconcileSessionsBestEffort({ sessions, broker });
+    reconcileSessionLeases(sessions);
     const session = sessions.get(sessionId);
     if (!session) {
       writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
@@ -1268,6 +1509,56 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
     return;
   }
 
+  if (pathParts.length === 4 && ['claim', 'heartbeat', 'release'].includes(pathParts[3])) {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    await reconcileSessionsBestEffort({ sessions, broker });
+    reconcileSessionLeases(sessions);
+    const session = sessions.get(sessionId);
+    if (!session) {
+      writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
+      return;
+    }
+    const payload = await readJsonBody(req);
+    const action = pathParts[3];
+    if (action === 'claim') {
+      const input = sessionLeaseInput(payload);
+      const current = session.lease;
+      if (current && current.owner !== input.owner) {
+        const error = new Error(`Session is leased by ${current.owner}`);
+        error.statusCode = 409;
+        writeJson(res, error.statusCode, { ok: false, error: error.message, session: current }, writeBody);
+        return;
+      }
+      const lease = createSessionLease(input);
+      if (current?.owner === input.owner) lease.leaseId = current.leaseId;
+      const updated = sessions.update(sessionId, { lease });
+      writeJson(res, 200, { ok: true, session: updated, lease }, writeBody);
+      return;
+    }
+    if (action === 'heartbeat') {
+      const leaseId = requiredString(payload.leaseId, 'leaseId');
+      const input = sessionLeaseInput(payload, { requireOwner: false });
+      const lease = refreshSessionLease(session, { leaseId, ttlMs: input?.ttlMs ?? DEFAULT_SESSION_LEASE_TTL_MS });
+      const updated = sessions.update(sessionId, { lease });
+      writeJson(res, 200, { ok: true, session: updated, lease }, writeBody);
+      return;
+    }
+    const leaseId = requiredString(payload.leaseId, 'leaseId');
+    if (!session.lease || session.lease.leaseId !== leaseId) {
+      const error = new Error('Session lease is missing or does not belong to this client');
+      error.statusCode = 409;
+      writeJson(res, error.statusCode, { ok: false, error: error.message, session }, writeBody);
+      return;
+    }
+    const updated = sessions.update(sessionId, { lease: undefined });
+    writeJson(res, 200, { ok: true, session: updated, released: true }, writeBody);
+    return;
+  }
+
   if (pathParts.length === 4 && pathParts[3] === 'stop') {
     if (req.method !== 'POST') {
       res.writeHead(405, { allow: 'POST' });
@@ -1275,6 +1566,7 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
       return;
     }
     await reconcileSessionsBestEffort({ sessions, broker });
+    reconcileSessionLeases(sessions);
     const session = sessions.get(sessionId);
     if (!session) {
       writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
@@ -1285,78 +1577,19 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, sessions, bro
       body: { instanceId: session.browserInstanceId },
     });
     sessions.delete(sessionId);
+    if (session.browserId) browsers.update(session.browserId, { sessionId: undefined });
     const app = apps.get(session.appId);
     writeJson(res, 200, {
       ok: true,
       session,
       releasedProxyLease: session.proxyLease,
       app: app ? buildAppResponse(app, sessions) : undefined,
-      browser: stop,
+      stop,
     }, writeBody);
     return;
   }
 
   writeJson(res, 404, { ok: false, error: 'Unknown pw-dev sessions endpoint' }, writeBody);
-}
-
-/** Validate that every durable proxy named by a browser pool exists. */
-function validateBrowserProxyPool(template, proxies) {
-  if (!template.proxyIds) return;
-  for (const proxyId of template.proxyIds) {
-    if (!proxies.get(proxyId)) {
-      const error = new Error(`Unknown proxy in browser template pool: ${proxyId}`);
-      error.statusCode = 404;
-      throw error;
-    }
-  }
-}
-
-function buildProxyPoolState(template, sessions, pendingProxyLeases) {
-  if (!template.proxyIds) return undefined;
-  const pool = new Set(template.proxyIds);
-  const leases = new Map();
-  for (const session of sessions.list()) {
-    if (!session.proxyId || !pool.has(session.proxyId)) continue;
-    leases.set(session.proxyId, session.proxyLease ?? {
-      proxyId: session.proxyId,
-      sessionId: session.sessionId,
-      leasedAt: session.browserStartedAt,
-      trafficStartTime: session.browserStartedAt ? String(Date.parse(session.browserStartedAt)) : undefined,
-    });
-  }
-  for (const [proxyId, lease] of pendingProxyLeases) {
-    if (pool.has(proxyId) && !leases.has(proxyId)) leases.set(proxyId, lease);
-  }
-  return {
-    proxyIds: [...template.proxyIds],
-    availableProxyIds: template.proxyIds.filter((proxyId) => !leases.has(proxyId)),
-    leases: [...leases.values()],
-  };
-}
-
-function reserveBrowserProxyLease({ template, sessions, pendingProxyLeases, sessionId }) {
-  const pool = buildProxyPoolState(template, sessions, pendingProxyLeases);
-  if (!pool) return undefined;
-  if (pool.leases.some((lease) => lease.sessionId === sessionId)) {
-    const error = new Error('Browser template session is already starting');
-    error.statusCode = 409;
-    throw error;
-  }
-  const proxyId = pool.availableProxyIds[0];
-  if (!proxyId) {
-    const error = new Error(`No proxy is available in browser template pool: ${template.id}`);
-    error.statusCode = 409;
-    throw error;
-  }
-  const leasedAt = new Date();
-  const lease = {
-    proxyId,
-    sessionId,
-    leasedAt: leasedAt.toISOString(),
-    trafficStartTime: String(leasedAt.getTime()),
-  };
-  pendingProxyLeases.set(proxyId, lease);
-  return lease;
 }
 
 async function ensureManagedProxyRunning({ proxyId, proxies, proxyManagerUrl, ensureProxyManager }) {
@@ -1370,119 +1603,281 @@ async function ensureManagedProxyRunning({ proxyId, proxies, proxyManagerUrl, en
   if (started.proxy) proxies.upsert(managedProxyRegistration(started.proxy));
 }
 
-async function handleBrowserTemplatesRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, pendingProxyLeases, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody }) {
+function browserProfile(browserConfig, browser) {
+  const base = browserConfig.profile ?? browserConfig.id;
+  const profile = browser.profile ?? `${base}__${browser.id}`;
+  validateBrowserProfileName(profile, 'profile');
+  return profile;
+}
+
+function reservedBrowserProxy(browsers, proxyId, exceptId) {
+  return browsers.list().find((item) => item.id !== exceptId && item.proxyId === proxyId);
+}
+
+function chooseBrowserProxy({ browser, browsers, proxies }) {
+  if (browser.proxyId) {
+    if (!proxies.get(browser.proxyId)) throw new Error(`Unknown proxy: ${browser.proxyId}`);
+    const owner = reservedBrowserProxy(browsers, browser.proxyId, browser.id);
+    if (owner) {
+      const error = new Error(`Proxy is reserved by browser: ${owner.id}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    return browser.proxyId;
+  }
+  for (const proxyId of browser.proxyIds ?? []) {
+    if (!proxies.get(proxyId)) continue;
+    if (!reservedBrowserProxy(browsers, proxyId, browser.id)) return proxyId;
+  }
+  if (browser.proxyIds?.length) {
+    const error = new Error(`No proxy is available for browser: ${browser.id}`);
+    error.statusCode = 409;
+    throw error;
+  }
+  return undefined;
+}
+
+function buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions }) {
+  const app = browser.appId ? apps.get(browser.appId) : undefined;
+  const browserConfig = browserConfigs.get(browser.browserConfigId);
+  const session = browser.sessionId ? sessions.get(browser.sessionId) : undefined;
+  const proxy = browser.proxyId ? proxies.get(browser.proxyId) : undefined;
+  return omitUndefined({
+    ...browser,
+    sessionId: session?.sessionId,
+    status: session ? 'occupied' : 'ready',
+    occupancy: session
+      ? omitUndefined({
+        state: session.lease ? 'claimed' : 'unclaimed',
+        owner: session.lease?.owner,
+        agentId: session.lease?.agentId,
+        taskId: session.lease?.taskId,
+        heartbeatAt: session.lease?.heartbeatAt,
+        expiresAt: session.lease?.expiresAt,
+      })
+      : { state: 'ready' },
+    components: {
+      app: app ?? null,
+      proxy: proxy ?? null,
+      browserConfig: browserConfig ?? null,
+      session: session ?? null,
+    },
+  });
+}
+
+async function handleBrowsersRequest({ req, res, requestUrl, apps, browserConfigs, proxies, browsers, sessions, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody }) {
+  // Managed proxies may have been created through the delegated proxy API.
+  // Reconcile before validating browser references so the public browser API
+  // sees those durable profiles without requiring a separate registry POST.
+  await reconcileManagedProxies({ apps, proxies, proxyManagerUrl });
   const parts = requestUrl.pathname.split('/').filter(Boolean);
-  await reconcileSessionsBestEffort({ sessions, broker });
-  const withRuntime = (template) => {
-    const browserSessions = sessions.listByBrowser(template.id);
-    return omitUndefined({
-      ...template,
-      runtime: browserSessions.find((session) => session.scope === 'default'),
-      sessions: browserSessions,
-      proxyPool: buildProxyPoolState(template, sessions, pendingProxyLeases),
-    });
-  };
   if (parts.length === 2) {
     if (req.method === 'GET' || req.method === 'HEAD') {
-      writeJson(res, 200, { ok: true, browsers: browsers.list().map(withRuntime) }, writeBody);
+      await reconcileSessionsBestEffort({ sessions, broker });
+      reconcileSessionLeases(sessions);
+      writeJson(res, 200, { ok: true, browsers: browsers.list().map((browser) => buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions })) }, writeBody);
       return;
     }
     if (req.method === 'POST') {
-      const browser = browsers.upsert(await readJsonBody(req));
-      writeJson(res, 200, { ok: true, browser });
+      const raw = await readJsonBody(req);
+      if (raw.proxyId !== undefined && raw.proxyIds !== undefined) {
+        throwValidationError('proxyId and proxyIds are mutually exclusive');
+      }
+      const candidate = validateBrowserRegistration(raw);
+      const browser = candidate;
+      if (!browserConfigs.get(browser.browserConfigId)) throw new Error(`Unknown browser config: ${browser.browserConfigId}`);
+      if (browser.appId && !apps.get(browser.appId)) throw new Error(`Unknown app: ${browser.appId}`);
+      for (const proxyId of browser.proxyIds ?? (browser.proxyId ? [browser.proxyId] : [])) {
+        if (!proxies.get(proxyId)) throw new Error(`Unknown proxy: ${proxyId}`);
+      }
+      if (browser.proxyId) {
+        const owner = reservedBrowserProxy(browsers, browser.proxyId, browser.id);
+        if (owner) {
+          const error = new Error(`Proxy is reserved by browser: ${owner.id}`);
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+      const saved = browsers.upsert(browser);
+      writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser: saved, apps, browserConfigs, proxies, sessions }) }, writeBody);
       return;
     }
   }
+
   const id = parts[2] ? decodeURIComponent(parts[2]) : undefined;
-  const template = id ? browsers.get(id) : undefined;
-  if (!id || !template) {
-    writeJson(res, 404, { ok: false, error: `Unknown browser template: ${id}` }, writeBody);
+  const browser = id ? browsers.get(id) : undefined;
+  if (!id || !browser) {
+    writeJson(res, 404, { ok: false, error: `Unknown browser: ${id}` }, writeBody);
     return;
   }
   if (parts.length === 3 && (req.method === 'GET' || req.method === 'HEAD')) {
-    writeJson(res, 200, { ok: true, browser: withRuntime(template) }, writeBody);
+    await reconcileSessionsBestEffort({ sessions, broker });
+    reconcileSessionLeases(sessions);
+    writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions }) }, writeBody);
     return;
   }
   if (parts.length === 3 && req.method === 'DELETE') {
+    reconcileSessionLeases(sessions);
+    const activeSession = browser.sessionId ? sessions.get(browser.sessionId) : undefined;
+    if (activeSession?.lease) {
+      const error = new Error(`Browser is occupied by agent ${activeSession.lease.owner}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    if (browser.sessionId && sessions.get(browser.sessionId)) {
+      const session = sessions.get(browser.sessionId);
+      await brokerJson(session.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: session.browserInstanceId } });
+      sessions.delete(browser.sessionId);
+    }
+    const browserConfig = browserConfigs.get(browser.browserConfigId);
+    if (browserConfig) {
+      const profile = browserProfile(browserConfig, browser);
+      const app = browser.appId ? apps.get(browser.appId) : undefined;
+      await brokerJson(broker.resolve(browserConfig.brokerUrl ?? app?.brokerUrl), '/_broker/profiles/clear', {
+        method: 'POST',
+        body: { profile },
+      });
+    }
     browsers.delete(id);
-    writeJson(res, 200, { ok: true, id }, writeBody);
+    writeJson(res, 200, { ok: true, id, destroyed: true }, writeBody);
     return;
   }
   const action = parts[3];
   if (parts.length === 4 && action === 'start' && req.method === 'POST') {
-    const payload = await readJsonBody(req);
-    const app = template.appId ? apps.get(template.appId) : undefined;
-    if (template.appId && !app) throwValidationError(`Unknown app for browser template: ${template.appId}`);
-    const requestedSessionId = payload.sessionId === undefined ? undefined : requiredString(payload.sessionId, 'sessionId');
-    if (requestedSessionId) validateBrowserProfileName(requestedSessionId, 'sessionId');
-    const scope = requestedSessionId ? 'task' : 'default';
-    const sessionId = requestedSessionId ? `${id}__${requestedSessionId}` : `${id}__default`;
-    const profile = payload.profile === undefined
-      ? requestedSessionId ? `${template.profile ?? template.id}__${requestedSessionId}` : template.profile ?? template.id
-      : requiredString(payload.profile, 'profile');
-    validateBrowserProfileName(profile, 'profile');
-    const existing = sessions.get(sessionId);
-    if (existing) {
-      writeJson(res, 409, { ok: false, error: 'Browser template session is already active', session: existing }, writeBody);
-      return;
+    if (!browserConfigs.get(browser.browserConfigId)) throw new Error(`Unknown browser config: ${browser.browserConfigId}`);
+    if (browser.sessionId && sessions.get(browser.sessionId)) {
+      const error = new Error('Browser already has an active session');
+      error.statusCode = 409;
+      throw error;
     }
-    validateBrowserProxyPool(template, proxies);
-    const proxyLease = reserveBrowserProxyLease({ template, sessions, pendingProxyLeases, sessionId });
-    const brokerUrl = broker.resolve(template.brokerUrl ?? app?.brokerUrl);
-    const network = {};
-    try {
-      const selectedProxyId = proxyLease?.proxyId ?? template.proxyId ?? app?.proxyId;
-      await ensureManagedProxyRunning({ proxyId: selectedProxyId, proxies, proxyManagerUrl, ensureProxyManager });
-      const proxy = resolveProxyForBrowserStart({ proxies, proxyId: selectedProxyId });
-      const brokerStatus = proxy.proxyId && proxy.proxyServer ? await brokerJson(brokerUrl, '/_broker/status') : undefined;
-      const proxyPeer = brokerStatus?.topology?.mode === 'ssh' && brokerStatus.topology.remote ? 'ssh-peer' : undefined;
-      const start = await brokerJson(brokerUrl, '/_broker/start', {
-        method: 'POST',
-        body: omitUndefined({
-          profile,
-          proxyServer: proxy.proxyServer,
-          proxyForwardId: proxy.proxyForwardId,
-          proxyPeer,
-          proxyName: proxyPeer ? proxy.proxyId : undefined,
-          ignoreSslErrors: payload.ignoreSslErrors ?? template.ignoreSslErrors,
-          proxyBypassList: payload.proxyBypassList ?? template.proxyBypassList,
-          headless: payload.headless ?? template.headless,
-          resetProfile: payload.resetProfile ?? template.resetProfile,
-        }),
-      });
-      const cdpUrl = rewriteBrokerUrlToServerProxy(start.cdpUrl, serverUrl);
-      const session = sessions.upsert(makeBrowserSession({
-        sessionId, appId: template.appId, browserId: id, scope,
-        brokerUrl, start, profile, cdpUrl, network, proxy, proxyLease,
-      }));
-      writeJson(res, 200, {
-        ok: true,
-        browser: withRuntime(template),
-        session,
-        proxyLease,
-        start: { ...start, cdpUrl },
-      }, writeBody);
-    } finally {
-      if (proxyLease) pendingProxyLeases.delete(proxyLease.proxyId);
-    }
+    const startPayload = await readJsonBody(req);
+    const requestedLease = sessionLeaseInput(startPayload.lease);
+    const browserConfig = browserConfigs.get(browser.browserConfigId);
+    const app = browser.appId ? apps.get(browser.appId) : undefined;
+    if (browser.appId && !app) throw new Error(`Unknown app: ${browser.appId}`);
+    const selectedProxyId = chooseBrowserProxy({ browser, browsers, proxies });
+    const profile = browserProfile(browserConfig, browser);
+    const sessionId = `${browser.id}__default`;
+    const brokerUrl = broker.resolve(browserConfig.brokerUrl ?? app?.brokerUrl);
+    await ensureManagedProxyRunning({ proxyId: selectedProxyId, proxies, proxyManagerUrl, ensureProxyManager });
+    const proxy = resolveProxyForBrowserStart({ proxies, proxyId: selectedProxyId });
+    const brokerStatus = proxy.proxyId && proxy.proxyServer
+      ? await brokerJson(brokerUrl, '/_broker/status')
+      : undefined;
+    const proxyPeer = brokerStatus?.topology?.mode === 'ssh' && brokerStatus.topology.remote
+      ? 'ssh-peer'
+      : undefined;
+    const start = await brokerJson(brokerUrl, '/_broker/start', {
+      method: 'POST',
+      body: omitUndefined({
+        profile,
+        proxyServer: proxy.proxyServer,
+        proxyForwardId: proxy.proxyForwardId,
+        proxyPeer,
+        proxyName: proxyPeer ? proxy.proxyId : undefined,
+        ignoreSslErrors: browserConfig.ignoreSslErrors,
+        proxyBypassList: browserConfig.proxyBypassList,
+        headless: browserConfig.headless,
+        resetProfile: browserConfig.resetProfile,
+      }),
+    });
+    const session = sessions.upsert(omitUndefined({
+      sessionId,
+      appId: app?.id,
+      browserId: browser.id,
+      browserConfigId: browserConfig.id,
+      scope: 'default',
+      profile,
+      cdpUrl: rewriteBrokerUrlToServerProxy(start.cdpUrl, serverUrl),
+      brokerUrl,
+      browserInstanceId: start.instanceId,
+      browserStartedAt: start.startedAt,
+      proxyId: selectedProxyId,
+      proxyLease: selectedProxyId ? { proxyId: selectedProxyId, sessionId, leasedAt: new Date().toISOString(), trafficStartTime: String(Date.now()) } : undefined,
+      proxyForwardId: start.proxyForwardId,
+      proxyServer: start.proxyServer,
+      lease: requestedLease ? createSessionLease(requestedLease) : undefined,
+    }));
+    const updated = browsers.update(id, { proxyId: selectedProxyId ?? browser.proxyId, profile, sessionId });
+    writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser: updated, apps, browserConfigs, proxies, sessions }), session, start: { ...start, cdpUrl: session.cdpUrl } }, writeBody);
     return;
   }
   if (parts.length === 4 && action === 'stop' && req.method === 'POST') {
-    const payload = await readJsonBody(req);
-    const requestedSessionId = payload.sessionId === undefined ? undefined : requiredString(payload.sessionId, 'sessionId');
-    const runtime = requestedSessionId
-      ? sessions.get(`${id}__${requestedSessionId}`)
-      : sessions.listByBrowser(id).find((session) => session.scope === 'default');
-    if (!runtime?.browserInstanceId) {
-      writeJson(res, 200, { ok: true, browser: { ...template }, alreadyStopped: true }, writeBody);
+    const session = browser.sessionId ? sessions.get(browser.sessionId) : undefined;
+    if (session) {
+      const stop = await brokerJson(session.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: session.browserInstanceId } });
+      sessions.delete(session.sessionId);
+      const updated = browsers.update(id, { sessionId: undefined });
+      writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser: updated, apps, browserConfigs, proxies, sessions }), releasedSession: session.sessionId, stop }, writeBody);
       return;
     }
-    const stop = await brokerJson(runtime.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: runtime.browserInstanceId } });
-    sessions.delete(runtime.sessionId);
-    writeJson(res, 200, { ok: true, browser: withRuntime(template), releasedProxyLease: runtime.proxyLease, stop }, writeBody);
+    writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions }), alreadyStopped: true }, writeBody);
     return;
   }
-  writeJson(res, 404, { ok: false, error: 'Unknown browser template endpoint' }, writeBody);
+  writeJson(res, 404, { ok: false, error: 'Unknown browser endpoint' }, writeBody);
+}
+
+async function handleBrowserConfigsRequest({ req, res, requestUrl, browserConfigs, browsers, sessions, writeBody }) {
+  const parts = requestUrl.pathname.split('/').filter(Boolean);
+  if (parts.length === 2) {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      writeJson(res, 200, { ok: true, browserConfigs: browserConfigs.list() }, writeBody);
+      return;
+    }
+    if (req.method === 'POST') {
+      const payload = await readJsonBody(req);
+      const existing = browserConfigs.get(payload.id);
+      const references = existing ? browserConfigReferences(existing.id, browsers) : [];
+      if (existing && references.length) {
+        const error = new Error(`Browser config is referenced by ${references.join(', ')}`);
+        error.statusCode = 409;
+        throw error;
+      }
+      const browserConfig = browserConfigs.upsert(payload);
+      writeJson(res, 200, { ok: true, browserConfig }, writeBody);
+      return;
+    }
+  }
+  const id = parts[2] ? decodeURIComponent(parts[2]) : undefined;
+  const browserConfig = id ? browserConfigs.get(id) : undefined;
+  if (!id || !browserConfig) {
+    writeJson(res, 404, { ok: false, error: `Unknown browser config: ${id}` }, writeBody);
+    return;
+  }
+  if (parts.length === 3 && (req.method === 'GET' || req.method === 'HEAD')) {
+    writeJson(res, 200, { ok: true, browserConfig }, writeBody);
+    return;
+  }
+  if (parts.length === 3 && req.method === 'DELETE') {
+    const occupants = browserConfigOccupants(id, sessions);
+    if (occupants.length) {
+      const error = new Error(`Browser config is occupied by ${occupants.join(', ')}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    const references = browserConfigReferences(id, browsers);
+    if (references.length) {
+      const error = new Error(`Browser config is referenced by ${references.join(', ')}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    browserConfigs.delete(id);
+    writeJson(res, 200, { ok: true, id }, writeBody);
+    return;
+  }
+  writeJson(res, 404, { ok: false, error: 'Unknown browser config endpoint' }, writeBody);
+}
+
+function browserConfigReferences(browserConfigId, browsers) {
+  return browsers.list()
+    .filter((browser) => browser.browserConfigId === browserConfigId)
+    .map((browser) => `browser:${browser.id}`);
+}
+
+function browserConfigOccupants(browserConfigId, sessions) {
+  return sessions.list()
+    .filter((session) => session.browserConfigId === browserConfigId)
+    .map((session) => session.sessionId);
 }
 
 async function handleAppsRequest({ req, res, requestUrl, apps, proxies, sessions, broker, serverUrl, writeBody }) {
@@ -1573,7 +1968,7 @@ async function handleAppsRequest({ req, res, requestUrl, apps, proxies, sessions
   if (pathParts.length === 5 && pathParts[3] === 'browser') {
     writeJson(res, 410, {
       ok: false,
-      error: 'App-scoped browser lifecycle is retired. Create and start a persisted browser template under /_pwdev/browsers.',
+      error: 'App-scoped browser lifecycle is retired. Create and start a persisted browser config under /_pwdev/browser-configs.',
     }, writeBody);
     return;
   }
@@ -2019,11 +2414,12 @@ function findActiveBrowserProfile(sessions, profile) {
   return undefined;
 }
 
-function makeBrowserSession({ sessionId, appId, browserId, scope, task, activeTask, brokerUrl, start, profile, cdpUrl, network, proxy, proxyLease }) {
+function makeBrowserSession({ sessionId, browserId, appId, browserConfigId, scope, task, activeTask, brokerUrl, start, profile, cdpUrl, network, proxy, proxyLease }) {
   return omitUndefined({
     sessionId,
-    appId,
     browserId,
+    appId,
+    browserConfigId,
     scope,
     taskId: task?.id,
     profile: start.profile ?? profile,
@@ -2324,32 +2720,58 @@ function validateAppRegistration(rawApp) {
   return omitUndefined(app);
 }
 
-function validateBrowserTemplate(rawBrowser) {
+function validateBrowserConfig(rawBrowser) {
   if (!rawBrowser || typeof rawBrowser !== 'object' || Array.isArray(rawBrowser)) {
-    throwValidationError('browser template must be an object');
+    throwValidationError('browser config must be an object');
+  }
+  for (const field of ['appId', 'proxyId', 'proxyIds']) {
+    if (Object.hasOwn(rawBrowser, field)) {
+      throwValidationError(`${field} belongs to a browser, not a browser config`);
+    }
   }
   const id = requiredString(rawBrowser.id, 'id');
-  const appId = optionalString(rawBrowser.appId, 'appId');
   const profile = optionalString(rawBrowser.profile, 'profile');
-  const proxyId = optionalString(rawBrowser.proxyId, 'proxyId');
-  const proxyIds = rawBrowser.proxyIds === undefined ? undefined : validateStringArray(rawBrowser.proxyIds, 'proxyIds');
   if (profile) validateBrowserProfileName(profile, 'profile');
-  if (proxyIds?.length === 0) throwValidationError('proxyIds must contain at least one proxy id');
-  if (proxyIds && new Set(proxyIds).size !== proxyIds.length) throwValidationError('proxyIds must not contain duplicates');
-  if (proxyId && proxyIds) throwValidationError('proxyId and proxyIds are mutually exclusive');
   return omitUndefined({
     id,
-    appId,
     name: optionalString(rawBrowser.name, 'name'),
     targetUrl: optionalString(rawBrowser.targetUrl, 'targetUrl'),
     profile,
     brokerUrl: optionalString(rawBrowser.brokerUrl, 'brokerUrl'),
-    proxyId,
-    proxyIds,
     proxyBypassList: optionalString(rawBrowser.proxyBypassList, 'proxyBypassList'),
     ignoreSslErrors: rawBrowser.ignoreSslErrors === undefined ? undefined : Boolean(rawBrowser.ignoreSslErrors),
     headless: rawBrowser.headless === undefined ? undefined : Boolean(rawBrowser.headless),
     resetProfile: rawBrowser.resetProfile === undefined ? undefined : Boolean(rawBrowser.resetProfile),
+  });
+}
+
+/**
+ * Validate a durable browser definition.
+ * @param {Record<string, unknown>} rawBrowser
+ */
+function validateBrowserRegistration(rawBrowser) {
+  if (!rawBrowser || typeof rawBrowser !== 'object' || Array.isArray(rawBrowser)) {
+    throwValidationError('browser must be an object');
+  }
+  const id = requiredString(rawBrowser.id, 'id');
+  const proxyId = optionalString(rawBrowser.proxyId, 'proxyId');
+  const proxyIds = rawBrowser.proxyIds === undefined ? undefined : validateStringArray(rawBrowser.proxyIds, 'proxyIds');
+  if (proxyIds?.length === 0) throwValidationError('proxyIds must contain at least one proxy id');
+  if (proxyIds && new Set(proxyIds).size !== proxyIds.length) throwValidationError('proxyIds must not contain duplicates');
+  const profile = optionalString(rawBrowser.profile, 'profile');
+  if (profile) validateBrowserProfileName(profile, 'profile');
+  return omitUndefined({
+    id,
+    name: optionalString(rawBrowser.name, 'name'),
+    readme: optionalString(rawBrowser.readme, 'readme'),
+    browserConfigId: requiredString(rawBrowser.browserConfigId, 'browserConfigId'),
+    appId: optionalString(rawBrowser.appId, 'appId'),
+    proxyId,
+    proxyIds,
+    profile,
+    sessionId: optionalString(rawBrowser.sessionId, 'sessionId'),
+    createdAt: optionalString(rawBrowser.createdAt, 'createdAt'),
+    updatedAt: optionalString(rawBrowser.updatedAt, 'updatedAt'),
   });
 }
 
@@ -2559,8 +2981,9 @@ function validateSessionRegistration(rawSession) {
   const scope = requiredOneOf(rawSession.scope, 'scope', ['default', 'task']);
   return omitUndefined({
     sessionId: requiredString(rawSession.sessionId, 'sessionId'),
-    appId: optionalString(rawSession.appId, 'appId'),
     browserId: optionalString(rawSession.browserId, 'browserId'),
+    appId: optionalString(rawSession.appId, 'appId'),
+    browserConfigId: optionalString(rawSession.browserConfigId, 'browserConfigId'),
     scope,
     taskId: rawSession.taskId === undefined ? undefined : requiredString(rawSession.taskId, 'taskId'),
     profile: requiredString(rawSession.profile, 'profile'),
@@ -2574,7 +2997,23 @@ function validateSessionRegistration(rawSession) {
     proxyForwardId: optionalString(rawSession.proxyForwardId, 'proxyForwardId'),
     proxyServer: optionalString(rawSession.proxyServer, 'proxyServer'),
     activeTask: rawSession.activeTask === undefined ? undefined : validateActiveTask(rawSession.activeTask),
+    lease: rawSession.lease === undefined ? undefined : validateSessionLease(rawSession.lease),
   });
+}
+
+function validateSessionLease(rawLease) {
+  if (!rawLease || typeof rawLease !== 'object' || Array.isArray(rawLease)) {
+    throwValidationError('lease must be an object');
+  }
+  return {
+    leaseId: requiredString(rawLease.leaseId, 'lease.leaseId'),
+    owner: requiredString(rawLease.owner, 'lease.owner'),
+    agentId: optionalString(rawLease.agentId, 'lease.agentId'),
+    taskId: optionalString(rawLease.taskId, 'lease.taskId'),
+    claimedAt: requiredString(rawLease.claimedAt, 'lease.claimedAt'),
+    heartbeatAt: requiredString(rawLease.heartbeatAt, 'lease.heartbeatAt'),
+    expiresAt: requiredString(rawLease.expiresAt, 'lease.expiresAt'),
+  };
 }
 
 function validateProxyLease(rawLease, name) {
@@ -2822,6 +3261,7 @@ function renderEnvSh(env) {
 const SERVER_OPENAPI_DOCUMENTS = new Map([
   ['/_pwdev/openapi.json', 'root.json'],
   ['/_pwdev/openapi/apps.json', 'apps.json'],
+  ['/_pwdev/openapi/browser-configs.json', 'browser-configs.json'],
   ['/_pwdev/openapi/browsers.json', 'browsers.json'],
   ['/_pwdev/openapi/sessions.json', 'sessions.json'],
   ['/_pwdev/openapi/proxies.json', 'proxies/index.json'],
@@ -3019,8 +3459,9 @@ function pwDevApi(serverUrl) {
     entities: {
       apps: { persistent: true, fields: ['id', 'name', 'worktree', 'branch', 'readme', 'accounts'] },
       proxies: { persistent: true, fields: ['id', 'appId', 'ruleset', 'proxyUrl'] },
-      browserTpls: { persistent: true, path: '/_pwdev/browsers', fields: ['id', 'appId?', 'targetUrl?', 'brokerUrl?', 'profile?', 'proxyId?', 'proxyIds?', 'ignoreSslErrors?', 'proxyBypassList?', 'headless?'] },
-      sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'appId?', 'browserInstanceId', 'cdpUrl', 'proxyLease?'] },
+      browserConfigs: { persistent: true, path: '/_pwdev/browser-configs', fields: ['id', 'targetUrl?', 'brokerUrl?', 'profile?', 'ignoreSslErrors?', 'proxyBypassList?', 'headless?'] },
+      browsers: { persistent: true, path: '/_pwdev/browsers', fields: ['id', 'browserConfigId', 'appId?', 'proxyId?', 'proxyIds?', 'profile?', 'readme?', 'sessionId?', 'occupancy?'] },
+      sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'browserConfigId?', 'appId?', 'browserInstanceId', 'cdpUrl', 'proxyLease?', 'lease?'] },
     },
     endpoints: [
       { method: 'GET', path: '/_pwdev/status', summary: 'Server and broker health' },
@@ -3029,20 +3470,27 @@ function pwDevApi(serverUrl) {
       { method: 'GET', path: '/_pwdev/api', summary: 'Compact API index; use a detail route or POST filter for usage' },
       { method: 'POST', path: '/_pwdev/api', summary: 'Find one operation by JSON { method, path }' },
       { method: 'GET|POST', path: '/_pwdev/apps', summary: 'Manage app metadata' },
-      { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or upsert browser templates', body: { required: ['id'], optional: ['appId', 'targetUrl', 'brokerUrl', 'profile', 'proxyId', 'proxyIds', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
-      { method: 'GET|DELETE', path: '/_pwdev/browsers/:id', summary: 'Get or delete browser template' },
-      { method: 'POST', path: '/_pwdev/browsers/:id/start', summary: 'Start template; leases a pooled proxy and returns session/cdpUrl', body: { optional: ['sessionId', 'profile', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
-      { method: 'POST', path: '/_pwdev/browsers/:id/stop', summary: 'Stop default or named session and release its proxy lease', body: { optional: ['sessionId'] } },
+      { method: 'GET|POST', path: '/_pwdev/browser-configs', summary: 'List or upsert browser configs', body: { required: ['id'], optional: ['targetUrl', 'brokerUrl', 'profile', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
+      { method: 'GET|DELETE', path: '/_pwdev/browser-configs/:id', summary: 'Get or delete browser config' },
+      { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or create reusable browsers', body: { required: ['id', 'browserConfigId'], optional: ['name', 'readme', 'appId', 'proxyId', 'proxyIds', 'profile'] } },
+      { method: 'GET|DELETE', path: '/_pwdev/browsers/:id', summary: 'Inspect or destroy a browser' },
+      { method: 'POST', path: '/_pwdev/browsers/:id/start', summary: 'Start the browser session using its derived profile and reserved proxy', body: { optional: ['lease: { owner, agentId?, taskId?, ttlMs? }'] } },
+      { method: 'POST', path: '/_pwdev/browsers/:id/stop', summary: 'Stop the browser session while preserving its profile and proxy reservation' },
       { method: 'GET', path: '/_pwdev/sessions', summary: 'List live sessions' },
       { method: 'GET', path: '/_pwdev/sessions/:id', summary: 'Get live session' },
       { method: 'POST', path: '/_pwdev/sessions/:id/stop', summary: 'Stop live session' },
+      { method: 'POST', path: '/_pwdev/sessions/:id/claim', summary: 'Claim a live session for one Playwright agent', body: { required: ['owner'], optional: ['agentId', 'taskId', 'ttlMs'] } },
+      { method: 'POST', path: '/_pwdev/sessions/:id/heartbeat', summary: 'Extend the session lease', body: { required: ['leaseId'], optional: ['ttlMs'] } },
+      { method: 'POST', path: '/_pwdev/sessions/:id/release', summary: 'Release the session lease without stopping Chrome', body: { required: ['leaseId'] } },
+      { method: 'GET|POST|DELETE', path: '/_pwdev/browsers[/:id]', summary: 'Manage reusable browsers' },
+      { method: 'POST', path: '/_pwdev/browsers/:id/start|stop', summary: 'Start or stop a browser session' },
       { method: 'GET|POST|DELETE', path: '/_pwdev/proxies[/:id]', summary: 'Manage proxy records' },
       { method: 'GET', path: '/_pwdev/proxies/:id/traffic', summary: 'Read a Whistle proxy traffic feed', query: ['count', 'dumpCount', 'startTime', 'lastRowId', 'ids', 'status', 'url', 'ip', 'name', 'value', 'name1/value1…name5/value5', 'mtype'] },
       { method: 'ANY', path: '/_pwdev/proxy/*', summary: 'Server-proxied managed proxy API' },
       { method: 'ANY', path: '/_pwdev/broker/*', summary: 'Server-proxied broker API' },
     ],
     details: {
-      resources: ['apps', 'browsers', 'proxies', 'sessions'],
+      resources: ['apps', 'browserConfigs', 'browsers', 'proxies', 'sessions'],
       routeTemplate: '/_pwdev/api/:resource',
       lookup: {
         method: 'POST',
@@ -3120,7 +3568,7 @@ function pwDevApiDetails(serverUrl) {
   });
   return {
     apps: {
-      usage: 'Persisted project metadata. Register an app before linking it from a browser template.',
+      usage: 'Persisted project metadata. Register an app before linking it from a browser.',
       operations: [
         operation('GET', '/_pwdev/apps', 'List registered apps', 'Fetch the central app registry.', { method: 'GET', path: '/_pwdev/apps' }, ['The root manifest is not an app unless explicitly registered.'], { fields: ['ok', 'apps'] }),
         operation('POST', '/_pwdev/apps', 'Create or update an app', 'Send an app record; id is the stable upsert key.', { method: 'POST', path: '/_pwdev/apps', body: { id: 'checkout-main', appUrl: 'http://127.0.0.1:5173', readme: 'Run npm run dev first.' } }, ['Do not register production or personal credentials in accounts.'], { fields: ['ok', 'app'] }),
@@ -3128,13 +3576,22 @@ function pwDevApiDetails(serverUrl) {
         operation('GET', '/_pwdev/apps/:id/manifest', 'Get an app manifest', 'Read the app attach contract and operating metadata.', { method: 'GET', path: '/_pwdev/apps/checkout-main/manifest' }, ['A manifest does not itself start a browser.'], { fields: ['ok', 'id', 'appUrl', 'readme'] }),
       ],
     },
-    browsers: {
-      usage: 'Persistent browser templates hold launch configuration; starting one creates a transient broker-owned session.',
+    browserConfigs: {
+      usage: 'Persistent browser configs hold reusable Chrome launch configuration. Browsers reference them and own lifecycle.',
       operations: [
-        operation('GET', '/_pwdev/browsers', 'List browser templates', 'Fetch all persisted templates.', { method: 'GET', path: '/_pwdev/browsers' }, [], { fields: ['ok', 'browsers'] }),
-        operation('POST', '/_pwdev/browsers', 'Create or update a browser template', 'Send id plus optional app, target, profile, one fixed proxyId or an ordered proxyIds pool, and launch settings.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-tax', appId: 'checkout-main', targetUrl: 'http://127.0.0.1:5173', proxyIds: ['checkout-traffic-a', 'checkout-traffic-b'] } }, ['proxyId and proxyIds are mutually exclusive.', 'The broker resolves SSH-peer routing from its own topology when a proxy is selected.'], { fields: ['ok', 'browser'] }),
-        operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser session', 'Starts the template default session. Optionally supply sessionId for an isolated named session. A proxyIds template leases the first available proxy exclusively.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/start', body: { sessionId: 'smoke-1', ignoreSslErrors: true } }, ['Connect Playwright to response.session.cdpUrl; do not launch a separate browser.', 'sessionId uses a separate profile/runtime session.', 'Pool exhaustion returns 409.'], { fields: ['ok', 'browser', 'session', 'proxyLease?'], session: ['sessionId', 'cdpUrl', 'browserInstanceId', 'proxyLease?'] }),
-        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser session', 'Stops the default session, or the named session in sessionId, and releases its pooled proxy.', { method: 'POST', path: '/_pwdev/browsers/checkout-tax/stop', body: { sessionId: 'smoke-1' } }, ['Stopping a session does not delete its browser template or durable proxy profile.'], { fields: ['ok', 'browser', 'releasedProxyLease?'] }),
+        operation('GET', '/_pwdev/browser-configs', 'List browser configs', 'Fetch all persisted browser configurations.', { method: 'GET', path: '/_pwdev/browser-configs' }, [], { fields: ['ok', 'browserConfigs'] }),
+        operation('POST', '/_pwdev/browser-configs', 'Create or update a browser config', 'Send an id plus reusable target, profile, broker, and Chrome launch settings.', { method: 'POST', path: '/_pwdev/browser-configs', body: { id: 'checkout-chrome', profile: 'work-okta', headless: false } }, ['A browser config cannot be started directly.', 'Apps and proxies belong to browsers.', 'A referenced browser config cannot be edited.'], { fields: ['ok', 'browserConfig'] }),
+        operation('GET', '/_pwdev/browser-configs/:id', 'Get one browser config', 'Read one reusable browser configuration.', { method: 'GET', path: '/_pwdev/browser-configs/checkout-chrome' }, ['Returns 404 for an unknown id.'], { fields: ['ok', 'browserConfig'] }),
+        operation('DELETE', '/_pwdev/browser-configs/:id', 'Delete a browser config', 'Remove an unused browser configuration.', { method: 'DELETE', path: '/_pwdev/browser-configs/checkout-chrome' }, ['Blocked while a browser references the config.', 'Blocked while a live session uses the config.'], { fields: ['ok', 'id'] }),
+      ],
+    },
+    browsers: {
+      usage: 'Browsers compose one required browser config with an optional app and proxy, and own start/stop lifecycle.',
+      operations: [
+        operation('GET', '/_pwdev/browsers', 'List browsers', 'Fetch all durable browsers with resolved components.', { method: 'GET', path: '/_pwdev/browsers' }, [], { fields: ['ok', 'browsers'] }),
+        operation('POST', '/_pwdev/browsers', 'Create or update a browser', 'Send an id and browserConfigId, plus optional appId and fixed or pooled proxy references.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-smoke', browserConfigId: 'checkout-chrome', appId: 'checkout-main', proxyIds: ['checkout-traffic-a', 'checkout-traffic-b'] } }, ['browserConfigId is required.', 'proxyId and proxyIds are mutually exclusive.'], { fields: ['ok', 'browser'] }),
+        operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser', 'Start the browser using its config and optional app/proxy composition.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/start' }, ['Connect Playwright to response.session.cdpUrl.', 'Only one session can occupy a browser.'], { fields: ['ok', 'browser', 'session', 'start'] }),
+        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser', 'Stop its session while preserving profile and proxy reservation.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/stop' }, [], { fields: ['ok', 'browser', 'releasedSession?'] }),
       ],
     },
     proxies: {
@@ -3173,7 +3630,7 @@ function pwDevApiDetails(serverUrl) {
       usage: 'Live, broker-owned runtime records. They are removed after broker restart or explicit stop.',
       operations: [
         operation('GET', '/_pwdev/sessions', 'List live sessions', 'Fetch and reconcile active broker sessions.', { method: 'GET', path: '/_pwdev/sessions' }, [], { fields: ['ok', 'sessions'] }),
-        operation('POST', '/_pwdev/sessions/:id/stop', 'Stop a live session', 'Stop directly by session id when the originating template is not convenient; any pooled proxy lease is released.', { method: 'POST', path: '/_pwdev/sessions/checkout-tax__default/stop' }, ['Does not delete the persistent browser template or durable proxy profile.'], { fields: ['ok', 'session', 'releasedProxyLease?'] }),
+        operation('POST', '/_pwdev/sessions/:id/stop', 'Stop a live session', 'Stop directly by session id when the owning browser route is not convenient.', { method: 'POST', path: '/_pwdev/sessions/checkout-tax__default/stop' }, ['Does not delete the persistent browser, browser config, or durable proxy profile.'], { fields: ['ok', 'session'] }),
       ],
     },
   };
@@ -3373,21 +3830,39 @@ export async function loadPwDevManifest({ serverUrl = '${serverUrl}', appId } = 
   return response.json();
 }
 
-export async function upsertPwDevBrowser(template, { serverUrl = '${serverUrl}' } = {}) {
-  if (!template?.id) throw new Error('upsertPwDevBrowser requires template.id');
+export async function upsertPwDevBrowserConfig(browserConfig, { serverUrl = '${serverUrl}' } = {}) {
+  if (!browserConfig?.id) throw new Error('upsertPwDevBrowserConfig requires browserConfig.id');
+  const response = await fetch(\`\${serverUrl}/_pwdev/browser-configs\`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(browserConfig),
+  });
+  if (!response.ok) throw new Error(\`pw-dev browser config upsert failed: \${response.status} \${await response.text()}\`);
+  return response.json();
+}
+
+export async function loadPwDevBrowserConfig({ serverUrl = '${serverUrl}', browserConfigId } = {}) {
+  if (!browserConfigId) throw new Error('loadPwDevBrowserConfig requires browserConfigId');
+  const response = await fetch(\`\${serverUrl}/_pwdev/browser-configs/\${encodeURIComponent(browserConfigId)}\`);
+  if (!response.ok) throw new Error(\`pw-dev browser config load failed: \${response.status} \${await response.text()}\`);
+  return response.json();
+}
+
+export async function upsertPwDevBrowser(browser, { serverUrl = '${serverUrl}' } = {}) {
+  if (!browser?.id || !browser?.browserConfigId) throw new Error('upsertPwDevBrowser requires browser.id and browser.browserConfigId');
   const response = await fetch(\`\${serverUrl}/_pwdev/browsers\`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(template),
+    body: JSON.stringify(browser),
   });
-  if (!response.ok) throw new Error(\`pw-dev browser template upsert failed: \${response.status} \${await response.text()}\`);
+  if (!response.ok) throw new Error(\`pw-dev browser upsert failed: \${response.status} \${await response.text()}\`);
   return response.json();
 }
 
 export async function loadPwDevBrowser({ serverUrl = '${serverUrl}', browserId } = {}) {
   if (!browserId) throw new Error('loadPwDevBrowser requires browserId');
   const response = await fetch(\`\${serverUrl}/_pwdev/browsers/\${encodeURIComponent(browserId)}\`);
-  if (!response.ok) throw new Error(\`pw-dev browser template load failed: \${response.status} \${await response.text()}\`);
+  if (!response.ok) throw new Error(\`pw-dev browser load failed: \${response.status} \${await response.text()}\`);
   return response.json();
 }
 
@@ -3429,8 +3904,8 @@ export async function connectPwDev({ serverUrl = '${serverUrl}', browserId, chro
   const result = startBrowser
     ? await startPwDevBrowser({ serverUrl, browserId })
     : await loadPwDevBrowser({ serverUrl, browserId });
-  const template = result.browser ?? result;
-  const session = result.session ?? template.runtime;
+  const browserRecord = result.browser ?? result;
+  const session = result.session ?? browserRecord.components?.session;
   if (!session?.cdpUrl) {
     throw new Error('pw-dev browser has no live session cdpUrl');
   }
@@ -3439,7 +3914,7 @@ export async function connectPwDev({ serverUrl = '${serverUrl}', browserId, chro
   const context = browser.contexts()[0];
   const page = context.pages()[0] ?? await context.newPage();
 
-  return { template, session, browser, context, page };
+  return { browserRecord, session, browser, context, page };
 }
 `;
 }

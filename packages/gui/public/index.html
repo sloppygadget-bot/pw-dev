@@ -49,40 +49,66 @@
 
       <section class="layout">
         <aside class="nav" aria-label="Entity counts">
-          <button class="nav-item active" data-view="topology" type="button">
-            <span>Topology</span><b id="count-topology">0</b>
+          <button class="nav-item active" data-view="browsers" type="button">
+            <span>Browsers</span><b id="count-browsers">0</b>
           </button>
-          <button class="nav-item" data-view="apps" type="button">
-            <span>Apps</span><b id="count-apps">0</b>
-          </button>
-          <button class="nav-item" data-view="broker" type="button">
-            <span>Brokers</span><b id="count-broker">0</b>
-          </button>
-          <button class="nav-item" data-view="browsers" type="button">
-            <span>Browser Templates</span><b id="count-browsers">0</b>
-          </button>
-          <button class="nav-item" data-view="sessions" type="button">
-            <span>Sessions</span><b id="count-sessions">0</b>
-          </button>
-          <button class="nav-item" data-view="proxies" type="button">
-            <span>Proxies</span><b id="count-proxies">0</b>
-          </button>
+          <div class="nav-group">
+            <div class="nav-heading">Assets</div>
+            <button class="nav-item" data-view="apps" type="button">
+              <span>Apps</span><b id="count-apps">0</b>
+            </button>
+            <button class="nav-item" data-view="browser-configs" type="button">
+              <span>Browser Configs</span><b id="count-browser-configs">0</b>
+            </button>
+            <button class="nav-item" data-view="proxies" type="button">
+              <span>Proxies</span><b id="count-proxies">0</b>
+            </button>
+          </div>
+          <div class="nav-group">
+            <div class="nav-heading">Runtime</div>
+            <button class="nav-item" data-view="sessions" type="button">
+              <span>Sessions</span><b id="count-sessions">0</b>
+            </button>
+            <button class="nav-item" data-view="broker" type="button">
+              <span>Brokers</span><b id="count-broker">0</b>
+            </button>
+          </div>
         </aside>
 
         <div class="content">
-          <section class="view active" id="view-topology">
+          <section class="view active" id="view-browsers">
             <div class="section-title">
-              <h2>Topology</h2>
+              <h2>Browsers</h2>
               <div class="section-actions">
-                <div class="toggle-group" role="group" aria-label="Topology renderer">
-                  <button class="toggle-btn active" data-renderer="mermaid" type="button">Mermaid</button>
-                  <button class="toggle-btn" data-renderer="d3" type="button">D3</button>
+                <button id="new-browser" type="button">New browser</button>
+                <div class="toggle-group" role="group" aria-label="Browser view">
+                  <button class="toggle-btn active" data-browser-view="diagram" type="button">Diagram</button>
+                  <button class="toggle-btn" data-browser-view="table" type="button">Table</button>
                 </div>
-                <span id="read-only" class="badge neutral">Read-only</span>
               </div>
             </div>
-            <div id="topology-cards" class="topology-stack"></div>
-            <div id="topology-context" class="markdown-view card"></div>
+            <form id="browser-editor" class="editor hidden">
+              <div class="editor-head">
+                <h3 id="browser-editor-title">New browser</h3>
+                <button id="cancel-browser" type="button">Cancel</button>
+              </div>
+              <div class="editor-grid">
+                <label><span>ID</span><input id="browser-id" name="id" required pattern="[^\s]+"></label>
+                <label><span>Name</span><input id="browser-name" name="name"></label>
+                <label><span>Browser config</span><select id="browser-config-id" name="browserConfigId" required></select></label>
+                <label><span>App (optional)</span><select id="browser-app-id" name="appId"></select></label>
+                <label><span>Proxy (optional)</span><select id="browser-proxy-id" name="proxyId"></select></label>
+                <label><span>Proxy pool (optional)</span><input id="browser-proxy-ids" name="proxyIds" placeholder="proxy-a, proxy-b"></label>
+                <label><span>Profile (optional)</span><input id="browser-profile" name="profile"></label>
+                <label class="editor-wide"><span>README (optional)</span><textarea id="browser-readme" name="readme" rows="2"></textarea></label>
+              </div>
+              <div class="editor-actions">
+                <button id="save-browser" type="submit">Save browser</button>
+                <span id="browser-editor-error" class="bad-text" role="alert"></span>
+              </div>
+            </form>
+            <div id="browsers-diagram" class="browsers-diagram"></div>
+            <div id="browsers-table" class="table-scroll hidden"></div>
           </section>
 
           <section class="view" id="view-apps">
@@ -95,9 +121,33 @@
             <div id="broker-list" class="cards"></div>
           </section>
 
-          <section class="view" id="view-browsers">
-            <div class="section-title"><h2>Browser Templates</h2></div>
-            <div id="browsers-list" class="cards"></div>
+          <section class="view" id="view-browser-configs">
+            <div class="section-title">
+              <h2>Browser Configs</h2>
+              <div class="section-actions"><button id="new-browser-config" type="button">New browser config</button></div>
+            </div>
+            <form id="browser-config-editor" class="editor hidden">
+              <div class="editor-head">
+                <h3 id="browser-config-editor-title">New browser config</h3>
+                <button id="cancel-browser-config" type="button">Cancel</button>
+              </div>
+              <div class="editor-grid">
+                <label><span>ID</span><input id="browser-config-id-editor" name="id" required pattern="[^\s]+"></label>
+                <label><span>Name</span><input id="browser-config-name" name="name"></label>
+                <label><span>Target URL</span><input id="browser-config-target-url" name="targetUrl" placeholder="https://example.com"></label>
+                <label><span>Broker URL</span><input id="browser-config-broker-url" name="brokerUrl"></label>
+                <label><span>Profile</span><input id="browser-config-profile" name="profile"></label>
+                <label><span>Proxy bypass list</span><input id="browser-config-proxy-bypass-list" name="proxyBypassList"></label>
+                <label class="check-field"><input id="browser-config-ignore-ssl-errors" name="ignoreSslErrors" type="checkbox"><span>Ignore SSL errors</span></label>
+                <label class="check-field"><input id="browser-config-headless" name="headless" type="checkbox"><span>Headless</span></label>
+                <label class="check-field"><input id="browser-config-reset-profile" name="resetProfile" type="checkbox"><span>Reset profile on start</span></label>
+              </div>
+              <div class="editor-actions">
+                <button id="save-browser-config" type="submit">Save browser config</button>
+                <span id="browser-config-editor-error" class="bad-text" role="alert"></span>
+              </div>
+            </form>
+            <div id="browser-configs-list" class="cards"></div>
           </section>
 
           <section class="view" id="view-sessions">
@@ -107,7 +157,32 @@
 
 
           <section class="view" id="view-proxies">
-            <div class="section-title"><h2>Proxies</h2></div>
+            <div class="section-title">
+              <h2>Proxies</h2>
+              <div class="section-actions"><button id="new-proxy" type="button">New proxy</button></div>
+            </div>
+            <form id="proxy-editor" class="editor hidden">
+              <div class="editor-head">
+                <h3 id="proxy-editor-title">New proxy</h3>
+                <button id="cancel-proxy" type="button">Cancel</button>
+              </div>
+              <div class="editor-grid">
+                <label><span>ID</span><input id="proxy-id" name="id" required pattern="[^\s]+"></label>
+                <label><span>Name</span><input id="proxy-name" name="name"></label>
+                <label><span>Kind</span><input id="proxy-kind" name="kind" placeholder="whistle or http"></label>
+                <label><span>Proxy URL</span><input id="proxy-url" name="proxyUrl" placeholder="http://127.0.0.1:8899"></label>
+                <label><span>Broker forward ID</span><input id="proxy-forward-id" name="brokerProxyForwardId"></label>
+                <label><span>GUI URL</span><input id="proxy-gui-url" name="guiUrl"></label>
+                <label><span>Owner</span><input id="proxy-owner" name="owner"></label>
+                <label><span>Task ID</span><input id="proxy-task-id" name="taskId"></label>
+                <label><span>Purpose</span><input id="proxy-purpose" name="purpose"></label>
+                <label><span>Labels</span><input id="proxy-labels" name="labels" placeholder="smoke, checkout"></label>
+              </div>
+              <div class="editor-actions">
+                <button id="save-proxy" type="submit">Save proxy</button>
+                <span id="proxy-editor-error" class="bad-text" role="alert"></span>
+              </div>
+            </form>
             <div id="proxies-list" class="cards"></div>
           </section>
         </div>
