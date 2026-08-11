@@ -102,6 +102,20 @@ npm start -- server \
 By default the server probes the broker at `http://127.0.0.1:18080`. Use
 `--broker-url` only when the broker runs somewhere else.
 
+Provision a remote Linux broker through the running server:
+
+```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/remote-brokers \
+  -H 'content-type: application/json' \
+  -d '{"id":"lab","target":"agent@10.11.2.2"}'
+```
+
+The remote checkout defaults to `~/.pw-dev/pw-dev`, is compared with the
+server's Git revision before reuse/update, and is exposed through a
+server-owned local port in `18080-18089`. The server monitors and reconnects
+dead SSH forwards. See [docs/server.md](docs/server.md#remote-linux-brokers)
+for cleanup and remote-stop behavior.
+
 The server does not auto-register its root manifest in `/_pwdev/apps`.
 Register apps explicitly with `POST /_pwdev/apps`; use
 `--register-default-app` only for the older single-app convenience mode.
@@ -141,8 +155,17 @@ npm start -- gui --port 9797
 ```
 
 The GUI server collects from `http://127.0.0.1:9696`,
-`http://127.0.0.1:18080`, and `http://127.0.0.1:9697` by default. Override
-those with `--pwdev-url`, `--broker-url`, and `--proxy-manager-url`.
+`http://127.0.0.1:18080`, and `http://127.0.0.1:9697` by default. It also
+scans localhost ports `18080` through `18089` for additional ready brokers;
+discovered brokers appear in the Brokers view and can be used to prefill a
+browser config. Override the primary endpoints with `--pwdev-url`,
+`--broker-url`, and `--proxy-manager-url`.
+
+When a browser has a live session, its GUI `Monitor` action opens
+`/monitor/<browser-id>` in a new tab. The monitor attaches to that existing
+session over CDP and reconstructs a searchable live DOM mirror with
+stylesheets, viewport, scroll state, DOM patches, and safe element
+highlight/click/focus actions. It does not launch another browser.
 
 Discovery endpoints:
 
@@ -152,6 +175,9 @@ GET /_pwdev/status
 GET /_pwdev/env
 GET /_pwdev/instructions
 GET /_pwdev/client.js
+GET /_pwdev/openapi.json
+GET /_pwdev/openapi/*
+GET /_pwdev/delegates
 ```
 
 Agents should start with `GET /_pwdev/instructions` and `GET /_pwdev/status`.
@@ -203,6 +229,10 @@ curl -X POST http://127.0.0.1:9696/_pwdev/apps \
   }'
 ```
 
+Use `GET /_pwdev/apps/:id` to inspect an app, `PATCH /_pwdev/apps/:id` to
+change only its `proxyId` attachment, and `DELETE /_pwdev/apps/:id` to remove
+the registration.
+
 App registry and browser session endpoints:
 
 ```text
@@ -214,6 +244,7 @@ GET    /_pwdev/proxies/:id/traffic
 GET    /_pwdev/apps
 POST   /_pwdev/apps
 GET    /_pwdev/apps/:id
+PATCH  /_pwdev/apps/:id
 DELETE /_pwdev/apps/:id
 GET    /_pwdev/apps/:id/manifest
 GET    /_pwdev/browser-configs
@@ -226,6 +257,12 @@ GET    /_pwdev/browsers/:id
 DELETE /_pwdev/browsers/:id
 POST   /_pwdev/browsers/:id/start
 POST   /_pwdev/browsers/:id/stop
+GET    /_pwdev/sessions
+GET    /_pwdev/sessions/:id
+POST   /_pwdev/sessions/:id/stop
+POST   /_pwdev/sessions/:id/claim
+POST   /_pwdev/sessions/:id/heartbeat
+POST   /_pwdev/sessions/:id/release
 ANY    /_pwdev/broker/*
 GET    /_pwdev/proxy/status
 GET    /_pwdev/proxy/proxies

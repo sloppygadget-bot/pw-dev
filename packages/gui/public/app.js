@@ -6,6 +6,7 @@ const state = {
   currentView: 'browsers',
   last: undefined,
   browserView: 'diagram',
+  markdownModalText: '',
   editingBrowserId: undefined,
   editingBrowserConfigId: undefined,
   editingProxyId: undefined,
@@ -67,6 +68,12 @@ const els = {
   proxyPurpose: document.querySelector('#proxy-purpose'),
   proxyLabels: document.querySelector('#proxy-labels'),
   proxyEditorError: document.querySelector('#proxy-editor-error'),
+  markdownModal: document.querySelector('#markdown-modal'),
+  markdownModalTitle: document.querySelector('#markdown-modal-title'),
+  markdownModalSubtitle: document.querySelector('#markdown-modal-subtitle'),
+  markdownModalContent: document.querySelector('#markdown-modal-content'),
+  closeMarkdownModal: document.querySelector('#close-markdown-modal'),
+  copyMarkdownModal: document.querySelector('#copy-markdown-modal'),
 };
 
 els.newBrowser.disabled = true;
@@ -106,6 +113,14 @@ els.proxyEditor.addEventListener('submit', (event) => {
   event.preventDefault();
   void saveProxy();
 });
+els.closeMarkdownModal.addEventListener('click', closeMarkdownModal);
+els.markdownModal.addEventListener('click', (event) => {
+  if (event.target.matches('[data-close-markdown-modal]')) closeMarkdownModal();
+});
+els.copyMarkdownModal.addEventListener('click', copyMarkdownModal);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !els.markdownModal.classList.contains('hidden')) closeMarkdownModal();
+});
 els.interval.addEventListener('change', () => {
   state.intervalMs = Number(els.interval.value);
   schedule();
@@ -133,6 +148,8 @@ function schedule() {
 
 function showView(view) {
   state.currentView = view;
+  const navItem = document.querySelector(`.nav-item[data-view="${view}"]`);
+  navItem?.closest('details.nav-group')?.setAttribute('open', '');
   for (const item of document.querySelectorAll('.nav-item')) {
     item.classList.toggle('active', item.dataset.view === view);
   }
@@ -151,12 +168,17 @@ function showProxy(proxyId) {
   focusEntityRow(els.proxies, 'proxyId', proxyId, 'proxy-target');
 }
 
+function showBrowserConfig(browserConfigId) {
+  showView('browser-configs');
+  focusEntityRow(els.browserConfigs, 'browserConfigId', browserConfigId, 'browser-config-target');
+}
+
 function focusEntityRow(root, dataKey, id, targetClass) {
   const row = [...root.querySelectorAll(`[data-${dataKey.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}]`)]
     .find((item) => item.dataset[dataKey] === id);
   if (!row) return;
   for (const target of root.querySelectorAll('.entity-target')) {
-    target.classList.remove('entity-target', 'app-target', 'proxy-target', 'session-target');
+    target.classList.remove('entity-target', 'app-target', 'proxy-target', 'session-target', 'browser-config-target');
   }
   row.classList.add('entity-target', targetClass);
   row.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -282,6 +304,7 @@ function normalizeBrokerEntries(raw) {
     }];
   return entries.map((entry) => ({
     url: entry.url,
+    discovered: entry.discovered === true,
     fetch: entry.status,
     status: mergeBrokerStatus({
       direct: entry.status?.ok ? entry.status.body : undefined,
@@ -423,7 +446,11 @@ function syncBrowserEditorOptions(snapshot) {
   if (!snapshot) return;
   setSelectOptions(els.browserConfigId, snapshot.browserConfigs, { required: true });
   setSelectOptions(els.browserAppId, snapshot.apps, { emptyLabel: 'No app' });
-  setSelectOptions(els.browserProxyId, snapshot.proxies, { emptyLabel: 'No proxy' });
+  const reservedByOtherBrowser = new Set((snapshot.browsers ?? [])
+    .filter((browser) => browser.id !== state.editingBrowserId && browser.proxyId)
+    .map((browser) => browser.proxyId));
+  const availableProxies = (snapshot.proxies ?? []).filter((proxy) => !reservedByOtherBrowser.has(proxy.id));
+  setSelectOptions(els.browserProxyId, availableProxies, { emptyLabel: 'No proxy' });
 }
 
 function setSelectOptions(select, values, { emptyLabel, required = false } = {}) {
@@ -589,6 +616,9 @@ function browserActions(browser) {
   return actionGroup([
     { label: 'Edit', onClick: () => openBrowserEditor(browser) },
     browser.sessionId
+      ? { label: 'Monitor', onClick: () => window.open(`/monitor/${encodeURIComponent(browser.id)}`, '_blank', 'noopener,noreferrer') }
+      : undefined,
+    browser.sessionId
       ? { label: 'Delete session', onClick: () => stopBrowser(browser) }
       : { label: 'Create session', onClick: () => startBrowser(browser) },
     {
@@ -640,7 +670,7 @@ function renderBrowsers(browsers) {
       formatBrowserOccupancy(browser),
       appLink(browser.appId),
       proxyLink(browser.proxyId),
-      browser.browserConfigId,
+      browserConfigLink(browser.browserConfigId),
       browser.profile,
       sessionLink(browser.sessionId),
       browserActions(browser),
@@ -691,9 +721,18 @@ function renderBrowserDiagram(root, browsers) {
         flow.append(arrow);
       }
     }
-    const browserConfigLabel = document.createElement('div');
+    const configLink = browserConfigLink(browser.browserConfigId);
+    const browserConfigLabel = document.createElement(configLink ? 'a' : 'div');
     browserConfigLabel.className = 'browser-config-label';
     browserConfigLabel.textContent = `spawned from ${browser.browserConfigId ?? 'browser config'}`;
+    if (configLink) {
+      browserConfigLabel.href = configLink.href;
+      browserConfigLabel.classList.add('entity-link');
+      browserConfigLabel.addEventListener('click', (event) => {
+        event.preventDefault();
+        configLink.onClick();
+      });
+    }
     const occupancyLabel = document.createElement('div');
     occupancyLabel.className = 'browser-config-label';
     occupancyLabel.textContent = `occupancy: ${formatBrowserOccupancy(browser)}`;
@@ -730,7 +769,7 @@ function renderApps(apps, relationships, browsers) {
     app.appUrl,
     app.branch,
     usedBy(browsers, 'appId', app.id),
-    app.readme ? copyableText(app.readme) : undefined,
+    app.readme ? markdownView(app.readme, app.name ?? app.id) : undefined,
   ]), { rowKeys: apps.map((app) => app.id), rowKeyAttribute: 'appId' });
 }
 
@@ -743,7 +782,10 @@ function renderBroker(snapshot) {
     return {
       title: `BROKER${index + 1}`,
       subtitle: entry.url,
-      badge: badge(broker ? (active ? 'Active' : 'Idle') : 'Offline', broker ? (active ? 'good' : 'neutral') : 'bad'),
+      badge: [
+        badge(broker ? (active ? 'Active' : 'Idle') : 'Offline', broker ? (active ? 'good' : 'neutral') : 'bad'),
+        entry.discovered ? badge('Found on localhost', 'good') : '',
+      ].join(' '),
       rows: {
         URL: entry.url,
         Topology: broker?.topology?.mode,
@@ -756,8 +798,18 @@ function renderBroker(snapshot) {
         Instances: broker?.instanceCount ?? broker?.instances?.length ?? 0,
         Networks: networkLink(broker?.networks),
       },
+      actions: entry.discovered
+        ? [{ label: 'Use in browser config', onClick: () => useDiscoveredBroker(entry.url) }]
+        : undefined,
     };
   }));
+}
+
+function useDiscoveredBroker(url) {
+  showView('browser-configs');
+  openBrowserConfigEditor();
+  els.browserConfigBrokerUrl.value = url;
+  els.browserConfigBrokerUrl.focus();
 }
 
 function renderBrowserConfigs(browserConfigs, sessions, browsers) {
@@ -884,6 +936,16 @@ function proxyLink(proxyId) {
     text: proxyId,
     href: '#proxies',
     onClick: () => showProxy(proxyId),
+  };
+}
+
+function browserConfigLink(browserConfigId) {
+  if (!browserConfigId) return undefined;
+  return {
+    link: true,
+    text: browserConfigId,
+    href: '#browser-configs',
+    onClick: () => showBrowserConfig(browserConfigId),
   };
 }
 
@@ -1134,6 +1196,8 @@ function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'ses
           });
         }
         cell.append(link);
+      } else if (isMarkdownView(value)) {
+        cell.append(createMarkdownViewer(value));
       } else {
         cell.textContent = isCopyableText(value)
           ? value.text
@@ -1266,6 +1330,173 @@ function isCardLink(value) {
 
 function isActionGroup(value) {
   return typeof value === 'object' && value !== null && value.actionGroup === true;
+}
+
+function markdownView(text, title) {
+  return { markdownView: true, text, title };
+}
+
+function isMarkdownView(value) {
+  return typeof value === 'object' && value !== null && value.markdownView === true;
+}
+
+function createMarkdownViewer(value) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'readme-button';
+  button.textContent = 'View README';
+  button.addEventListener('click', () => openMarkdownModal(value.title, value.text));
+  return button;
+}
+
+function openMarkdownModal(title, text) {
+  state.markdownModalText = text;
+  els.markdownModalTitle.textContent = 'README';
+  els.markdownModalSubtitle.textContent = title ?? '';
+  renderMarkdown(els.markdownModalContent, text);
+  els.copyMarkdownModal.textContent = 'Copy README';
+  els.markdownModal.classList.remove('hidden');
+  document.body.classList.add('modal-open');
+  els.closeMarkdownModal.focus();
+}
+
+function closeMarkdownModal() {
+  els.markdownModal.classList.add('hidden');
+  document.body.classList.remove('modal-open');
+}
+
+async function copyMarkdownModal() {
+  els.copyMarkdownModal.disabled = true;
+  try {
+    await copyText(state.markdownModalText);
+    els.copyMarkdownModal.textContent = 'Copied';
+  } finally {
+    window.setTimeout(() => {
+      els.copyMarkdownModal.textContent = 'Copy README';
+      els.copyMarkdownModal.disabled = false;
+    }, 1000);
+  }
+}
+
+function renderMarkdown(root, markdown) {
+  root.replaceChildren();
+  const lines = String(markdown ?? '').split(/\r?\n/);
+  let paragraph = [];
+  let list;
+  let code;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const node = document.createElement('p');
+    appendInlineMarkdown(node, paragraph.join(' '));
+    root.append(node);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (list) root.append(list);
+    list = undefined;
+  };
+  const flushCode = () => {
+    if (!code) return;
+    const pre = document.createElement('pre');
+    const codeNode = document.createElement('code');
+    codeNode.textContent = code.lines.join('\n');
+    pre.append(codeNode);
+    root.append(pre);
+    code = undefined;
+  };
+
+  for (const line of lines) {
+    if (code) {
+      if (/^\s*```/.test(line)) flushCode();
+      else code.lines.push(line);
+      continue;
+    }
+    if (/^\s*```/.test(line)) {
+      flushParagraph();
+      flushList();
+      code = { lines: [] };
+      continue;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    const heading = line.match(/^\s*(#{1,3})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const node = document.createElement(`h${heading[1].length + 2}`);
+      appendInlineMarkdown(node, heading[2]);
+      root.append(node);
+      continue;
+    }
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      flushParagraph();
+      const tag = unordered ? 'ul' : 'ol';
+      if (!list || list.tagName.toLowerCase() !== tag) {
+        flushList();
+        list = document.createElement(tag);
+      }
+      const item = document.createElement('li');
+      appendInlineMarkdown(item, (unordered ?? ordered)[1]);
+      list.append(item);
+      continue;
+    }
+    flushList();
+    paragraph.push(line.trim());
+  }
+  flushParagraph();
+  flushList();
+  flushCode();
+}
+
+function appendInlineMarkdown(root, text) {
+  const tokenPattern = /(\`[^\`]+\`|\[[^\]]+\]\([^\s)]+\)|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  let lastIndex = 0;
+  for (const match of String(text).matchAll(tokenPattern)) {
+    if (match.index > lastIndex) root.append(document.createTextNode(text.slice(lastIndex, match.index)));
+    const token = match[0];
+    if (token.startsWith('`')) {
+      const code = document.createElement('code');
+      code.textContent = token.slice(1, -1);
+      root.append(code);
+    } else if (token.startsWith('[')) {
+      const linkMatch = token.match(/^\[([^\]]+)\]\(([^\s)]+)\)$/);
+      const href = safeMarkdownHref(linkMatch?.[2]);
+      if (!href) root.append(document.createTextNode(linkMatch?.[1] ?? token));
+      else {
+        const link = document.createElement('a');
+        link.href = href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = linkMatch[1];
+        root.append(link);
+      }
+    } else if (token.startsWith('**')) {
+      const strong = document.createElement('strong');
+      strong.textContent = token.slice(2, -2);
+      root.append(strong);
+    } else {
+      const emphasis = document.createElement('em');
+      emphasis.textContent = token.slice(1, -1);
+      root.append(emphasis);
+    }
+    lastIndex = match.index + token.length;
+  }
+  if (lastIndex < text.length) root.append(document.createTextNode(text.slice(lastIndex)));
+}
+
+function safeMarkdownHref(value) {
+  try {
+    const url = new URL(value, window.location.origin);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function copyableText(text) {

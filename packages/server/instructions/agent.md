@@ -27,8 +27,8 @@ component-owned contract under `/_pwdev/proxy/*`; do not call its internal port.
   retained in the in-house Whistle profile. Stop and release preserve it;
   explicit proxy deletion is the destructive operation.
 - **browserConfig**: reusable Chrome launch configuration. Fields include `id`,
-  optional `targetUrl`, `brokerUrl`, `profile`, `proxyBypassList`,
-  `ignoreSslErrors`, and `headless`. A browser config cannot be started directly.
+  optional `name`, `targetUrl`, `brokerUrl`, `profile`, `proxyBypassList`,
+  `ignoreSslErrors`, `headless`, and `resetProfile`. A browser config cannot be started directly.
   Do not edit a config referenced by a browser; deletion is blocked while it is
   referenced or occupied by a live session.
 - **browser**: durable reusable browser. It requires one

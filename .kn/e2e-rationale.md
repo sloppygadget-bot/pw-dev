@@ -2,10 +2,12 @@
 
 The suite is black-box at the product boundary: it uses Playwright's request
 client against a live `startPwDevServer` instance and never imports route
-handlers or reaches internal ports directly. A deterministic broker double
-models Chrome lifecycle and CDP discovery; a proxy-manager double models
-managed proxy startup. This keeps the journeys realistic while making tests
-repeatable on a machine without Chrome, Whistle, or a running daemon.
+handlers or reaches internal ports directly. Deterministic broker and
+proxy-manager doubles model the downstream lifecycle routes used by each
+journey. Before serving a mocked success response, each double resolves the
+operation from its owning OpenAPI document and validates the response against
+that operation's JSON schema. This keeps the journeys realistic while making
+tests repeatable on a machine without Chrome, Whistle, or a running daemon.
 
 The suite asserts user-visible contracts: discovery, app/browser-config/browser/
 session state, returned CDP URLs, stable profile isolation, proxy reservation

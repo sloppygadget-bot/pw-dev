@@ -1,1 +1,63 @@
-{"openapi":"3.1.1","info":{"title":"pw-dev app API","version":"1.0.0"},"servers":[{"url":"/"}],"paths":{"/_pwdev/apps":{"get":{"operationId":"listApps","responses":{"200":{"description":"Registered apps"}}},"post":{"operationId":"upsertApp","responses":{"200":{"description":"Saved app"}}}},"/_pwdev/apps/{id}/manifest":{"get":{"operationId":"getAppManifest","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"App attach contract"}}}}}}
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "pw-dev app API",
+    "version": "1.0.0",
+    "description": "Persisted project metadata. Apps may be linked from durable browsers but do not own browser lifecycle."
+  },
+  "servers": [{ "url": "/" }],
+  "paths": {
+    "/_pwdev/apps": {
+      "get": {
+        "operationId": "listApps",
+        "summary": "List registered apps",
+        "responses": { "200": { "description": "Registered apps" } }
+      },
+      "post": {
+        "operationId": "upsertApp",
+        "summary": "Create or update an app",
+        "responses": { "200": { "description": "Saved app" } }
+      }
+    },
+    "/_pwdev/apps/{id}": {
+      "get": {
+        "operationId": "getApp",
+        "summary": "Get one app",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "App metadata" }, "404": { "description": "Unknown app" } }
+      },
+      "patch": {
+        "operationId": "patchApp",
+        "summary": "Patch app metadata",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "proxyId": { "type": ["string", "null"] } },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Patched app" }, "404": { "description": "Unknown app" } }
+      },
+      "delete": {
+        "operationId": "deleteApp",
+        "summary": "Delete an app",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Deleted app" }, "404": { "description": "Unknown app" } }
+      }
+    },
+    "/_pwdev/apps/{id}/manifest": {
+      "get": {
+        "operationId": "getAppManifest",
+        "summary": "Get an app manifest",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "App attach contract" }, "404": { "description": "Unknown app" } }
+      }
+    }
+  }
+}

@@ -10,6 +10,9 @@
     "/_pwdev/sessions": {
       "get": { "operationId": "listSessions", "responses": { "200": { "description": "Live browser sessions, including occupancy and lease metadata" } } }
     },
+    "/_pwdev/sessions/{id}": {
+      "get": { "operationId": "getSession", "summary": "Get one live session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Live session and related app metadata" }, "404": { "description": "Unknown session" } } }
+    },
     "/_pwdev/sessions/{id}/stop": {
       "post": { "operationId": "stopSession", "description": "Stop the browser session without deleting its durable browser, browser config, or proxy profile.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Stopped session" } } }
     },

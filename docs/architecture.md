@@ -162,8 +162,12 @@ GET /_pwdev/manifest
 GET /_pwdev/status
 GET /_pwdev/instructions
 GET /_pwdev/api
+POST /_pwdev/api
 GET /_pwdev/env
 GET /_pwdev/client.js
+GET /_pwdev/openapi.json
+GET /_pwdev/openapi/*
+GET /_pwdev/delegates
 GET /_pwdev/proxies
 POST /_pwdev/proxies
 GET /_pwdev/proxies/:id
@@ -177,6 +181,7 @@ POST /_pwdev/networks/:id/check
 GET /_pwdev/apps
 POST /_pwdev/apps
 GET /_pwdev/apps/:id
+PATCH /_pwdev/apps/:id
 DELETE /_pwdev/apps/:id
 GET /_pwdev/apps/:id/manifest
 GET /_pwdev/browser-configs
@@ -190,7 +195,11 @@ DELETE /_pwdev/browsers/:id
 POST /_pwdev/browsers/:id/start
 POST /_pwdev/browsers/:id/stop
 GET /_pwdev/sessions
+GET /_pwdev/sessions/:id
 POST /_pwdev/sessions/:id/stop
+POST /_pwdev/sessions/:id/claim
+POST /_pwdev/sessions/:id/heartbeat
+POST /_pwdev/sessions/:id/release
 ANY /_pwdev/broker/*
 GET /_pwdev/proxy/status
 GET /_pwdev/proxy/proxies

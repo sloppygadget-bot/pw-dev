@@ -18,6 +18,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRemoteBrokerManager } from './remote-brokers.js';
 
 const require = createRequire(import.meta.url);
 const SERVER_PACKAGE_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -70,6 +71,7 @@ const MAX_SESSION_LEASE_TTL_MS = 60 * 60 * 1000;
  * @property {string=} browserConfigRegistryFile Durable browser config JSON path. Defaults to `<worktree>/.pw-dev/browser-configs.json`.
  * @property {boolean=} registerDefaultApp Register the root manifest in `/_pwdev/apps`. Defaults to false.
  * @property {string=} browserRegistryFile Durable browser JSON path. Defaults to `<worktree>/.pw-dev/browsers.json`.
+ * @property {{ list: () => unknown[], provision: (request: Record<string, unknown>) => Promise<unknown>, remove: (id: string) => Promise<boolean>, stop: (id: string) => Promise<boolean>, close: () => Promise<void> }=} remoteBrokerManager Server-owned remote broker provisioner. Primarily useful for embedding and tests.
  */
 
 /**
@@ -328,6 +330,7 @@ export async function startPwDevServer(options = {}) {
   });
   const startedAt = new Date().toISOString();
   const broker = createBrokerPairing({ brokerUrl: options.brokerUrl });
+  const remoteBrokers = options.remoteBrokerManager ?? createRemoteBrokerManager();
   const proxyManagerUrl = normalizeHttpUrl(options.proxyManagerUrl ?? DEFAULT_PROXY_MANAGER_URL, 'proxyManagerUrl');
   const appRegistryFile = path.resolve(options.appRegistryFile ?? path.join(worktree, '.pw-dev', 'apps.json'));
   const apps = createAppRegistry(loadPersistedApps(appRegistryFile), {
@@ -351,7 +354,7 @@ export async function startPwDevServer(options = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -372,7 +375,7 @@ export async function startPwDevServer(options = {}) {
       socket.destroy();
       return;
     }
-    proxyBrokerUpgrade({ req, socket, head, broker });
+    proxyBrokerUpgrade({ req, socket, head, broker, sessions });
   });
 
   await new Promise((resolve, reject) => {
@@ -394,9 +397,12 @@ export async function startPwDevServer(options = {}) {
     origin,
     root,
     server,
-    close: () => new Promise((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    }),
+    close: async () => {
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+      await remoteBrokers.close();
+    },
   };
 }
 
@@ -417,7 +423,7 @@ export async function startPwDevServer(options = {}) {
  * - `ANY /_pwdev/broker/*`
  * - `ANY /_pwdev/proxy/*`
  * - `GET|POST /_pwdev/apps`
- * - `GET|DELETE /_pwdev/apps/:id`
+ * - `GET|PATCH|DELETE /_pwdev/apps/:id`
  * - `GET /_pwdev/apps/:id/manifest`
  * - `GET|POST /_pwdev/browser-configs`
  * - `GET|DELETE /_pwdev/browser-configs/:id`
@@ -425,9 +431,19 @@ export async function startPwDevServer(options = {}) {
  * - `GET|DELETE /_pwdev/browsers/:id`
  * - `POST /_pwdev/browsers/:id/start`
  * - `POST /_pwdev/browsers/:id/stop`
+ * - `GET /_pwdev/sessions`
+ * - `GET /_pwdev/sessions/:id`
+ * - `POST /_pwdev/sessions/:id/stop`
+ * - `POST /_pwdev/sessions/:id/claim`
+ * - `POST /_pwdev/sessions/:id/heartbeat`
+ * - `POST /_pwdev/sessions/:id/release`
  * - `GET|POST /_pwdev/proxies`
  * - `GET|DELETE /_pwdev/proxies/:id`
  * - `GET /_pwdev/proxies/:id/traffic`
+ * - `GET|POST /_pwdev/remote-brokers`
+ * - `DELETE /_pwdev/remote-brokers/:id`
+ * - `POST /_pwdev/remote-brokers/:id/disconnect`
+ * - `POST /_pwdev/remote-brokers/:id/stop`
  *
  * @param {{
  *   req: http.IncomingMessage,
@@ -442,12 +458,13 @@ export async function startPwDevServer(options = {}) {
  *   browsers: PwDevBrowserRegistry,
  *   sessions: PwDevSessionRegistry,
  *   broker: PwDevBrokerPairing,
+ *   remoteBrokers: { list: () => unknown[], provision: (request: Record<string, unknown>) => Promise<unknown>, remove: (id: string) => Promise<boolean>, stop: (id: string) => Promise<boolean> },
  *   proxyManagerUrl: string,
  *   ensureProxyManager?: () => Promise<unknown>,
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, proxyManagerUrl, ensureProxyManager }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, proxyManagerUrl, ensureProxyManager }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -484,13 +501,18 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/broker')) {
-    await proxyBrokerHttpRequest({ req, res, requestUrl, broker });
+    await proxyBrokerHttpRequest({ req, res, requestUrl, broker, sessions, serverUrl });
     return;
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/proxy')) {
     if (ensureProxyManager) await ensureProxyManager();
     await proxyProxyManagerHttpRequest({ req, res, requestUrl, proxyManagerUrl });
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/remote-brokers' || requestUrl.pathname.startsWith('/_pwdev/remote-brokers/')) {
+    await handleRemoteBrokersRequest({ req, res, requestUrl, remoteBrokers, writeBody });
     return;
   }
 
@@ -543,6 +565,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
       root,
       worktree,
       broker: await broker.status(),
+      remoteBrokers: remoteBrokers.list(),
       proxy: { url: proxyManagerUrl },
       proxies: proxies.list(),
       manifest,
@@ -2059,11 +2082,13 @@ async function resolveFile(filePath) {
  *   res: http.ServerResponse,
  *   requestUrl: URL,
  *   broker: PwDevBrokerPairing,
+ *   sessions: PwDevSessionRegistry,
+ *   serverUrl: string,
  * }} options
  * @returns {Promise<void>}
  */
-async function proxyBrokerHttpRequest({ req, res, requestUrl, broker, brokerPath }) {
-  const brokerUrl = broker.resolve();
+async function proxyBrokerHttpRequest({ req, res, requestUrl, broker, sessions, serverUrl, brokerPath }) {
+  const brokerUrl = resolveBrokerForCdpRequest({ requestUrl, broker, sessions });
   const upstreamUrl = new URL(brokerPath ?? proxyBrokerPath(requestUrl), ensureTrailingSlash(brokerUrl));
   const headers = { ...req.headers, host: upstreamUrl.host };
 
@@ -2071,8 +2096,30 @@ async function proxyBrokerHttpRequest({ req, res, requestUrl, broker, brokerPath
     method: req.method,
     headers,
   }, (response) => {
-    res.writeHead(response.statusCode ?? 502, response.headers);
-    response.pipe(res);
+    if (!isCdpDiscoveryPath(requestUrl)) {
+      res.writeHead(response.statusCode ?? 502, response.headers);
+      response.pipe(res);
+      return;
+    }
+    let body = '';
+    response.setEncoding('utf8');
+    response.on('data', (chunk) => { body += chunk; });
+    response.on('end', () => {
+      let payload;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        res.writeHead(response.statusCode ?? 502, response.headers);
+        res.end(body);
+        return;
+      }
+      const rewritten = rewriteCdpDebuggerUrls(payload, serverUrl);
+      const output = Buffer.from(JSON.stringify(rewritten));
+      const headers = { ...response.headers, 'content-length': output.length };
+      delete headers['transfer-encoding'];
+      res.writeHead(response.statusCode ?? 502, headers);
+      res.end(output);
+    });
   });
 
   upstream.once('error', (error) => {
@@ -2131,14 +2178,16 @@ async function proxyProxyManagerHttpRequest({ req, res, requestUrl, proxyManager
  *   socket: import('node:net').Socket,
  *   head: Buffer,
  *   broker: PwDevBrokerPairing,
+ *   sessions: PwDevSessionRegistry,
  * }} options
  */
-function proxyBrokerUpgrade({ req, socket, head, broker }) {
+function proxyBrokerUpgrade({ req, socket, head, broker, sessions }) {
   let brokerUrl;
   let upstreamUrl;
   try {
-    brokerUrl = broker.resolve();
-    upstreamUrl = new URL(proxyBrokerPath(new URL(req.url || '/', 'http://local')), ensureTrailingSlash(brokerUrl));
+    const requestUrl = new URL(req.url || '/', 'http://local');
+    brokerUrl = resolveBrokerForCdpRequest({ requestUrl, broker, sessions });
+    upstreamUrl = new URL(proxyBrokerPath(requestUrl), ensureTrailingSlash(brokerUrl));
   } catch (error) {
     socket.write(`HTTP/1.1 ${error.statusCode || 503} Service Unavailable\r\n\r\n`);
     socket.destroy();
@@ -2190,6 +2239,54 @@ function buildUpgradeRequest(req, upstreamUrl) {
 function proxyBrokerPath(requestUrl) {
   const suffix = requestUrl.pathname.slice('/_pwdev/broker'.length);
   return `/_broker${suffix || ''}${requestUrl.search}`;
+}
+
+function resolveBrokerForCdpRequest({ requestUrl, broker, sessions }) {
+  const match = /^\/_pwdev\/broker\/instances\/([^/]+)/.exec(requestUrl.pathname);
+  if (match) {
+    let instanceId;
+    try {
+      instanceId = decodeURIComponent(match[1]);
+    } catch {
+      instanceId = undefined;
+    }
+    if (instanceId) {
+      const session = sessions?.list().find((candidate) => candidate.browserInstanceId === instanceId);
+      if (session?.brokerUrl) return session.brokerUrl;
+    }
+  }
+  return broker.resolve();
+}
+
+function isCdpDiscoveryPath(requestUrl) {
+  return /^\/_pwdev\/broker\/instances\/[^/]+\/json\/(version|list)$/.test(requestUrl.pathname);
+}
+
+function rewriteCdpDebuggerUrls(value, serverUrl) {
+  if (Array.isArray(value)) return value.map((item) => rewriteCdpDebuggerUrls(item, serverUrl));
+  if (!value || typeof value !== 'object') return value;
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    output[key] = typeof child === 'string' && key.toLowerCase().endsWith('websocketdebuggerurl')
+      ? rewriteWebSocketUrlToServerProxy(child, serverUrl)
+      : rewriteCdpDebuggerUrls(child, serverUrl);
+  }
+  return output;
+}
+
+function rewriteWebSocketUrlToServerProxy(rawUrl, serverUrl) {
+  try {
+    const source = new URL(rawUrl);
+    const target = new URL(serverUrl);
+    source.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
+    source.host = target.host;
+    if (source.pathname.startsWith('/_broker')) {
+      source.pathname = `/_pwdev/broker${source.pathname.slice('/_broker'.length)}`;
+    }
+    return source.toString();
+  } catch {
+    return rawUrl;
+  }
 }
 
 function proxyBrokerNetworksPath(requestUrl) {
@@ -2592,6 +2689,75 @@ function rewriteBrokerUrlToServerProxy(rawUrl, serverUrl) {
 
 function ensureTrailingSlash(value) {
   return value.endsWith('/') ? value : `${value}/`;
+}
+
+/**
+ * Provision remote loopback brokers and keep their local SSH forwards owned by
+ * this pw-dev server process.
+ *
+ * @param {{
+ *   req: http.IncomingMessage,
+ *   res: http.ServerResponse,
+ *   requestUrl: URL,
+ *   remoteBrokers: { list: () => unknown[], provision: (request: Record<string, unknown>) => Promise<unknown>, remove: (id: string) => Promise<boolean>, stop: (id: string) => Promise<boolean> },
+ *   writeBody: boolean,
+ * }} options
+ */
+async function handleRemoteBrokersRequest({ req, res, requestUrl, remoteBrokers, writeBody }) {
+  const basePath = '/_pwdev/remote-brokers';
+  if (requestUrl.pathname === basePath) {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      writeJson(res, 200, { ok: true, remoteBrokers: remoteBrokers.list() }, writeBody);
+      return;
+    }
+    if (req.method === 'POST') {
+      const remoteBroker = await remoteBrokers.provision(await readJsonBody(req));
+      writeJson(res, 201, { ok: true, remoteBroker }, writeBody);
+      return;
+    }
+    res.writeHead(405, { allow: 'GET, HEAD, POST' });
+    res.end('Method Not Allowed');
+    return;
+  }
+
+  const actionMatch = /^\/_pwdev\/remote-brokers\/([^/]+)\/(disconnect|stop)$/.exec(requestUrl.pathname);
+  if (actionMatch) {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    const id = decodeURIComponent(actionMatch[1]);
+    const action = actionMatch[2];
+    const completed = action === 'stop'
+      ? await remoteBrokers.stop(id)
+      : await remoteBrokers.remove(id);
+    if (!completed) {
+      const error = new Error(`Unknown remote broker: ${id}`);
+      error.statusCode = 404;
+      throw error;
+    }
+    writeJson(res, 200, { ok: true, id, [action === 'stop' ? 'stopped' : 'released']: true }, writeBody);
+    return;
+  }
+
+  const match = /^\/_pwdev\/remote-brokers\/([^/]+)$/.exec(requestUrl.pathname);
+  if (!match) {
+    writeJson(res, 404, { ok: false, error: 'Unknown remote broker route' }, writeBody);
+    return;
+  }
+  if (req.method !== 'DELETE') {
+    res.writeHead(405, { allow: 'DELETE' });
+    res.end('Method Not Allowed');
+    return;
+  }
+  const id = decodeURIComponent(match[1]);
+  if (!await remoteBrokers.remove(id)) {
+    const error = new Error(`Unknown remote broker: ${id}`);
+    error.statusCode = 404;
+    throw error;
+  }
+  writeJson(res, 200, { ok: true, id, released: true }, writeBody);
 }
 
 function writeBrokerError(res, error) {
@@ -3263,6 +3429,7 @@ const SERVER_OPENAPI_DOCUMENTS = new Map([
   ['/_pwdev/openapi/apps.json', 'apps.json'],
   ['/_pwdev/openapi/browser-configs.json', 'browser-configs.json'],
   ['/_pwdev/openapi/browsers.json', 'browsers.json'],
+  ['/_pwdev/openapi/remote-brokers.json', 'remote-brokers.json'],
   ['/_pwdev/openapi/sessions.json', 'sessions.json'],
   ['/_pwdev/openapi/proxies.json', 'proxies/index.json'],
   ['/_pwdev/openapi/proxies/records.json', 'proxies/records.json'],
@@ -3459,9 +3626,10 @@ function pwDevApi(serverUrl) {
     entities: {
       apps: { persistent: true, fields: ['id', 'name', 'worktree', 'branch', 'readme', 'accounts'] },
       proxies: { persistent: true, fields: ['id', 'appId', 'ruleset', 'proxyUrl'] },
-      browserConfigs: { persistent: true, path: '/_pwdev/browser-configs', fields: ['id', 'targetUrl?', 'brokerUrl?', 'profile?', 'ignoreSslErrors?', 'proxyBypassList?', 'headless?'] },
-      browsers: { persistent: true, path: '/_pwdev/browsers', fields: ['id', 'browserConfigId', 'appId?', 'proxyId?', 'proxyIds?', 'profile?', 'readme?', 'sessionId?', 'occupancy?'] },
-      sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'browserConfigId?', 'appId?', 'browserInstanceId', 'cdpUrl', 'proxyLease?', 'lease?'] },
+      browserConfigs: { persistent: true, path: '/_pwdev/browser-configs', fields: ['id', 'name?', 'targetUrl?', 'brokerUrl?', 'profile?', 'ignoreSslErrors?', 'proxyBypassList?', 'headless?', 'resetProfile?'] },
+      remoteBrokers: { persistent: false, path: '/_pwdev/remote-brokers', fields: ['id?', 'target', 'repository?', 'worktree?', 'revision?', 'remotePort?', 'localPort?'] },
+      browsers: { persistent: true, path: '/_pwdev/browsers', fields: ['id', 'name?', 'browserConfigId', 'appId?', 'proxyId?', 'proxyIds?', 'profile?', 'readme?', 'sessionId?', 'occupancy?'] },
+      sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'browserConfigId?', 'appId?', 'scope?', 'profile?', 'browserInstanceId', 'cdpUrl', 'proxyId?', 'proxyLease?', 'lease?'] },
     },
     endpoints: [
       { method: 'GET', path: '/_pwdev/status', summary: 'Server and broker health' },
@@ -3469,9 +3637,15 @@ function pwDevApi(serverUrl) {
       { method: 'GET', path: '/_pwdev/instructions', summary: 'Concise workflow guide' },
       { method: 'GET', path: '/_pwdev/api', summary: 'Compact API index; use a detail route or POST filter for usage' },
       { method: 'POST', path: '/_pwdev/api', summary: 'Find one operation by JSON { method, path }' },
-      { method: 'GET|POST', path: '/_pwdev/apps', summary: 'Manage app metadata' },
+      { method: 'GET|POST', path: '/_pwdev/apps', summary: 'List or upsert app metadata' },
+      { method: 'GET|PATCH|DELETE', path: '/_pwdev/apps/:id', summary: 'Inspect, patch, or delete app metadata' },
+      { method: 'GET', path: '/_pwdev/apps/:id/manifest', summary: 'Read an app attach manifest' },
       { method: 'GET|POST', path: '/_pwdev/browser-configs', summary: 'List or upsert browser configs', body: { required: ['id'], optional: ['targetUrl', 'brokerUrl', 'profile', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
       { method: 'GET|DELETE', path: '/_pwdev/browser-configs/:id', summary: 'Get or delete browser config' },
+      { method: 'GET|POST', path: '/_pwdev/remote-brokers', summary: 'List or provision a remote broker SSH forward', body: { required: ['target'], optional: ['id', 'repository', 'worktree', 'revision', 'remotePort', 'localPort'] } },
+      { method: 'DELETE', path: '/_pwdev/remote-brokers/:id', summary: 'Release one server-owned local SSH forward' },
+      { method: 'POST', path: '/_pwdev/remote-brokers/:id/disconnect', summary: 'Release one server-owned local SSH forward' },
+      { method: 'POST', path: '/_pwdev/remote-brokers/:id/stop', summary: 'Release the forward and stop its remote broker' },
       { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or create reusable browsers', body: { required: ['id', 'browserConfigId'], optional: ['name', 'readme', 'appId', 'proxyId', 'proxyIds', 'profile'] } },
       { method: 'GET|DELETE', path: '/_pwdev/browsers/:id', summary: 'Inspect or destroy a browser' },
       { method: 'POST', path: '/_pwdev/browsers/:id/start', summary: 'Start the browser session using its derived profile and reserved proxy', body: { optional: ['lease: { owner, agentId?, taskId?, ttlMs? }'] } },
@@ -3573,6 +3747,8 @@ function pwDevApiDetails(serverUrl) {
         operation('GET', '/_pwdev/apps', 'List registered apps', 'Fetch the central app registry.', { method: 'GET', path: '/_pwdev/apps' }, ['The root manifest is not an app unless explicitly registered.'], { fields: ['ok', 'apps'] }),
         operation('POST', '/_pwdev/apps', 'Create or update an app', 'Send an app record; id is the stable upsert key.', { method: 'POST', path: '/_pwdev/apps', body: { id: 'checkout-main', appUrl: 'http://127.0.0.1:5173', readme: 'Run npm run dev first.' } }, ['Do not register production or personal credentials in accounts.'], { fields: ['ok', 'app'] }),
         operation('GET', '/_pwdev/apps/:id', 'Get one app', 'Read metadata for one registered app.', { method: 'GET', path: '/_pwdev/apps/checkout-main' }, ['Returns 404 for an unknown id.'], { fields: ['ok', 'app'] }),
+        operation('PATCH', '/_pwdev/apps/:id', 'Patch app metadata', 'Update the mutable app attachment metadata.', { method: 'PATCH', path: '/_pwdev/apps/checkout-main', body: { proxyId: 'checkout-whistle' } }, ['Only proxyId can be patched.', 'Set proxyId to null to remove the app attachment.'], { fields: ['ok', 'app'] }),
+        operation('DELETE', '/_pwdev/apps/:id', 'Delete an app', 'Remove one registered app record.', { method: 'DELETE', path: '/_pwdev/apps/checkout-main' }, ['Returns 404 for an unknown id.'], { fields: ['ok', 'id'] }),
         operation('GET', '/_pwdev/apps/:id/manifest', 'Get an app manifest', 'Read the app attach contract and operating metadata.', { method: 'GET', path: '/_pwdev/apps/checkout-main/manifest' }, ['A manifest does not itself start a browser.'], { fields: ['ok', 'id', 'appUrl', 'readme'] }),
       ],
     },
@@ -3630,6 +3806,7 @@ function pwDevApiDetails(serverUrl) {
       usage: 'Live, broker-owned runtime records. They are removed after broker restart or explicit stop.',
       operations: [
         operation('GET', '/_pwdev/sessions', 'List live sessions', 'Fetch and reconcile active broker sessions.', { method: 'GET', path: '/_pwdev/sessions' }, [], { fields: ['ok', 'sessions'] }),
+        operation('GET', '/_pwdev/sessions/:id', 'Get one live session', 'Read one broker-backed session and its related app metadata.', { method: 'GET', path: '/_pwdev/sessions/checkout-smoke__default' }, ['Returns 404 when the broker no longer reports the session.'], { fields: ['ok', 'session', 'app?', 'serverUrl'] }),
         operation('POST', '/_pwdev/sessions/:id/stop', 'Stop a live session', 'Stop directly by session id when the owning browser route is not convenient.', { method: 'POST', path: '/_pwdev/sessions/checkout-tax__default/stop' }, ['Does not delete the persistent browser, browser config, or durable proxy profile.'], { fields: ['ok', 'session'] }),
       ],
     },

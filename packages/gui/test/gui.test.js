@@ -32,6 +32,7 @@ test('gui serves static app and read-only config', async () => {
     pwDevUrl: 'http://127.0.0.1:9696',
     brokerUrl: 'http://127.0.0.1:18080',
     proxyManagerUrl: 'http://127.0.0.1:9697',
+    brokerDiscovery: false,
   });
 
   try {
@@ -47,6 +48,11 @@ test('gui serves static app and read-only config', async () => {
     assert.match(index.body, /id="browser-editor"/);
     assert.match(index.body, /id="new-browser-config"/);
     assert.match(index.body, /id="browser-config-editor"/);
+    assert.match(index.body, /id="markdown-modal"/);
+    assert.match(index.body, /<details class="nav-group" data-nav-group="assets">/);
+    assert.match(index.body, /<details class="nav-group" data-nav-group="runtime">/);
+    assert.doesNotMatch(index.body, /data-nav-group="assets" open/);
+    assert.doesNotMatch(index.body, /data-nav-group="runtime" open/);
     assert.match(index.body, /id="new-proxy"/);
     assert.match(index.body, /id="proxy-editor"/);
     assert.match(index.body, /href="\/api-docs"/);
@@ -60,17 +66,44 @@ test('gui serves static app and read-only config', async () => {
     assert.equal(swaggerBundle.statusCode, 200);
     assert.match(swaggerBundle.headers['content-type'], /javascript/);
 
+    const monitor = await get(`${server.origin}/monitor/example-browser`);
+    assert.equal(monitor.statusCode, 200);
+    assert.doesNotMatch(monitor.body, /<h2>Live DOM mirror<\/h2>/);
+    assert.match(monitor.body, /id="toggle-sidebar"/);
+    assert.match(monitor.body, /aria-label="Hide inspector"/);
+    assert.match(monitor.body, /class="drawer-icon"/);
+    assert.match(monitor.body, /id="close-sidebar"[^>]*aria-label="Close inspector"/);
+    assert.match(monitor.body, /id="nav-target-url"/);
+    assert.match(monitor.body, /id="mirror-tools"|class="mirror-tools"/);
+    assert.match(monitor.body, /id="mirror-click-marker"/);
+    const monitorScript = await get(`${server.origin}/monitor.js`);
+    assert.equal(monitorScript.statusCode, 200);
+    assert.match(monitorScript.body, /EventSource/);
+    assert.match(monitorScript.body, /about:blank/);
+    assert.match(monitorScript.body, /Rendering DOM snapshot/);
+    assert.match(monitorScript.body, /showClickMarker/);
+    assert.match(monitorScript.body, /updateTargetUrl/);
+    assert.match(monitorScript.body, /setSidebarOpen/);
+    const monitorStyle = await get(`${server.origin}/monitor.css`);
+    assert.equal(monitorStyle.statusCode, 200);
+    assert.match(monitorStyle.body, /mirror-frame/);
+
     const appScript = await get(`${server.origin}/app.js`);
     assert.equal(appScript.statusCode, 200);
     assert.match(appScript.body, /function renderTable/);
     assert.match(appScript.body, /Used By/);
     assert.match(appScript.body, /function showApp/);
     assert.match(appScript.body, /function showProxy/);
+    assert.match(appScript.body, /function showBrowserConfig/);
     assert.match(appScript.body, /function showSession/);
     assert.match(appScript.body, /function sessionLink/);
     assert.match(appScript.body, /function appLink/);
     assert.match(appScript.body, /function proxyLink/);
+    assert.match(appScript.body, /function browserConfigLink/);
     assert.match(appScript.body, /session-target/);
+    assert.match(appScript.body, /function renderMarkdown/);
+    assert.match(appScript.body, /function openMarkdownModal/);
+    assert.match(appScript.body, /View README/);
     assert.match(appScript.body, /GUI URL/);
     assert.match(appScript.body, /function proxyGuiLink/);
     assert.match(appScript.body, /function saveBrowser/);
@@ -79,6 +112,10 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /function browserConfigActions/);
     assert.match(appScript.body, /function saveProxy/);
     assert.match(appScript.body, /function proxyActions/);
+    assert.match(appScript.body, /label: 'Monitor'/);
+    assert.match(appScript.body, /Found on localhost/);
+    assert.match(appScript.body, /Use in browser config/);
+    assert.match(appScript.body, /function useDiscoveredBroker/);
     assert.match(appScript.body, /Create session/);
     assert.match(appScript.body, /Delete session/);
     assert.match(appScript.body, /Remote IP addresses/);
@@ -109,7 +146,7 @@ test('gui proxies asset mutations while keeping other pw-dev mutations read-only
   });
   await new Promise((resolve) => pwdev.listen(0, '127.0.0.1', resolve));
   const pwdevUrl = `http://127.0.0.1:${pwdev.address().port}`;
-  const gui = await startPwDevGuiServer({ port: 0, pwDevUrl: pwdevUrl });
+  const gui = await startPwDevGuiServer({ port: 0, pwDevUrl: pwdevUrl, brokerDiscovery: false });
 
   try {
     const configCreated = await postJson(`${gui.origin}/api/pwdev/browser-configs`, { id: 'gui-config', headless: true });
@@ -171,7 +208,7 @@ test('gui proxies a managed Whistle GUI under a same-origin route', async () => 
       proxy: { id: 'proxy-main', guiUrl: whistleUrl },
     },
   });
-  const gui = await startPwDevGuiServer({ port: 0, pwDevUrl: pwdev.origin });
+  const gui = await startPwDevGuiServer({ port: 0, pwDevUrl: pwdev.origin, brokerDiscovery: false });
 
   try {
     const response = await get(`${gui.origin}/proxy/proxy-main/gui/`);
@@ -234,6 +271,7 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     pwDevUrl: pwdev.origin,
     brokerUrl: broker.origin,
     proxyManagerUrl: proxy.origin,
+    brokerDiscovery: false,
   });
 
   try {
@@ -294,6 +332,7 @@ test('gui snapshot keeps SSH topology reported through pw-dev server', async () 
     pwDevUrl: pwdev.origin,
     brokerUrl: broker.origin,
     proxyManagerUrl: proxy.origin,
+    brokerDiscovery: false,
   });
 
   try {
@@ -352,6 +391,7 @@ test('gui snapshot discovers multiple brokers from server sessions', async () =>
     pwDevUrl: pwdev.origin,
     brokerUrl: broker1.origin,
     proxyManagerUrl: proxy.origin,
+    brokerDiscovery: false,
   });
 
   try {
@@ -365,6 +405,63 @@ test('gui snapshot discovers multiple brokers from server sessions', async () =>
     await pwdev.close();
     await broker1.close();
     await broker2.close();
+    await proxy.close();
+  }
+});
+
+test('gui snapshot discovers ready brokers from the localhost scan range', async () => {
+  const configuredBroker = await startJsonServer({
+    '/_broker/status': { ok: true, state: 'idle', instanceCount: 0, instances: [] },
+    '/_broker/networks': { ok: true, networks: [] },
+    '/_broker/proxy-forwards': { ok: true, forwards: [] },
+  });
+  const scannedBroker = await startJsonServer({
+    '/_broker/status': {
+      ok: true,
+      state: 'idle',
+      instanceCount: 0,
+      topology: { mode: 'ssh', remote: true, ssh: { target: 'user@host' } },
+      instances: [],
+    },
+    '/_broker/networks': { ok: true, networks: [] },
+    '/_broker/proxy-forwards': { ok: true, forwards: [] },
+  });
+  const pwdev = await startJsonServer({
+    '/_pwdev/status': {
+      ok: true,
+      broker: { configured: true, reachable: true, url: configuredBroker.origin },
+      manifest: { ok: true, id: 'main' },
+    },
+    '/_pwdev/apps': { ok: true, apps: [] },
+    '/_pwdev/browser-configs': { ok: true, browserConfigs: [] },
+    '/_pwdev/sessions': { ok: true, sessions: [] },
+    '/_pwdev/browsers': { ok: true, browsers: [] },
+    '/_pwdev/proxies': { ok: true, proxies: [] },
+    '/_pwdev/networks': { ok: true, networks: [] },
+  });
+  const proxy = await startJsonServer({ '/_proxy/status': { ok: true, proxies: [] } });
+  const scannedPort = new URL(scannedBroker.origin).port;
+  const gui = await startPwDevGuiServer({
+    port: 0,
+    pwDevUrl: pwdev.origin,
+    brokerUrl: configuredBroker.origin,
+    proxyManagerUrl: proxy.origin,
+    brokerDiscoveryPorts: [Number(scannedPort)],
+  });
+
+  try {
+    const snapshot = await getJson(`${gui.origin}/api/snapshot`);
+    assert.equal(snapshot.statusCode, 200);
+    assert.equal(snapshot.body.brokers.length, 2);
+    assert.equal(snapshot.body.brokers[0].discovered, false);
+    assert.equal(snapshot.body.brokers[1].discovered, true);
+    assert.equal(snapshot.body.brokers[1].url, scannedBroker.origin);
+    assert.equal(snapshot.body.brokers[1].status.body.topology.remote, true);
+  } finally {
+    await gui.close();
+    await pwdev.close();
+    await configuredBroker.close();
+    await scannedBroker.close();
     await proxy.close();
   }
 });

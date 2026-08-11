@@ -43,6 +43,51 @@ Use `--broker-url` only when the broker runs somewhere else. If the default or
 configured broker is not reachable, `GET /_pwdev/status` reports
 `reachable: false` and browser lifecycle routes return `503`.
 
+## Remote Linux Brokers
+
+The server can provision a broker on a Linux SSH peer and keep a local forward
+healthy:
+
+```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/remote-brokers \
+  -H 'content-type: application/json' \
+  -d '{"id":"lab","target":"agent@10.11.2.2"}'
+```
+
+The server compares the remote checkout with its own Git revision first. A
+missing checkout is cloned into `~/.pw-dev/pw-dev`; an existing clean checkout
+is updated when needed. A healthy remote broker at the matching revision is
+reused. An update stops and restarts only the pw-dev-managed broker, and a
+dirty checkout or unmanaged running broker fails safely instead of being
+overwritten.
+
+Remote setup requires Node 18+. When the default `node` is older, pw-dev
+loads `~/.nvm/nvm.sh`; if NVM is absent, it installs pinned NVM
+`v0.40.6` with the official installer (without editing shell profiles), then
+installs and selects Node 18 for the broker process.
+
+The response contains `remoteBroker.brokerUrl`, such as
+`http://127.0.0.1:18083`. This is a loopback-only SSH forward; it selects an
+available local port from `18080` through `18089` unless `localPort` is
+supplied. Use it as a browser config's advanced `brokerUrl` override.
+
+The server sends SSH keepalives and actively probes `/_broker/status`. A
+powered-off host, network failure, or zombie/half-open forward moves the
+record to `reconnecting` and retries with backoff until it recovers or is
+explicitly released:
+
+```bash
+curl http://127.0.0.1:9696/_pwdev/remote-brokers
+curl -X POST http://127.0.0.1:9696/_pwdev/remote-brokers/lab/disconnect
+curl -X POST http://127.0.0.1:9696/_pwdev/remote-brokers/lab/stop
+```
+
+`disconnect` (or `DELETE /_pwdev/remote-brokers/:id`) releases only the local
+forward. `stop` releases it and sends `SIGTERM` only when the remote pid file
+verifies that the process is the pw-dev-managed broker. The server does not
+store SSH credentials; OpenSSH handles host-key, password, passphrase, and MFA
+prompts.
+
 The app registry persists in `<worktree>/.pw-dev/apps.json` by default. Pass
 `--app-registry-file <file>` to place it elsewhere. Browser sessions are
 broker-owned runtime state and are intentionally not restored after a server
@@ -286,6 +331,8 @@ template path, how to compose or compile the ruleset, its required inputs, and
 how to apply the finished rules through the server-proxied proxy API.
 `accounts` is metadata for non-production test accounts only. Do not register
 production accounts, personal credentials, or sensitive tokens.
+Use `PATCH /_pwdev/apps/:id` only to change the app's `proxyId`; send `null` to
+remove that attachment. `DELETE /_pwdev/apps/:id` removes the app record.
 
 ## Browser configs, browsers, and sessions
 
@@ -419,6 +466,7 @@ POST   /_pwdev/sessions/:id/release
 GET    /_pwdev/apps
 POST   /_pwdev/apps
 GET    /_pwdev/apps/:id
+PATCH  /_pwdev/apps/:id
 DELETE /_pwdev/apps/:id
 GET    /_pwdev/apps/:id/manifest
 

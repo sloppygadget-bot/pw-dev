@@ -4,9 +4,85 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { request } from 'playwright';
 
 import { startPwDevServer } from '../packages/server/src/index.js';
+
+const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function createOpenApiContract(prefix, documentPaths) {
+  const documents = documentPaths.map((documentPath) => JSON.parse(fs.readFileSync(path.join(REPOSITORY_ROOT, documentPath), 'utf8')));
+  return {
+    assertResponse(method, rawUrl, status, body) {
+      const pathname = new URL(rawUrl, 'http://pw-dev.test').pathname;
+      assert.ok(pathname.startsWith(prefix), `mocked ${method} ${pathname} is outside ${prefix}`);
+      const apiPath = pathname.slice(prefix.length) || '/';
+      const operation = findOperation(documents, method, apiPath);
+      assert.ok(operation, `mocked ${method} ${apiPath} is not documented in ${prefix} OpenAPI`);
+      const response = operation.definition.responses?.[String(status)];
+      assert.ok(response, `mocked ${method} ${apiPath} returned undocumented HTTP ${status}`);
+      const schema = response.content?.['application/json']?.schema;
+      assert.ok(schema, `mocked ${method} ${apiPath} HTTP ${status} has no JSON response schema`);
+      assertJsonSchema(body, operation.document, schema, `${method} ${apiPath} HTTP ${status}`);
+    },
+  };
+}
+
+function findOperation(documents, method, actualPath) {
+  const normalizedMethod = method.toLowerCase();
+  for (const document of documents) {
+    for (const [template, pathItem] of Object.entries(document.paths ?? {})) {
+      if (!pathMatches(template, actualPath)) continue;
+      if (pathItem[normalizedMethod]) return { document, definition: pathItem[normalizedMethod] };
+    }
+  }
+  return undefined;
+}
+
+function pathMatches(template, actualPath) {
+  const expected = template.split('/').filter(Boolean);
+  const actual = actualPath.split('/').filter(Boolean);
+  return expected.length === actual.length && expected.every((part, index) => /^\{[^}]+\}$/.test(part) || part === actual[index]);
+}
+
+function resolveSchema(document, schema) {
+  if (!schema.$ref) return schema;
+  assert.match(schema.$ref, /^#\/components\/schemas\/[A-Za-z0-9._-]+$/);
+  const name = schema.$ref.split('/').at(-1);
+  const resolved = document.components?.schemas?.[name];
+  assert.ok(resolved, `OpenAPI schema ${schema.$ref} is missing`);
+  return resolveSchema(document, resolved);
+}
+
+function assertJsonSchema(value, document, schema, context) {
+  schema = resolveSchema(document, schema);
+  if (schema.type === 'object') {
+    assert.equal(typeof value, 'object', `${context} must be an object`);
+    assert.notEqual(value, null, `${context} must not be null`);
+    for (const name of schema.required ?? []) assert.ok(name in value, `${context} is missing required property ${name}`);
+    for (const [name, propertySchema] of Object.entries(schema.properties ?? {})) {
+      if (value[name] !== undefined) assertJsonSchema(value[name], document, propertySchema, `${context}.${name}`);
+    }
+  } else if (schema.type === 'array') {
+    assert.ok(Array.isArray(value), `${context} must be an array`);
+    if (schema.items) value.forEach((item, index) => assertJsonSchema(item, document, schema.items, `${context}[${index}]`));
+  } else if (schema.type === 'string') {
+    assert.equal(typeof value, 'string', `${context} must be a string`);
+  } else if (schema.type === 'integer') {
+    assert.ok(Number.isInteger(value), `${context} must be an integer`);
+  } else if (schema.type === 'boolean') {
+    assert.equal(typeof value, 'boolean', `${context} must be a boolean`);
+  } else {
+    assert.fail(`${context} uses unsupported schema type ${schema.type ?? 'unknown'}`);
+  }
+}
+
+function send(req, res, contract, status, body) {
+  contract.assertResponse(req.method, req.url, status, body);
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
 
 async function json(client, method, url, body) {
   const response = await client.fetch(url, {
@@ -15,11 +91,6 @@ async function json(client, method, url, body) {
     headers: body ? { 'content-type': 'application/json' } : undefined,
   });
   return { response, payload: await response.json() };
-}
-
-function send(res, status, body) {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(body));
 }
 
 function readBody(req) {
@@ -48,6 +119,7 @@ function startDouble(handler) {
 }
 
 async function startBrokerDouble() {
+  const contract = createOpenApiContract('/_broker', ['packages/cdp-broker/openapi/root.json']);
   const instances = new Set();
   const requests = [];
   let double;
@@ -57,17 +129,17 @@ async function startBrokerDouble() {
     if (req.method === 'POST' && req.url === '/_broker/start') {
       const instanceId = `bkr_${body.profile}`;
       instances.add(instanceId);
-      return send(res, 200, { ok: true, instanceId, cdpUrl: `${double.origin}/_broker/instances/${instanceId}`, profile: body.profile, startedAt: '2026-01-01T00:00:00.000Z' });
+      return send(req, res, contract, 200, { ok: true, instanceId, cdpUrl: `${double.origin}/_broker/instances/${instanceId}`, profile: body.profile, startedAt: '2026-01-01T00:00:00.000Z' });
     }
     if (req.method === 'POST' && req.url === '/_broker/stop') {
       instances.delete(body.instanceId);
-      return send(res, 200, { ok: true, stopped: body.instanceId });
+      return send(req, res, contract, 200, { ok: true, stopped: body.instanceId });
     }
     if (req.method === 'POST' && req.url === '/_broker/profiles/clear') {
-      return send(res, 200, { ok: true, profile: body.profile, cleared: true });
+      return send(req, res, contract, 200, { ok: true, profile: body.profile, cleared: true });
     }
     if (req.method === 'GET' && req.url === '/_broker/status') {
-      return send(res, 200, {
+      return send(req, res, contract, 200, {
         ok: true,
         state: instances.size ? 'active' : 'idle',
         instanceCount: instances.size,
@@ -75,29 +147,43 @@ async function startBrokerDouble() {
       });
     }
     if (req.method === 'GET' && /^\/_broker\/instances\/[^/]+\/json\/version$/.test(req.url)) {
-      return send(res, 200, { Browser: 'MockChrome/1.0', webSocketDebuggerUrl: 'ws://mock/devtools/browser/mock' });
+      return send(req, res, contract, 200, { Browser: 'MockChrome/1.0', webSocketDebuggerUrl: 'ws://mock/devtools/browser/mock' });
     }
-    return send(res, 404, { ok: false, error: 'not found' });
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'not found' }));
   });
   return { ...double, requests };
 }
 
 async function startProxyDouble(proxies) {
+  const contract = createOpenApiContract('/_proxy', ['packages/proxy/openapi/root.json', 'packages/proxy/openapi/lifecycle.json']);
   const requests = [];
   const double = await startDouble(async (req, res) => {
     requests.push({ method: req.method, path: req.url });
     const match = /^\/_proxy\/proxies\/([^/]+)\/start$/.exec(req.url || '');
     if (req.method === 'POST' && match) {
       const proxy = proxies.find((item) => item.id === decodeURIComponent(match[1]));
-      if (!proxy) return send(res, 404, { ok: false, error: 'not found' });
+      if (!proxy) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, error: 'not found' }));
+      }
       proxy.running = true;
-      return send(res, 200, { ok: true, proxy, alreadyRunning: true });
+      return send(req, res, contract, 200, { ok: true, proxy, alreadyRunning: true });
     }
-    if (req.method === 'GET' && req.url === '/_proxy/status') return send(res, 200, { ok: true, proxies });
-    return send(res, 404, { ok: false, error: 'not found' });
+    if (req.method === 'GET' && req.url === '/_proxy/status') return send(req, res, contract, 200, { ok: true, proxies });
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'not found' }));
   });
   return { ...double, requests };
 }
+
+test('OpenAPI-backed doubles reject response shape drift', () => {
+  const broker = createOpenApiContract('/_broker', ['packages/cdp-broker/openapi/root.json']);
+  assert.throws(
+    () => broker.assertResponse('GET', '/_broker/status', 200, { ok: true }),
+    /missing required property state/
+  );
+});
 
 async function makeServer(options = {}) {
   const root = options.root ?? fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-e2e-'));

@@ -5,11 +5,16 @@ import http from 'node:http';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import path from 'node:path';
+import { BrowserMonitorHub } from './monitor.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 9797;
 const DEFAULT_PWDEV_URL = 'http://127.0.0.1:9696';
 const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
+const DEFAULT_BROKER_SCAN_HOST = '127.0.0.1';
+const DEFAULT_BROKER_SCAN_START_PORT = 18080;
+const DEFAULT_BROKER_SCAN_END_PORT = 18089;
+const DEFAULT_BROKER_SCAN_TIMEOUT_MS = 350;
 const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
 const PUBLIC_DIR = path.resolve(new URL('../public', import.meta.url).pathname);
 const require = createRequire(import.meta.url);
@@ -30,6 +35,8 @@ export async function startPwDevGuiServer(options = {}) {
   const pwDevUrl = normalizeHttpUrl(options.pwDevUrl ?? DEFAULT_PWDEV_URL, 'pwDevUrl');
   const brokerUrl = normalizeHttpUrl(options.brokerUrl ?? DEFAULT_BROKER_URL, 'brokerUrl');
   const proxyManagerUrl = normalizeHttpUrl(options.proxyManagerUrl ?? DEFAULT_PROXY_MANAGER_URL, 'proxyManagerUrl');
+  const brokerDiscovery = normalizeBrokerDiscovery(options.brokerDiscovery, options.brokerDiscoveryPorts);
+  const monitorHub = new BrowserMonitorHub({ pwDevUrl });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -43,7 +50,27 @@ export async function startPwDevGuiServer(options = {}) {
         return;
       }
       if (requestUrl.pathname === '/api/snapshot') {
-        writeJson(res, 200, await collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }));
+        writeJson(res, 200, await collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl, brokerDiscovery }));
+        return;
+      }
+      const monitorEvents = /^\/api\/monitor\/([^/]+)\/events$/.exec(requestUrl.pathname);
+      if (monitorEvents) {
+        await monitorHub.stream(decodePathSegment(monitorEvents[1]), req, res);
+        return;
+      }
+      const monitorAction = /^\/api\/monitor\/([^/]+)\/action$/.exec(requestUrl.pathname);
+      if (monitorAction) {
+        if (req.method !== 'POST') {
+          writeJson(res, 405, { ok: false, error: 'monitor actions require POST' });
+          return;
+        }
+        const payload = await readJsonRequest(req);
+        writeJson(res, 200, await monitorHub.action(decodePathSegment(monitorAction[1]), payload));
+        return;
+      }
+      const monitorPage = /^\/monitor\/([^/]+)$/.exec(requestUrl.pathname);
+      if (monitorPage) {
+        await serveStaticFile({ req, res, filePath: path.join(PUBLIC_DIR, 'monitor.html'), contentType: 'text/html; charset=utf-8' });
         return;
       }
       if (requestUrl.pathname === '/api-docs') {
@@ -106,13 +133,16 @@ export async function startPwDevGuiServer(options = {}) {
     brokerUrl,
     proxyManagerUrl,
     server,
-    close: () => new Promise((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    }),
+    close: async () => {
+      await monitorHub.close();
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    },
   };
 }
 
-async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
+async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl, brokerDiscovery }) {
   const [
     serverStatus,
     apps,
@@ -139,7 +169,17 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
     fetchJsonFrom(`${proxyManagerUrl}/_proxy/status`),
   ]);
   const brokerUrls = discoverBrokerUrls({ brokerUrl, serverStatus, browserConfigs, sessions });
-  const brokers = await Promise.all(brokerUrls.map((url) => collectBrokerSnapshot(url)));
+  const discoveredBrokers = brokerDiscovery.enabled
+    ? await scanLocalBrokers({ ...brokerDiscovery, knownUrls: brokerUrls })
+    : [];
+  const brokerEntries = [
+    ...brokerUrls.map((url) => ({ url })),
+    ...discoveredBrokers,
+  ];
+  const brokers = await Promise.all(brokerEntries.map((entry) => collectBrokerSnapshot(entry.url, {
+    initialStatus: entry.status,
+    discovered: entry.discovered,
+  })));
   const primaryBroker = brokers.find((broker) => broker.url === brokerUrl) ?? brokers[0];
   const proxyStatuses = await collectProxyStatuses(serverProxies.body?.proxies, proxyStatus.body?.proxies);
 
@@ -169,6 +209,21 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl }) {
   };
 }
 
+function normalizeBrokerDiscovery(raw, ports) {
+  if (raw === false) return { enabled: false };
+  const configuredPorts = Array.isArray(ports) ? ports : undefined;
+  const scanPorts = configuredPorts ?? Array.from(
+    { length: DEFAULT_BROKER_SCAN_END_PORT - DEFAULT_BROKER_SCAN_START_PORT + 1 },
+    (_, index) => DEFAULT_BROKER_SCAN_START_PORT + index,
+  );
+  return {
+    enabled: raw?.enabled !== false,
+    host: raw?.host ?? DEFAULT_BROKER_SCAN_HOST,
+    ports: scanPorts.filter((port) => Number.isInteger(port) && port >= 1 && port <= 65535),
+    timeoutMs: raw?.timeoutMs ?? DEFAULT_BROKER_SCAN_TIMEOUT_MS,
+  };
+}
+
 function discoverBrokerUrls({ brokerUrl, serverStatus, browserConfigs, sessions }) {
   const urls = new Set();
   const add = (value) => {
@@ -188,13 +243,24 @@ function discoverBrokerUrls({ brokerUrl, serverStatus, browserConfigs, sessions 
   return [...urls];
 }
 
-async function collectBrokerSnapshot(url) {
+async function collectBrokerSnapshot(url, { initialStatus, discovered = false } = {}) {
   const [status, networks, proxyForwards] = await Promise.all([
-    fetchJsonFrom(`${url}/_broker/status`),
+    initialStatus ?? fetchJsonFrom(`${url}/_broker/status`),
     fetchJsonFrom(`${url}/_broker/networks`),
     fetchJsonFrom(`${url}/_broker/proxy-forwards`),
   ]);
-  return { url, status, networks, proxyForwards };
+  return { url, status, networks, proxyForwards, discovered };
+}
+
+async function scanLocalBrokers({ host, ports, timeoutMs, knownUrls }) {
+  const known = new Set(knownUrls);
+  const candidates = await Promise.all(ports.map(async (port) => {
+    const url = `http://${host}:${port}`;
+    const status = await fetchJsonFrom(`${url}/_broker/status`, { timeoutMs });
+    if (!status.ok || status.body?.ok !== true || known.has(url)) return undefined;
+    return { url, status, discovered: true };
+  }));
+  return candidates.filter(Boolean);
 }
 
 async function collectProxyStatuses(proxies, managedProxies) {
@@ -232,7 +298,7 @@ function probeLocalPort(port) {
   });
 }
 
-function fetchJsonFrom(rawUrl) {
+function fetchJsonFrom(rawUrl, { timeoutMs = 1500 } = {}) {
   const url = new URL(rawUrl);
   return new Promise((resolve) => {
     const request = http.request(url, {
@@ -260,7 +326,7 @@ function fetchJsonFrom(rawUrl) {
         });
       });
     });
-    request.setTimeout(1500, () => {
+    request.setTimeout(timeoutMs, () => {
       request.destroy(new Error('request timed out'));
     });
     request.once('error', (error) => {
@@ -476,6 +542,38 @@ function normalizeHttpUrl(value, name) {
 
 function ensureTrailingSlash(value) {
   return value.endsWith('/') ? value : `${value}/`;
+}
+
+function decodePathSegment(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    const error = new Error('Invalid monitor identifier');
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
+function readJsonRequest(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      if (!body) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        const error = new Error('Request body must be valid JSON');
+        error.statusCode = 400;
+        reject(error);
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
 function writeJson(res, statusCode, payload) {

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>pw-dev DOM monitor</title>
+    <link rel="stylesheet" href="/monitor.css">
+  </head>
+  <body>
+    <header class="monitor-topbar">
+      <div class="monitor-brand">
+        <div class="eyebrow">PW-DEV LIVE SESSION</div>
+        <h1 id="monitor-title">DOM monitor</h1>
+        <div id="monitor-subtitle" class="muted">Connecting…</div>
+      </div>
+      <nav class="monitor-nav" aria-label="Monitor navigation">
+        <div class="target-nav">
+          <span class="eyebrow">TARGET</span>
+          <a id="nav-target-url" href="#" target="_blank" rel="noopener noreferrer">Waiting for target…</a>
+        </div>
+        <span id="monitor-status" class="status-pill neutral">Connecting</span>
+        <a href="/" target="_blank" rel="noopener noreferrer">Dashboard</a>
+        <button id="toggle-sidebar" class="drawer-toggle" type="button" aria-label="Hide inspector" title="Hide inspector" aria-controls="monitor-sidebar" aria-expanded="true"><svg class="drawer-icon" aria-hidden="true" viewBox="0 0 24 24" focusable="false"><rect x="3.5" y="4" width="17" height="16" rx="2"></rect><path d="M15 4v16"></path><path d="m11 9-3 3 3 3"></path></svg></button>
+      </nav>
+    </header>
+
+    <main class="monitor-layout">
+      <section class="mirror-panel panel">
+        <div class="panel-head mirror-head">
+          <div id="page-meta" class="muted">Waiting for page state…</div>
+        </div>
+        <div id="mirror-frame-wrap" class="mirror-frame-wrap">
+          <iframe id="mirror-frame" title="Live reconstructed browser page" sandbox="allow-same-origin"></iframe>
+          <div id="mirror-click-marker" class="mirror-click-marker" aria-hidden="true"></div>
+          <div id="mirror-empty" class="mirror-empty">Waiting for a live DOM snapshot…</div>
+        </div>
+        <div class="mirror-footer">
+          <span id="viewport-meta">Viewport —</span>
+          <span id="scroll-meta">Scroll —</span>
+          <span id="click-meta">Click —</span>
+          <span id="update-meta">Updated —</span>
+        </div>
+      </section>
+
+      <aside id="monitor-sidebar" class="monitor-sidebar open" aria-label="Monitor tools and session details">
+        <section class="panel tools-panel">
+          <div class="panel-head compact"><h2>Mirror tools</h2><button id="close-sidebar" class="drawer-close" type="button" aria-label="Close inspector" title="Close inspector"><span aria-hidden="true">×</span></button></div>
+          <div class="mirror-tools">
+            <label><span>Search</span><input id="dom-search" type="search" placeholder="text or CSS selector"></label>
+            <button id="refresh-mirror" type="button">Refresh DOM</button>
+          </div>
+        </section>
+
+        <section class="panel inspector">
+          <div class="panel-head compact"><h2>Selected element</h2></div>
+          <div id="selected-empty" class="muted">Click an element in the mirror to inspect it.</div>
+          <div id="selected-details" class="hidden">
+            <div id="selected-label" class="selected-label"></div>
+            <pre id="selected-html"></pre>
+            <div class="inspector-actions">
+              <button id="highlight-element" type="button">Highlight real element</button>
+              <button id="click-element" type="button">Click real element</button>
+              <button id="focus-element" type="button">Focus real element</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel state-panel">
+          <div class="panel-head compact"><h2>Session state</h2></div>
+          <dl class="state-list">
+            <dt>Browser</dt><dd id="state-browser">—</dd>
+            <dt>Session</dt><dd id="state-session">—</dd>
+            <dt>URL</dt><dd id="state-url">—</dd>
+            <dt>Title</dt><dd id="state-title">—</dd>
+            <dt>Stylesheets</dt><dd id="state-styles">—</dd>
+          </dl>
+        </section>
+
+        <section class="panel activity-panel">
+          <div class="panel-head compact"><h2>Activity</h2><button id="clear-activity" type="button">Clear</button></div>
+          <ol id="activity-list" class="activity-list"></ol>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/monitor.js" type="module"></script>
+  </body>
+</html>

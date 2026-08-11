@@ -1,0 +1,75 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "pw-dev remote broker API",
+    "version": "1.0.0",
+    "description": "Provision a pw-dev CDP broker on a remote Linux host through SSH, then expose its loopback-only port through a local forward owned by this server. The remote checkout defaults to ~/.pw-dev/pw-dev and the local forward automatically selects an available port in 18080-18089."
+  },
+  "servers": [{ "url": "/" }],
+  "paths": {
+    "/_pwdev/remote-brokers": {
+      "get": {
+        "operationId": "listRemoteBrokers",
+        "summary": "List server-owned remote broker forwards",
+        "responses": { "200": { "description": "Active local forwards and their usable broker URLs" } }
+      },
+      "post": {
+        "operationId": "provisionRemoteBroker",
+        "summary": "Provision a remote broker and create a local SSH forward",
+        "description": "Uses the caller's normal OpenSSH authentication. The server clones the repository only when the remote worktree is missing, starts a loopback-only standby broker if one is not already healthy, then waits for the local forward to answer /_broker/status.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["target"],
+                "properties": {
+                  "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+                  "target": { "type": "string", "description": "SSH host or user@host accepted by OpenSSH." },
+                  "repository": { "type": "string", "format": "uri", "default": "https://github.com/sloppygadget-bot/pw-dev.git" },
+                  "worktree": { "type": "string", "default": ".pw-dev/pw-dev", "description": "Absolute remote path or path relative to the remote user's home directory." },
+                  "revision": { "type": "string", "description": "Git revision to run remotely. Defaults to the local pw-dev server checkout's current HEAD." },
+                  "remotePort": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 18080 },
+                  "localPort": { "type": "integer", "minimum": 18080, "maximum": 18089, "description": "Optional local forward port; otherwise choose an available port in this range." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Remote broker is ready and reachable through remoteBroker.brokerUrl." },
+          "409": { "description": "The requested id already has a forward, or no local broker port is available." },
+          "502": { "description": "SSH setup, remote clone/startup, or local-forward verification failed." }
+        }
+      }
+    },
+    "/_pwdev/remote-brokers/{id}": {
+      "delete": {
+        "operationId": "releaseRemoteBroker",
+        "summary": "Release a server-owned local SSH forward",
+        "description": "Stops only the local SSH forward. It intentionally leaves the remote broker process and checkout in place.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Forward released." }, "404": { "description": "Unknown remote broker id." } }
+      }
+    },
+    "/_pwdev/remote-brokers/{id}/disconnect": {
+      "post": {
+        "operationId": "disconnectRemoteBroker",
+        "summary": "Release a server-owned local SSH forward",
+        "description": "Alias for DELETE. It stops the local forward only and does not stop the remote broker.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Forward released." }, "404": { "description": "Unknown remote broker id." } }
+      }
+    },
+    "/_pwdev/remote-brokers/{id}/stop": {
+      "post": {
+        "operationId": "stopRemoteBroker",
+        "summary": "Stop a pw-dev-managed remote broker",
+        "description": "Releases the local forward, then verifies the remote pid belongs to the managed pw-dev broker before sending SIGTERM. A broker without the managed pid file is not stopped.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Forward released and remote broker stopped." }, "409": { "description": "The remote broker is not safely identifiable as pw-dev-managed." }, "502": { "description": "Remote stop failed." } }
+      }
+    }
+  }
+}

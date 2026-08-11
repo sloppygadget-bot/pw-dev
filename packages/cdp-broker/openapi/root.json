@@ -1,1 +1,27 @@
-{"openapi":"3.1.1","info":{"title":"pw-cdp-broker API","version":"1.0.0","description":"Advanced browser-broker lifecycle and CDP operations. When used through pw-dev, the server rewrites this API to /_pwdev/broker."},"servers":[{"url":"/_broker"}],"paths":{"/status":{"get":{"operationId":"getBrokerStatus","summary":"Read broker topology and active instances","responses":{"200":{"description":"Broker status"}}}},"/start":{"post":{"operationId":"startBrokerInstance","summary":"Start a Chrome instance","responses":{"200":{"description":"Instance with cdpUrl"}}}},"/stop":{"post":{"operationId":"stopBrokerInstance","summary":"Stop a Chrome instance","responses":{"200":{"description":"Stopped instance"}}}},"/profiles/clear":{"post":{"operationId":"clearBrokerProfile","summary":"Clear an unused persistent profile","responses":{"200":{"description":"Cleared profile"}}}},"/networks":{"get":{"operationId":"listBrokerNetworks","responses":{"200":{"description":"Network definitions"}}},"post":{"operationId":"upsertBrokerNetwork","responses":{"200":{"description":"Saved network"}}}},"/proxy-forwards":{"get":{"operationId":"listBrokerProxyForwards","responses":{"200":{"description":"Proxy forwards"}}},"post":{"operationId":"createBrokerProxyForward","responses":{"200":{"description":"Created proxy forward"}}}}}}
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "pw-cdp-broker API",
+    "version": "1.0.0",
+    "description": "Advanced browser-broker lifecycle and CDP operations. When used through pw-dev, the server rewrites this API to /_pwdev/broker."
+  },
+  "servers": [{ "url": "/_broker" }],
+  "paths": {
+    "/status": { "get": { "operationId": "getBrokerStatus", "summary": "Read broker topology and active instances", "responses": { "200": { "description": "Broker status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BrokerStatus" } } } } } } },
+    "/start": { "post": { "operationId": "startBrokerInstance", "summary": "Start a Chrome instance", "responses": { "200": { "description": "Instance with cdpUrl", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StartedInstance" } } } } } } },
+    "/stop": { "post": { "operationId": "stopBrokerInstance", "summary": "Stop a Chrome instance", "responses": { "200": { "description": "Stopped instance", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StoppedInstance" } } } } } } },
+    "/profiles/clear": { "post": { "operationId": "clearBrokerProfile", "summary": "Clear an unused persistent profile", "responses": { "200": { "description": "Cleared profile", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClearedProfile" } } } } } } },
+    "/instances/{id}/json/version": { "get": { "operationId": "getInstanceVersion", "summary": "Read an instance-scoped CDP version document", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "CDP version document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CdpVersion" } } } } } } },
+    "/networks": { "get": { "operationId": "listBrokerNetworks", "responses": { "200": { "description": "Network definitions" } } }, "post": { "operationId": "upsertBrokerNetwork", "responses": { "200": { "description": "Saved network" } } } },
+    "/proxy-forwards": { "get": { "operationId": "listBrokerProxyForwards", "responses": { "200": { "description": "Proxy forwards" } } }, "post": { "operationId": "createBrokerProxyForward", "responses": { "200": { "description": "Created proxy forward" } } } }
+  },
+  "components": {
+    "schemas": {
+      "BrokerStatus": { "type": "object", "required": ["ok", "state", "instanceCount", "instances"], "properties": { "ok": { "type": "boolean" }, "state": { "type": "string" }, "instanceCount": { "type": "integer" }, "instances": { "type": "array", "items": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } } } } },
+      "StartedInstance": { "type": "object", "required": ["ok", "instanceId", "cdpUrl", "profile", "startedAt"], "properties": { "ok": { "type": "boolean" }, "instanceId": { "type": "string" }, "cdpUrl": { "type": "string" }, "profile": { "type": "string" }, "startedAt": { "type": "string" } } },
+      "StoppedInstance": { "type": "object", "required": ["ok", "stopped"], "properties": { "ok": { "type": "boolean" }, "stopped": { "type": "string" } } },
+      "ClearedProfile": { "type": "object", "required": ["ok", "profile", "cleared"], "properties": { "ok": { "type": "boolean" }, "profile": { "type": "string" }, "cleared": { "type": "boolean" } } },
+      "CdpVersion": { "type": "object", "required": ["Browser", "webSocketDebuggerUrl"], "properties": { "Browser": { "type": "string" }, "webSocketDebuggerUrl": { "type": "string" } } }
+    }
+  }
+}

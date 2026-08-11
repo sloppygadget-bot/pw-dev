@@ -63,7 +63,7 @@
         "operationId": "startManagedProxy",
         "description": "Idempotently start Whistle from its saved profile.",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Started or already-running proxy" } }
+        "responses": { "200": { "description": "Started or already-running proxy", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StartedProxy" } } } } }
       }
     },
     "/proxies/{id}/stop": {
@@ -86,6 +86,19 @@
         "operationId": "stopAllManagedProxies",
         "description": "Stop all Whistle processes while preserving every profile.",
         "responses": { "200": { "description": "Stopped proxies with profiles preserved" } }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "StartedProxy": {
+        "type": "object",
+        "required": ["ok", "proxy", "alreadyRunning"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "proxy": { "type": "object", "required": ["id", "running"], "properties": { "id": { "type": "string" }, "running": { "type": "boolean" } } },
+          "alreadyRunning": { "type": "boolean" }
+        }
       }
     }
   }

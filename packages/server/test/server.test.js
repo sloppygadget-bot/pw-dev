@@ -190,7 +190,11 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /_pwdev\/openapi\.json/);
     assert.match(instructions.body, /_pwdev\/delegates/);
     assert.match(instructions.body, new RegExp(`\\[pw-dev app API\\]\\(${escapeRegExp(server.origin)}\\/_pwdev\\/openapi\\/apps\\.json\\)`));
-    assert.match(instructions.body, /\| POST \| `\/_pwdev\/apps` \| Saved app \|/);
+    assert.match(instructions.body, /\| POST \| `\/_pwdev\/apps` \| Create or update an app \|/);
+    assert.match(instructions.body, /\| GET \| `\/_pwdev\/apps\/\{id\}` \| Get one app \|/);
+    assert.match(instructions.body, /\| PATCH \| `\/_pwdev\/apps\/\{id\}` \| Patch app metadata \|/);
+    assert.match(instructions.body, /\| DELETE \| `\/_pwdev\/apps\/\{id\}` \| Delete an app \|/);
+    assert.match(instructions.body, /\| GET \| `\/_pwdev\/sessions\/\{id\}` \| Get one live session \|/);
     assert.match(instructions.body, /\| POST \| `\/_pwdev\/browsers\/\{id\}\/start` \| Start a browser session \|/);
     assert.doesNotMatch(instructions.body, /\{\{[A-Z_]+\}\}/);
 
@@ -279,7 +283,13 @@ test('server exposes a machine-readable API reference', async () => {
     assert.equal(api.statusCode, 200);
     assert.equal(api.body.ok, true);
     assert.equal(api.body.entities.browserConfigs.persistent, true);
+    assert.deepEqual(api.body.entities.browserConfigs.fields, [
+      'id', 'name?', 'targetUrl?', 'brokerUrl?', 'profile?', 'ignoreSslErrors?',
+      'proxyBypassList?', 'headless?', 'resetProfile?',
+    ]);
+    assert.equal(api.body.entities.browsers.fields.includes('name?'), true);
     assert.equal(api.body.entities.sessions.sourceOfTruth, 'broker');
+    assert.equal(api.body.entities.sessions.fields.includes('proxyId?'), true);
     assert.equal(api.body.entities.browsers.persistent, true);
     assert.equal(api.body.endpoints.some((endpoint) => endpoint.path === '/_pwdev/browsers/:id/start'), true);
     assert.deepEqual(api.body.details.resources, ['apps', 'browserConfigs', 'browsers', 'proxies', 'sessions']);
@@ -290,6 +300,14 @@ test('server exposes a machine-readable API reference', async () => {
     const browsers = await getJson(`${server.origin}/_pwdev/openapi/browsers.json`);
     assert.equal(browsers.statusCode, 200);
     assert.ok(browsers.body.paths['/_pwdev/browsers/{id}/start']);
+    const appsDocument = await getJson(`${server.origin}/_pwdev/openapi/apps.json`);
+    assert.equal(appsDocument.statusCode, 200);
+    assert.ok(appsDocument.body.paths['/_pwdev/apps/{id}'].get);
+    assert.ok(appsDocument.body.paths['/_pwdev/apps/{id}'].patch);
+    assert.ok(appsDocument.body.paths['/_pwdev/apps/{id}'].delete);
+    const sessionsDocument = await getJson(`${server.origin}/_pwdev/openapi/sessions.json`);
+    assert.equal(sessionsDocument.statusCode, 200);
+    assert.ok(sessionsDocument.body.paths['/_pwdev/sessions/{id}'].get);
     const traffic = proxies.body.operations.find((operation) => operation.path === '/_pwdev/proxies/:id/traffic');
     assert.match(traffic.usage, /dumpCount/);
     assert.match(traffic.restrictions.join(' '), /mtype=1/);
@@ -1618,6 +1636,38 @@ test('server proxies broker HTTP APIs', async () => {
   }
 });
 
+test('server routes instance CDP discovery to the session broker', async () => {
+  const defaultBroker = await startMockBroker();
+  const sessionBroker = await startMockBroker();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const server = await startPwDevServer({ root, port: 0, id: 'checkout-main', brokerUrl: defaultBroker.origin });
+  try {
+    const config = await postJson(`${server.origin}/_pwdev/browser-configs`, {
+      id: 'remote-broker-config',
+      brokerUrl: sessionBroker.origin,
+      headless: true,
+    });
+    assert.equal(config.statusCode, 200);
+    const browser = await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'remote-broker-browser',
+      browserConfigId: 'remote-broker-config',
+    });
+    assert.equal(browser.statusCode, 200);
+    const started = await postJson(`${server.origin}/_pwdev/browsers/remote-broker-browser/start`, {});
+    assert.equal(started.statusCode, 200);
+    const cdp = await getJson(`${started.body.session.cdpUrl}/json/version`);
+    assert.equal(cdp.statusCode, 200);
+    assert.match(cdp.body.webSocketDebuggerUrl, new RegExp(`^ws://${new URL(server.origin).host}/_pwdev/broker/instances/`));
+    assert.equal(sessionBroker.requests.some((request) => request.path.endsWith('/json/version')), true);
+    assert.equal(defaultBroker.requests.some((request) => request.path.endsWith('/json/version')), false);
+  } finally {
+    await server.close();
+    await defaultBroker.close();
+    await sessionBroker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server exposes broker network APIs only through the broker delegate path', async () => {
   const broker = await startMockBroker();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
@@ -1751,6 +1801,61 @@ test('server proxies broker websocket upgrades', async () => {
   } finally {
     await server.close();
     await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('server provisions and releases remote brokers through its control-plane route', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const calls = [];
+  const remoteBrokerManager = {
+    list: () => [{ id: 'existing', brokerUrl: 'http://127.0.0.1:18081' }],
+    provision: async (payload) => {
+      calls.push({ operation: 'provision', payload });
+      return { id: payload.id ?? 'ssh-agent-linux', brokerUrl: 'http://127.0.0.1:18082' };
+    },
+    remove: async (id) => {
+      calls.push({ operation: 'remove', id });
+      return id === 'ssh-agent-linux';
+    },
+    stop: async (id) => {
+      calls.push({ operation: 'stop', id });
+      return id === 'ssh-agent-linux';
+    },
+    close: async () => {
+      calls.push({ operation: 'close' });
+    },
+  };
+  const server = await startPwDevServer({ root, port: 0, remoteBrokerManager });
+  try {
+    const listed = await getJson(`${server.origin}/_pwdev/remote-brokers`);
+    assert.deepEqual(listed.body, {
+      ok: true,
+      remoteBrokers: [{ id: 'existing', brokerUrl: 'http://127.0.0.1:18081' }],
+    });
+
+    const provisioned = await postJson(`${server.origin}/_pwdev/remote-brokers`, {
+      id: 'ssh-agent-linux',
+      target: 'agent@linux-box',
+    });
+    assert.equal(provisioned.statusCode, 201);
+    assert.deepEqual(provisioned.body.remoteBroker, {
+      id: 'ssh-agent-linux',
+      brokerUrl: 'http://127.0.0.1:18082',
+    });
+
+    const released = await deleteJson(`${server.origin}/_pwdev/remote-brokers/ssh-agent-linux`);
+    assert.deepEqual(released.body, { ok: true, id: 'ssh-agent-linux', released: true });
+    const stopped = await postJson(`${server.origin}/_pwdev/remote-brokers/ssh-agent-linux/stop`, {});
+    assert.deepEqual(stopped.body, { ok: true, id: 'ssh-agent-linux', stopped: true });
+    assert.deepEqual(calls.slice(0, 3), [
+      { operation: 'provision', payload: { id: 'ssh-agent-linux', target: 'agent@linux-box' } },
+      { operation: 'remove', id: 'ssh-agent-linux' },
+      { operation: 'stop', id: 'ssh-agent-linux' },
+    ]);
+  } finally {
+    await server.close();
+    assert.equal(calls.at(-1).operation, 'close');
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

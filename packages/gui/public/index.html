@@ -52,8 +52,8 @@
           <button class="nav-item active" data-view="browsers" type="button">
             <span>Browsers</span><b id="count-browsers">0</b>
           </button>
-          <div class="nav-group">
-            <div class="nav-heading">Assets</div>
+          <details class="nav-group" data-nav-group="assets">
+            <summary class="nav-heading">Assets</summary>
             <button class="nav-item" data-view="apps" type="button">
               <span>Apps</span><b id="count-apps">0</b>
             </button>
@@ -63,16 +63,16 @@
             <button class="nav-item" data-view="proxies" type="button">
               <span>Proxies</span><b id="count-proxies">0</b>
             </button>
-          </div>
-          <div class="nav-group">
-            <div class="nav-heading">Runtime</div>
+          </details>
+          <details class="nav-group" data-nav-group="runtime">
+            <summary class="nav-heading">Runtime</summary>
             <button class="nav-item" data-view="sessions" type="button">
               <span>Sessions</span><b id="count-sessions">0</b>
             </button>
             <button class="nav-item" data-view="broker" type="button">
               <span>Brokers</span><b id="count-broker">0</b>
             </button>
-          </div>
+          </details>
         </aside>
 
         <div class="content">
@@ -188,6 +188,23 @@
         </div>
       </section>
     </main>
+
+    <div id="markdown-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="markdown-modal-title">
+      <div class="modal-backdrop" data-close-markdown-modal></div>
+      <section class="modal-panel">
+        <div class="modal-head">
+          <div>
+            <h2 id="markdown-modal-title">README</h2>
+            <div id="markdown-modal-subtitle" class="id"></div>
+          </div>
+          <button id="close-markdown-modal" type="button" aria-label="Close README">Close</button>
+        </div>
+        <div id="markdown-modal-content" class="markdown-view"></div>
+        <div class="modal-actions">
+          <button id="copy-markdown-modal" type="button">Copy README</button>
+        </div>
+      </section>
+    </div>
 
     <template id="empty-template">
       <div class="empty">No records</div>

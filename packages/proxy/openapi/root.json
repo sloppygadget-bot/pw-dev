@@ -3,7 +3,19 @@
   "info": { "title": "pw-dev managed proxy API", "version": "1.0.0", "description": "Proxy-manager-owned API. Each in-house Whistle -S profile is the durable source of truth; process lifecycle preserves it and only explicit DELETE removes it. Native deployments serve this API at /_proxy; pw-dev republishes it for agents at /_pwdev/proxy." },
   "servers": [{ "url": "/_proxy" }],
   "paths": {
-    "/status": { "get": { "operationId": "getManagedProxyStatus", "responses": { "200": { "description": "Manager and managed proxy status" } } } }
+    "/status": { "get": { "operationId": "getManagedProxyStatus", "responses": { "200": { "description": "Manager and managed proxy status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProxyManagerStatus" } } } } } } }
+  },
+  "components": {
+    "schemas": {
+      "ProxyManagerStatus": {
+        "type": "object",
+        "required": ["ok", "proxies"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "proxies": { "type": "array", "items": { "type": "object", "required": ["id", "running"], "properties": { "id": { "type": "string" }, "running": { "type": "boolean" } } } }
+        }
+      }
+    }
   },
   "x-pwdev-documents": [
     { "id": "lifecycle", "url": "/_proxy/openapi/lifecycle.json", "whenToUse": "Create, start, stop, restart, or delete a managed proxy." },
