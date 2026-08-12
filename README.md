@@ -134,10 +134,12 @@ operation and stops it with the server on `http://127.0.0.1:9697`. Use
 can be supplied with `--proxy-manager-url`. The standalone
 `npm start -- proxy` command remains available for that case.
 
-The proxy manager creates managed Whistle instances from rulesets supplied by
-an external agent. Each instance gets separate proxy and GUI ports, isolated
+The proxy manager creates durable managed Whistle profiles from rulesets supplied by
+an external agent. Each profile gets separate proxy and GUI ports, isolated
 `-S` storage under `packages/proxy/.runtime/whistle`, HTTPS capture enabled, a
-proxy registry entry, and optionally an app `proxyId` attachment. The in-house
+proxy registry entry, and optionally an app `proxyId` attachment. Whistle stays
+stopped until a browser that references the profile starts, then stops again
+when no live browser session uses it. The in-house
 Whistle profile is the durable source of truth: stopping the process, stopping
 the manager, or releasing a browser lease preserves configuration, rules, and
 traffic. Only `DELETE /_pwdev/proxy/proxies/:id` removes the profile.

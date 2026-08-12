@@ -63,6 +63,12 @@ export function createProxyManager(options = {}) {
     serverUrl,
     async status() {
       await ensureProfilesLoaded();
+      await refreshManagedProxyProcesses({
+        root: w2StorageRoot,
+        processListImpl,
+        killProcessImpl,
+        proxies,
+      });
       return {
         ok: true,
         serverUrl,
@@ -76,6 +82,12 @@ export function createProxyManager(options = {}) {
     },
     async listProxies() {
       await ensureProfilesLoaded();
+      await refreshManagedProxyProcesses({
+        root: w2StorageRoot,
+        processListImpl,
+        killProcessImpl,
+        proxies,
+      });
       return { ok: true, proxies: listProcessRecords(proxies) };
     },
     async getProxy(id) {
@@ -89,14 +101,16 @@ export function createProxyManager(options = {}) {
       const proxy = proxies.get(id);
       if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
       const processes = await processListImpl();
-      const liveProcess = processes.find((processInfo) => (
-        processInfo.pid === proxy.pid
-        && extractManagedStorageDir(processInfo.commandLine, w2StorageRoot) === proxy.storageDir
-      ));
+      const liveProcess = findManagedProxyProcess(processes, proxy.storageDir, w2StorageRoot);
       const running = Boolean(liveProcess);
+      if (liveProcess) {
+        adoptManagedProxyProcess(proxy, liveProcess, killProcessImpl);
+      } else if (proxy.running || proxy.pid) {
+        markProxyStopped(proxy);
+      }
       return {
         ok: true,
-        proxy: { ...stripChild(proxy), running, pid: liveProcess?.pid },
+        proxy: stripChild(proxy),
         status: {
           running,
           pid: liveProcess?.pid,
@@ -141,7 +155,7 @@ export function createProxyManager(options = {}) {
       if (result?.ec !== 0) throw httpError(502, result?.em || result?.msg || 'Whistle rejected ruleset deselection');
       return { ok: true, proxyId: proxy.id, selectedRulesets: result.list ?? [] };
     },
-    async createProxy(input) {
+    async createProxy(input, { start = false } = {}) {
       await ensureProfilesLoaded();
       const request = validateCreateProxyRequest(input);
       if (proxies.has(request.id)) {
@@ -186,7 +200,7 @@ export function createProxyManager(options = {}) {
         '-M',
         'enableHttps',
       ];
-      const child = spawnManagedProcess(spawnImpl, command, args, { quiet });
+      const child = start ? spawnManagedProcess(spawnImpl, command, args, { quiet }) : undefined;
       const record = makeProcessRecord({
         id: request.id,
         kind: 'whistle',
@@ -206,26 +220,30 @@ export function createProxyManager(options = {}) {
         rulesetFile,
         rules,
         whistleRuleName: makeWhistleRuleName(request.id),
-        pid: child.pid,
+        pid: child?.pid,
       });
       proxies.set(request.id, record);
-      child.once?.('error', (error) => {
-        markProxyStopped(record);
-        if (!quiet) console.error(`proxy process failed: ${request.id}: ${error.message}`);
-      });
-      child.once?.('exit', (code, signal) => {
-        markProxyStopped(record);
-        if (!quiet) console.error(`proxy process exited: ${request.id} code=${code} signal=${signal}`);
-      });
-      record.child = child;
+      if (child) {
+        child.once?.('error', (error) => {
+          markProxyStopped(record);
+          if (!quiet) console.error(`proxy process failed: ${request.id}: ${error.message}`);
+        });
+        child.once?.('exit', (code, signal) => {
+          markProxyStopped(record);
+          if (!quiet) console.error(`proxy process exited: ${request.id} code=${code} signal=${signal}`);
+        });
+        record.child = child;
+      }
 
       let app;
       try {
-        await applyRulesImpl({
-          guiUrl,
-          ruleName: record.whistleRuleName,
-          rulesText: rules.effectiveRuleset,
-        });
+        if (child) {
+          await applyRulesImpl({
+            guiUrl,
+            ruleName: record.whistleRuleName,
+            rulesText: rules.effectiveRuleset,
+          });
+        }
         await registryClient.updateProxy(omitUndefined({
           id: request.id,
           kind: 'whistle',
@@ -240,7 +258,8 @@ export function createProxyManager(options = {}) {
           storageDir,
           proxyPort,
           uiPort,
-          pid: child.pid,
+          pid: child?.pid,
+          running: Boolean(child),
           rulesetFile,
           rules,
           managed: true,
@@ -252,7 +271,7 @@ export function createProxyManager(options = {}) {
         await writeManagedRuleFiles({ storageDir, rules });
         await writeProxyProfile(record);
       } catch (error) {
-        child.kill?.('SIGTERM');
+        child?.kill?.('SIGTERM');
         proxies.delete(request.id);
         await cleanupProcessRecord(record, quiet);
         throw error;
@@ -277,7 +296,9 @@ export function createProxyManager(options = {}) {
         previousVersion: proxy.rules.version,
       });
 
-      await replaceWhistleRules({ proxy, nextRules, applyRulesImpl, quiet });
+      if (proxy.running) {
+        await replaceWhistleRules({ proxy, nextRules, applyRulesImpl, quiet });
+      }
 
       try {
         await registryClient.updateProxy(omitUndefined({
@@ -301,15 +322,17 @@ export function createProxyManager(options = {}) {
           updatedAt: nextRules.updatedAt,
         }));
       } catch (error) {
-        try {
-          await applyRulesImpl({
-            guiUrl: proxy.guiUrl,
-            ruleName: proxy.whistleRuleName,
-            rulesText: proxy.rules.effectiveRuleset,
-          });
-        } catch (restoreError) {
-          if (!quiet) {
-            console.error(`proxy rules rollback failed: ${proxy.id}: ${restoreError.message}`);
+        if (proxy.running) {
+          try {
+            await applyRulesImpl({
+              guiUrl: proxy.guiUrl,
+              ruleName: proxy.whistleRuleName,
+              rulesText: proxy.rules.effectiveRuleset,
+            });
+          } catch (restoreError) {
+            if (!quiet) {
+              console.error(`proxy rules rollback failed: ${proxy.id}: ${restoreError.message}`);
+            }
           }
         }
         throw error;
@@ -325,6 +348,7 @@ export function createProxyManager(options = {}) {
       await ensureProfilesLoaded();
       const stored = proxies.get(id);
       if (!stored) throw httpError(404, `Unknown managed proxy: ${id}`);
+      await this.getProxyStatus(id);
       if (stored.running) return { ok: true, proxy: stripChild(stored), alreadyRunning: true };
       proxies.delete(id);
       try {
@@ -340,7 +364,7 @@ export function createProxyManager(options = {}) {
           proxyPort: stored.proxyPort,
           uiPort: stored.uiPort,
           storageDir: stored.storageDir,
-        });
+        }, { start: true });
         if (!stored.rules?.overrideRuleset) return started;
         return this.replaceProxyRules(id, {
           baseVersion: started.proxy.rules.version,
@@ -356,6 +380,7 @@ export function createProxyManager(options = {}) {
       await ensureProfilesLoaded();
       const proxy = proxies.get(id);
       if (!proxy) throw httpError(404, `Unknown managed proxy: ${id}`);
+      await this.getProxyStatus(id);
       if (!proxy.running) return { ok: true, proxy: stripChild(proxy), alreadyStopped: true };
       proxy.child?.kill?.('SIGTERM');
       markProxyStopped(proxy);
@@ -678,8 +703,8 @@ function makeProcessRecord({ id, kind, name, appId, taskId, owner, purpose, labe
     rules,
     whistleRuleName,
     pid,
-    running: true,
-    startedAt: new Date().toISOString(),
+    running: Boolean(pid),
+    startedAt: pid ? new Date().toISOString() : undefined,
     updatedAt: rules?.updatedAt,
   };
 }
@@ -1071,30 +1096,14 @@ async function recoverProxyProfiles({
     };
   }
 
-  const processByStorageDir = new Map();
-  for (const processInfo of processes) {
-    const storageDir = extractManagedStorageDir(processInfo.commandLine, path.resolve(root));
-    if (storageDir && !processByStorageDir.has(storageDir)) {
-      processByStorageDir.set(storageDir, { ...processInfo, storageDir });
-    }
-  }
+  const processByStorageDir = managedProcessesByStorageDir(processes, root);
 
   const recovered = [];
   const stopped = [];
   for (const record of proxies.values()) {
     const processInfo = processByStorageDir.get(path.resolve(record.storageDir));
     if (processInfo) {
-      const child = {
-        pid: processInfo.pid,
-        killed: false,
-        kill: (signal) => {
-          child.killed = true;
-          killProcessImpl(processInfo.pid, signal);
-        },
-      };
-      record.pid = processInfo.pid;
-      record.running = true;
-      record.child = child;
+      adoptManagedProxyProcess(record, processInfo, killProcessImpl);
       recovered.push(stripChild(record));
     } else {
       record.pid = undefined;
@@ -1134,6 +1143,53 @@ async function recoverProxyProfiles({
     stale,
   };
 }
+
+async function refreshManagedProxyProcesses({ root, processListImpl, killProcessImpl, proxies }) {
+  const processes = await processListImpl();
+  const processByStorageDir = managedProcessesByStorageDir(processes, root);
+  for (const record of proxies.values()) {
+    const processInfo = processByStorageDir.get(path.resolve(record.storageDir));
+    if (processInfo) {
+      adoptManagedProxyProcess(record, processInfo, killProcessImpl);
+    } else if (record.running || record.pid) {
+      markProxyStopped(record);
+    }
+  }
+}
+
+function managedProcessesByStorageDir(processes, root) {
+  const processByStorageDir = new Map();
+  for (const processInfo of processes) {
+    const storageDir = extractManagedStorageDir(processInfo.commandLine, path.resolve(root));
+    if (storageDir && !processByStorageDir.has(storageDir)) {
+      processByStorageDir.set(storageDir, { ...processInfo, storageDir });
+    }
+  }
+  return processByStorageDir;
+}
+
+function findManagedProxyProcess(processes, storageDir, root) {
+  return managedProcessesByStorageDir(processes, root).get(path.resolve(storageDir));
+}
+
+function adoptManagedProxyProcess(record, processInfo, killProcessImpl) {
+  if (record.pid === processInfo.pid && record.child) {
+    record.running = true;
+    return;
+  }
+  const child = {
+    pid: processInfo.pid,
+    killed: false,
+    kill: (signal) => {
+      child.killed = true;
+      killProcessImpl(processInfo.pid, signal);
+    },
+  };
+  record.pid = processInfo.pid;
+  record.running = true;
+  record.child = child;
+}
+
 async function cleanupOrphanedProxies({ root, processListImpl, killProcessImpl, registryClient, preservedStorageDirs = new Set(), quiet }) {
   let processes;
   try {
@@ -1219,9 +1275,22 @@ async function removeStaleRegistryRecord(record, registryClient, quiet) {
 
 function extractManagedStorageDir(commandLine, root) {
   if (typeof commandLine !== 'string' || !commandLine.includes(' run ')) return undefined;
-  const match = /(?:^|\s)-S\s+("[^"]+"|'[^']+'|\S+)/.exec(commandLine);
-  if (!match) return undefined;
-  const storageDir = path.resolve(match[1].replace(/^(['"])(.*)\1$/, '$2'));
+  const storageFlag = /(?:^|\s)-S\s+("[^"]+"|'[^']+'|\S+)/.exec(commandLine);
+  let storageDirValue = storageFlag?.[1]?.replace(/^(['"])(.*)\1$/, '$2');
+  if (!storageDirValue && commandLine.includes('starting/lib/bootstrap.js')) {
+    const dataFlag = /(?:^|\s)--data\s+("[^"]+"|'[^']+'|\S+)/.exec(commandLine);
+    const encodedData = dataFlag?.[1]?.replace(/^(['"])(.*)\1$/, '$2');
+    if (encodedData) {
+      try {
+        const data = JSON.parse(decodeURIComponent(encodedData));
+        storageDirValue = typeof data.storage === 'string' ? decodeURIComponent(data.storage) : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  if (!storageDirValue) return undefined;
+  const storageDir = path.resolve(storageDirValue);
   if (!isWithinRoot(storageDir, root)) return undefined;
   return storageDir;
 }

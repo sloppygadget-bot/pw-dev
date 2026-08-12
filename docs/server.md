@@ -111,8 +111,8 @@ curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop
 ```
 
 Managed proxy configuration and rules are stored in each proxy's Whistle
-profile directory. The proxy manager reloads those profiles as stopped proxies
-after restart; use the server-proxied lifecycle endpoints to start them again:
+profile directory. Browser start and stop normally own the Whistle process
+lifecycle; the explicit server-proxied lifecycle endpoints remain available:
 `POST /_pwdev/proxy/proxies/:id/start`, `.../:id/stop`, and `.../:id/restart`.
 
 `pw-dev server` starts the proxy manager lazily on the first proxy operation
@@ -121,11 +121,13 @@ and stops it on shutdown. The local manager listens on
 Whistle instances from external-agent
 rulesets, allocates separate proxy and GUI ports, registers the resulting
 proxy metadata, and can attach that proxy to an app by patching the app
-`proxyId`. Each managed Whistle proxy is started with isolated `-S` storage
+`proxyId`. Each managed Whistle proxy uses isolated `-S` storage
 under `packages/proxy/.runtime/whistle` and HTTPS capture enabled
 (`Enable HTTPS / Capture Tunnel Traffic`); the proxy manager removes that
-directory only when the proxy is explicitly deleted. Process exit, stop,
-manager shutdown, and browser lease release preserve the profile.
+directory only when the proxy is explicitly deleted. Creating a profile does
+not start Whistle. Browser start launches it on demand, and stopping the last
+session using it stops Whistle. Process exit, stop, manager shutdown, and
+browser lease release preserve the profile.
 
 Use `--no-proxy-manager` when managing the proxy service separately, or pass an
 external manager with `--proxy-manager-url`. The standalone `npm start -- proxy`
@@ -133,9 +135,10 @@ command remains available for that setup.
 
 Managed proxies are durable and reusable. For task/test isolation, create a
 small pool of profiles and configure each browser with `proxyIds`.
-Starting a browser selects one available proxy exclusively. Stopping preserves
-that reservation; destroying the browser releases it. The manager starts a stopped managed proxy
-idempotently when it is leased. Only explicit proxy deletion removes its
+Starting a browser selects one available proxy exclusively and starts its
+Whistle process. Stopping preserves that reservation but stops Whistle when no
+other live session uses it; destroying the browser releases the reservation.
+The manager starts a stopped managed proxy idempotently when it is leased. Only explicit proxy deletion removes its
 profile. Processes under the configured storage root that have no valid
 pw-dev profile are treated as orphans; unrelated Whistle instances are not
 stopped.
@@ -397,7 +400,8 @@ curl -X POST http://127.0.0.1:9696/_pwdev/browsers \
 Each active session receives `session.proxyLease`. Use its
 `trafficStartTime` as the `startTime` query value when reading
 `/_pwdev/proxies/:id/traffic`. Stopping preserves the browser's proxy
-reservation; destroying the browser releases it without deleting the durable
+reservation and shuts down an idle Whistle process; destroying the browser
+releases the reservation without deleting the durable
 proxy profile.
 
 Apps no longer own browser lifecycle. The retired

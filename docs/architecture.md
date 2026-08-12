@@ -269,4 +269,5 @@ await page.goto(started.browser.components.browserConfig.targetUrl);
 - A browser owns at most one active session. Multiple browsers can share one
   browser config and receive isolated profiles.
 - A browser can own an ordered `proxyIds` pool. It reserves one proxy until the
-  browser is destroyed without stopping or deleting the reusable Whistle profile.
+  browser is destroyed. Whistle runs only while a live browser session uses the
+  proxy; stopping it preserves the reusable profile and reservation.

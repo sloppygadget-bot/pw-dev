@@ -10,7 +10,8 @@ The `pw-dev-proxy.json` record inside the Whistle profile is the durable source
 of truth. The pw-dev server proxy registry mirrors it for discovery; it does not
 own managed proxy configuration.
 
-- Create allocates ports, writes the profile and rules, and starts Whistle.
+- Create allocates ports and writes the profile and rules without starting Whistle.
+- Starting a browser launches its managed Whistle proxy on demand; stopping the last browser session stops Whistle while preserving the profile.
 - Start is idempotent and reuses the saved profile, ports, and rules.
 - Stop preserves the profile, rules, ports, and captured traffic.
 - Process failure marks the profile stopped; it does not delete it.
@@ -36,8 +37,8 @@ directly.
 
 Create several durable proxies, then put their ids in a browser config's
 `proxyIds` field. Each durable browser reserves one proxy exclusively.
-Stopping the browser session releases the lease while leaving the proxy running
-and reusable.
+Stopping the browser session preserves the reservation and stops Whistle when
+no other live session uses it. The next browser start launches it again.
 
 The session's `proxyLease.trafficStartTime` is a Whistle traffic cursor. Pass it
 as `startTime` to `GET /_pwdev/proxies/:id/traffic` to exclude traffic captured

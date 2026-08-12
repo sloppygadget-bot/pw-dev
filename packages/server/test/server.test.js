@@ -691,6 +691,7 @@ test('browsers reserve durable managed proxies from a reusable pool', async () =
     const stopped = await postJson(`${server.origin}/_pwdev/browsers/task-a/stop`, {});
     assert.equal(stopped.statusCode, 200);
     assert.equal(stopped.body.browser.proxyId, 'traffic-a');
+    assert.equal(stopped.body.proxyStop.proxy.running, false);
 
     const stillReserved = await postJson(`${server.origin}/_pwdev/browsers/task-c/start`, {});
     assert.equal(stillReserved.statusCode, 409);
@@ -706,6 +707,10 @@ test('browsers reserve durable managed proxies from a reusable pool', async () =
         '/_proxy/proxies/traffic-b/start',
         '/_proxy/proxies/traffic-a/start',
       ]
+    );
+    assert.deepEqual(
+      manager.requests.filter((request) => /\/stop$/.test(request.path)).map((request) => request.path),
+      ['/_proxy/proxies/traffic-a/stop']
     );
   } finally {
     await server.close();
@@ -939,6 +944,51 @@ test('server protects referenced and occupied proxies during CRUD', async () => 
     await postJson(`${server.origin}/_pwdev/browsers`, {
       id: 'proxy-guard-browser', browserConfigId: 'proxy-guard-config', proxyId: 'proxy-guard',
     });
+
+    const managedCreated = await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'managed-proxy-guard',
+      kind: 'whistle',
+      proxyUrl: 'http://127.0.0.1:8896',
+      guiUrl: 'http://127.0.0.1:9806',
+      storageDir: path.join(root, '.pw-dev', 'managed-proxy-guard'),
+      proxyPort: 8896,
+      uiPort: 9806,
+      pid: 1001,
+      managed: true,
+    });
+    assert.equal(managedCreated.statusCode, 200);
+    await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'managed-proxy-guard-browser', browserConfigId: 'proxy-guard-config', proxyId: 'managed-proxy-guard',
+    });
+
+    const lifecycleRefresh = await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'managed-proxy-guard',
+      kind: 'whistle',
+      proxyUrl: 'http://127.0.0.1:8896',
+      guiUrl: 'http://127.0.0.1:9806',
+      storageDir: path.join(root, '.pw-dev', 'managed-proxy-guard'),
+      proxyPort: 8896,
+      uiPort: 9806,
+      pid: 2002,
+      running: true,
+      managed: true,
+    });
+    assert.equal(lifecycleRefresh.statusCode, 200);
+    assert.equal(lifecycleRefresh.body.proxy.pid, 2002);
+
+    const managedRouteEdit = await postJson(`${server.origin}/_pwdev/proxies`, {
+      id: 'managed-proxy-guard',
+      kind: 'whistle',
+      proxyUrl: 'http://127.0.0.1:8895',
+      guiUrl: 'http://127.0.0.1:9806',
+      storageDir: path.join(root, '.pw-dev', 'managed-proxy-guard'),
+      proxyPort: 8895,
+      uiPort: 9806,
+      pid: 2002,
+      managed: true,
+    });
+    assert.equal(managedRouteEdit.statusCode, 409);
+    assert.match(managedRouteEdit.body.error, /referenced by browser:managed-proxy-guard-browser/);
 
     const referencedEdit = await postJson(`${server.origin}/_pwdev/proxies`, {
       id: 'proxy-guard', proxyUrl: 'http://127.0.0.1:8897',
@@ -2050,6 +2100,19 @@ function startMockProxyManager(options = {}) {
       }
       proxy.running = true;
       writeTestJson(res, 200, { ok: true, proxy, alreadyRunning: true });
+      return;
+    }
+
+    const stopMatch = /^\/_proxy\/proxies\/([^/]+)\/stop$/.exec(req.url);
+    if (stopMatch && req.method === 'POST') {
+      const proxy = proxies.find((candidate) => candidate.id === decodeURIComponent(stopMatch[1]));
+      if (!proxy) {
+        writeTestJson(res, 404, { ok: false, error: 'not found' });
+        return;
+      }
+      proxy.running = false;
+      delete proxy.pid;
+      writeTestJson(res, 200, { ok: true, proxy });
       return;
     }
 

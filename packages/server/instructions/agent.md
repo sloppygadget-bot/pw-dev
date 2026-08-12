@@ -136,7 +136,8 @@ that existing forward.
    `readme`: devserver start/stop commands, environment setup, and the proxy
    rule template plus its compose/compile method.
 2. Read that app `readme`, compose the rules, then create one or more durable
-   managed proxies with `POST /_pwdev/proxy/proxies`.
+   managed proxies with `POST /_pwdev/proxy/proxies`. Creation stores a stopped
+   profile; Whistle starts with the browser and stops with its last live session.
 3. Create a browser config with `POST /_pwdev/browser-configs`.
 4. Create a browser with `POST /_pwdev/browsers`, linking the config through
    `browserConfigId` and optionally linking the app and proxy configuration.

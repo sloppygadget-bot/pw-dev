@@ -532,7 +532,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/sessions')) {
-    await handleSessionsRequest({ req, res, requestUrl, apps, browsers, sessions, broker, serverUrl, writeBody });
+    await handleSessionsRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody });
     return;
   }
 
@@ -1253,7 +1253,7 @@ async function handleProxiesRequest({ req, res, requestUrl, apps, browsers, sess
       await reconcileManagedProxies({ apps, proxies, proxyManagerUrl });
       const existing = proxies.get(payload.id);
       const references = existing ? proxyReferences(existing.id, { apps, browsers }) : [];
-      if (existing && references.length) {
+      if (existing && references.length && !isManagedProxyLifecycleRefresh(existing, payload)) {
         const error = new Error(`Proxy is referenced by ${references.join(', ')}`);
         error.statusCode = 409;
         throw error;
@@ -1340,6 +1340,19 @@ function proxyReferences(proxyId, { apps, browsers }) {
       .filter((browser) => browser.proxyId === proxyId || browser.proxyIds?.includes(proxyId))
       .map((browser) => `browser:${browser.id}`),
   ];
+}
+
+function isManagedProxyLifecycleRefresh(existing, candidate) {
+  if (!existing.managed || candidate?.managed !== true) return false;
+  return [
+    'kind',
+    'proxyUrl',
+    'guiUrl',
+    'storageDir',
+    'proxyPort',
+    'uiPort',
+    'brokerProxyForwardId',
+  ].every((field) => existing[field] === candidate[field]);
 }
 
 function proxyOccupants(proxyId, sessions) {
@@ -1486,14 +1499,17 @@ async function reconcileAppBrowserSessionsBestEffort({ apps, sessions, broker, a
  *   requestUrl: URL,
  *   apps: PwDevAppRegistry,
  *   browsers: PwDevBrowserRegistry,
+ *   proxies: PwDevProxyRegistry,
  *   sessions: PwDevSessionRegistry,
  *   broker: PwDevBrokerPairing,
+ *   proxyManagerUrl: string,
+ *   ensureProxyManager?: () => Promise<unknown>,
  *   serverUrl: string,
  *   writeBody: boolean,
  * }} options
  * @returns {Promise<void>}
  */
-async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, sessions, broker, serverUrl, writeBody }) {
+async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody }) {
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
 
   if (pathParts.length === 2 && pathParts[0] === '_pwdev' && pathParts[1] === 'sessions') {
@@ -1601,6 +1617,13 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, ses
     });
     sessions.delete(sessionId);
     if (session.browserId) browsers.update(session.browserId, { sessionId: undefined });
+    const proxyStop = await stopManagedProxyIfIdle({
+      proxyId: session.proxyId,
+      proxies,
+      sessions,
+      proxyManagerUrl,
+      ensureProxyManager,
+    });
     const app = apps.get(session.appId);
     writeJson(res, 200, {
       ok: true,
@@ -1608,6 +1631,7 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, ses
       releasedProxyLease: session.proxyLease,
       app: app ? buildAppResponse(app, sessions) : undefined,
       stop,
+      proxyStop,
     }, writeBody);
     return;
   }
@@ -1624,6 +1648,18 @@ async function ensureManagedProxyRunning({ proxyId, proxies, proxyManagerUrl, en
     method: 'POST',
   });
   if (started.proxy) proxies.upsert(managedProxyRegistration(started.proxy));
+}
+
+async function stopManagedProxyIfIdle({ proxyId, proxies, sessions, proxyManagerUrl, ensureProxyManager }) {
+  if (!proxyId || sessions.list().some((session) => session.proxyId === proxyId)) return undefined;
+  const registered = proxies.get(proxyId);
+  if (!registered?.managed || registered.running === false) return undefined;
+  if (ensureProxyManager) await ensureProxyManager();
+  const stopped = await brokerJson(proxyManagerUrl, `/_proxy/proxies/${encodeURIComponent(proxyId)}/stop`, {
+    method: 'POST',
+  });
+  if (stopped.proxy) proxies.upsert(managedProxyRegistration(stopped.proxy));
+  return stopped;
 }
 
 function browserProfile(browserConfig, browser) {
@@ -1747,8 +1783,9 @@ async function handleBrowsersRequest({ req, res, requestUrl, apps, browserConfig
       error.statusCode = 409;
       throw error;
     }
-    if (browser.sessionId && sessions.get(browser.sessionId)) {
-      const session = sessions.get(browser.sessionId);
+    const browserSession = browser.sessionId ? sessions.get(browser.sessionId) : undefined;
+    if (browserSession) {
+      const session = browserSession;
       await brokerJson(session.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: session.browserInstanceId } });
       sessions.delete(browser.sessionId);
     }
@@ -1762,7 +1799,14 @@ async function handleBrowsersRequest({ req, res, requestUrl, apps, browserConfig
       });
     }
     browsers.delete(id);
-    writeJson(res, 200, { ok: true, id, destroyed: true }, writeBody);
+    const proxyStop = await stopManagedProxyIfIdle({
+      proxyId: browserSession?.proxyId ?? browser.proxyId,
+      proxies,
+      sessions,
+      proxyManagerUrl,
+      ensureProxyManager,
+    });
+    writeJson(res, 200, { ok: true, id, destroyed: true, proxyStop }, writeBody);
     return;
   }
   const action = parts[3];
@@ -1831,10 +1875,24 @@ async function handleBrowsersRequest({ req, res, requestUrl, apps, browserConfig
       const stop = await brokerJson(session.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: session.browserInstanceId } });
       sessions.delete(session.sessionId);
       const updated = browsers.update(id, { sessionId: undefined });
-      writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser: updated, apps, browserConfigs, proxies, sessions }), releasedSession: session.sessionId, stop }, writeBody);
+      const proxyStop = await stopManagedProxyIfIdle({
+        proxyId: session.proxyId,
+        proxies,
+        sessions,
+        proxyManagerUrl,
+        ensureProxyManager,
+      });
+      writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser: updated, apps, browserConfigs, proxies, sessions }), releasedSession: session.sessionId, stop, proxyStop }, writeBody);
       return;
     }
-    writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions }), alreadyStopped: true }, writeBody);
+    const proxyStop = await stopManagedProxyIfIdle({
+      proxyId: browser.proxyId,
+      proxies,
+      sessions,
+      proxyManagerUrl,
+      ensureProxyManager,
+    });
+    writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions }), alreadyStopped: true, proxyStop }, writeBody);
     return;
   }
   writeJson(res, 404, { ok: false, error: 'Unknown browser endpoint' }, writeBody);
@@ -3766,8 +3824,8 @@ function pwDevApiDetails(serverUrl) {
       operations: [
         operation('GET', '/_pwdev/browsers', 'List browsers', 'Fetch all durable browsers with resolved components.', { method: 'GET', path: '/_pwdev/browsers' }, [], { fields: ['ok', 'browsers'] }),
         operation('POST', '/_pwdev/browsers', 'Create or update a browser', 'Send an id and browserConfigId, plus optional appId and fixed or pooled proxy references.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-smoke', browserConfigId: 'checkout-chrome', appId: 'checkout-main', proxyIds: ['checkout-traffic-a', 'checkout-traffic-b'] } }, ['browserConfigId is required.', 'proxyId and proxyIds are mutually exclusive.'], { fields: ['ok', 'browser'] }),
-        operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser', 'Start the browser using its config and optional app/proxy composition.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/start' }, ['Connect Playwright to response.session.cdpUrl.', 'Only one session can occupy a browser.'], { fields: ['ok', 'browser', 'session', 'start'] }),
-        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser', 'Stop its session while preserving profile and proxy reservation.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/stop' }, [], { fields: ['ok', 'browser', 'releasedSession?'] }),
+        operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser', 'Start the browser using its config and launch its managed Whistle proxy on demand.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/start' }, ['Connect Playwright to response.session.cdpUrl.', 'Only one session can occupy a browser.'], { fields: ['ok', 'browser', 'session', 'start'] }),
+        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser', 'Stop its session and idle managed Whistle proxy while preserving profiles and reservations.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/stop' }, [], { fields: ['ok', 'browser', 'releasedSession?', 'proxyStop?'] }),
       ],
     },
     proxies: {
@@ -3799,7 +3857,7 @@ function pwDevApiDetails(serverUrl) {
             },
           },
         }),
-        operation('POST', '/_pwdev/proxy/proxies', 'Create a managed Whistle proxy', 'Send a ruleset and id or appId. The server lazily starts its proxy manager.', { method: 'POST', path: '/_pwdev/proxy/proxies', body: { id: 'checkout-whistle', taskId: 'smoke-login', ruleset: 'example.com 127.0.0.1:3000' } }, ['Use /_pwdev/proxy/* rather than the proxy-manager port.', 'Managed proxy profiles are durable and reusable; delete one only when its retained profile is no longer wanted.'], { fields: ['ok', 'proxy'] }),
+        operation('POST', '/_pwdev/proxy/proxies', 'Create a managed Whistle proxy', 'Create a stopped durable profile; starting a browser that references it launches Whistle on demand.', { method: 'POST', path: '/_pwdev/proxy/proxies', body: { id: 'checkout-whistle', taskId: 'smoke-login', ruleset: 'example.com 127.0.0.1:3000' } }, ['Use /_pwdev/proxy/* rather than the proxy-manager port.', 'Managed proxy profiles are durable and reusable; delete one only when its retained profile is no longer wanted.'], { fields: ['ok', 'proxy'] }),
       ],
     },
     sessions: {

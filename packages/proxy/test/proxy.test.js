@@ -69,7 +69,7 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
       purpose: 'Capture login traffic',
       labels: ['smoke', 'login'],
       ruleset: 'www.example.com 127.0.0.1:3000',
-    });
+    }, { start: true });
 
     assert.equal(created.proxy.id, 'react-login-capture');
     assert.equal(created.proxy.proxyPort, 8899);
@@ -119,6 +119,7 @@ test('manager creates Whistle instance from ruleset and attaches it to app', asy
       proxyPort: 8899,
       uiPort: 9801,
       pid: spawned[0].child.pid,
+      running: true,
       rulesetFile: created.proxy.rulesetFile,
       rules: created.proxy.rules,
       managed: true,
@@ -158,7 +159,7 @@ test('manager accepts explicit Whistle command override', async () => {
     portAvailable: async () => true,
   });
 
-  await manager.createProxy({ id: 'override', ruleset: 'a b' });
+  await manager.createProxy({ id: 'override', ruleset: 'a b' }, { start: true });
   assert.equal(spawned[0].command, 'w2');
   assert.deepEqual(spawned[0].args.slice(0, 3), ['run', '-p', '8888']);
   assert.deepEqual(spawned[0].args.slice(-2), ['-M', 'enableHttps']);
@@ -182,7 +183,7 @@ test('manager stopAll preserves proxy profiles for a later restart', async () =>
   });
 
   try {
-    const created = await manager.createProxy({ id: 'preserved-whistle', ruleset: 'a b' });
+    const created = await manager.createProxy({ id: 'preserved-whistle', ruleset: 'a b' }, { start: true });
     liveProcess = {
       pid: spawned[0].child.pid,
       commandLine: `node whistle.js run -S ${created.proxy.storageDir}`,
@@ -233,7 +234,7 @@ test('manager writes object ruleset as JSON', async () => {
     const created = await manager.createProxy({
       id: 'api-rules',
       ruleset: { rules: [{ pattern: '/api', target: 'http://127.0.0.1:3000' }] },
-    });
+    }, { start: true });
     assert.equal(path.basename(created.proxy.rulesetFile), 'ruleset.json');
     assert.equal(created.proxy.rules.defaultRuleset, '/api http://127.0.0.1:3000');
     assert.deepEqual(JSON.parse(fs.readFileSync(created.proxy.rulesetFile, 'utf8')), {
@@ -256,9 +257,9 @@ test('manager rejects duplicate managed proxy ids', async () => {
     portAvailable: async () => true,
   });
 
-  await manager.createProxy({ id: 'dup', ruleset: 'a b' });
+  await manager.createProxy({ id: 'dup', ruleset: 'a b' }, { start: true });
   await assert.rejects(
-    () => manager.createProxy({ id: 'dup', ruleset: 'a b' }),
+    () => manager.createProxy({ id: 'dup', ruleset: 'a b' }, { start: true }),
     /Managed proxy already exists/
   );
   await manager.stopAll({ preserve: false });
@@ -277,7 +278,7 @@ test('manager retains a stopped durable profile when its child process fails', a
     portAvailable: async () => true,
   });
 
-  await manager.createProxy({ id: 'whistle-main', ruleset: 'a b' });
+  await manager.createProxy({ id: 'whistle-main', ruleset: 'a b' }, { start: true });
   spawned[0].child.emit('error', new Error('spawn ENOENT'));
 
   const status = await manager.status();
@@ -382,6 +383,72 @@ test('proxy manager recovers registered Whistle profiles on startup', async () =
   }
 });
 
+test('proxy manager recovers daemonized Whistle bootstrap processes', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-daemon-recover-'));
+  const storageDir = path.join(w2StorageRoot, 'daemonized-whistle');
+  fs.mkdirSync(storageDir, { recursive: true });
+  writeProxyProfileFixture(storageDir, { id: 'daemonized-whistle', proxyPort: 8892, uiPort: 9804 });
+  const killed = [];
+  const bootstrapData = encodeURIComponent(JSON.stringify({
+    port: '8892',
+    uiport: '9804',
+    storage: storageDir,
+  }));
+  const manager = createProxyManager({
+    quiet: true,
+    w2StorageRoot,
+    registryClient: fakeRegistryClient(),
+    processListImpl: async () => [{
+      pid: 918501,
+      commandLine: `node --tls-min-v1.0 /workspace/node_modules/starting/lib/bootstrap.js run /workspace/node_modules/whistle/index.js --data ${bootstrapData}`,
+    }],
+    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+    spawnImpl: fakeSpawn([]),
+  });
+
+  try {
+    const status = await manager.status();
+    assert.deepEqual(status.proxies.map((proxy) => [proxy.id, proxy.running, proxy.pid]), [
+      ['daemonized-whistle', true, 918501],
+    ]);
+
+    const started = await manager.startProxy('daemonized-whistle');
+    assert.equal(started.alreadyRunning, true);
+    assert.equal(started.proxy.pid, 918501);
+
+    await manager.stopProxy('daemonized-whistle');
+    assert.deepEqual(killed, [{ pid: 918501, signal: 'SIGTERM' }]);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('proxy manager cleans daemonized Whistle bootstrap orphans', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-daemon-orphan-'));
+  const orphanStorageDir = fs.mkdtempSync(path.join(w2StorageRoot, 'orphaned-whistle-'));
+  const bootstrapData = encodeURIComponent(JSON.stringify({ storage: orphanStorageDir }));
+  const killed = [];
+  const manager = createProxyManager({
+    quiet: true,
+    w2StorageRoot,
+    registryClient: fakeRegistryClient(),
+    processListImpl: async () => [{
+      pid: 918502,
+      commandLine: `node /workspace/node_modules/starting/lib/bootstrap.js run /workspace/node_modules/whistle/index.js --data ${bootstrapData}`,
+    }],
+    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+  });
+
+  try {
+    const cleanup = await manager.cleanupOrphans();
+    assert.deepEqual(cleanup.cleaned, [{ pid: 918502, storageDir: orphanStorageDir, ids: [] }]);
+    assert.deepEqual(killed, [{ pid: 918502, signal: 'SIGTERM' }]);
+    assert.equal(fs.existsSync(orphanStorageDir), false);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
 test('proxy manager retains durable profiles when an app no longer references them', async () => {
   const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-unreferenced-'));
   const storageDir = path.join(w2StorageRoot, 'unreferenced-whistle');
@@ -438,7 +505,7 @@ test('manager replaces managed proxy rules without restarting Whistle', async ()
     portAvailable: async () => true,
   });
 
-  const created = await manager.createProxy({ id: 'whistle-main', ruleset: 'a b' });
+  const created = await manager.createProxy({ id: 'whistle-main', ruleset: 'a b' }, { start: true });
   const replaced = await manager.replaceProxyRules('whistle-main', {
     baseVersion: created.proxy.rules.version,
     defaultRuleset: 'a b',
@@ -512,6 +579,8 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     });
     assert.equal(created.statusCode, 200);
     assert.equal(created.body.proxy.id, 'whistle-main');
+    assert.equal(created.body.proxy.running, false);
+    assert.equal(spawned.length, 0);
 
     const read = await getJson(`${server.origin}/_proxy/proxies/whistle-main`);
     assert.equal(read.statusCode, 200);
@@ -531,13 +600,17 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     assert.equal(replaced.body.proxy.rules.version, 2);
     assert.equal(replaced.body.proxy.rules.overrideRuleset, 'c d');
 
+    const started = await postJson(`${server.origin}/_proxy/proxies/whistle-main/start`, {});
+    assert.equal(started.statusCode, 200);
+    assert.equal(started.body.proxy.running, true);
+
     const stopped = await postJson(`${server.origin}/_proxy/proxies/whistle-main/stop`, {});
     assert.equal(stopped.statusCode, 200);
     assert.equal(stopped.body.proxy.running, false);
 
-    const started = await postJson(`${server.origin}/_proxy/proxies/whistle-main/start`, {});
-    assert.equal(started.statusCode, 200);
-    assert.equal(started.body.proxy.running, true);
+    const startedAgain = await postJson(`${server.origin}/_proxy/proxies/whistle-main/start`, {});
+    assert.equal(startedAgain.statusCode, 200);
+    assert.equal(startedAgain.body.proxy.running, true);
 
     const restarted = await postJson(`${server.origin}/_proxy/proxies/whistle-main/restart`, {});
     assert.equal(restarted.statusCode, 200);
@@ -592,6 +665,7 @@ test('proxy HTTP API lists and toggles Whistle rulesets for one proxy', async ()
 
   try {
     await postJson(`${server.origin}/_proxy/proxies`, { id: 'ruleset-proxy', ruleset: 'a b', uiPort });
+    await postJson(`${server.origin}/_proxy/proxies/ruleset-proxy/start`, {});
 
     const list = await getJson(`${server.origin}/_proxy/proxies/ruleset-proxy/rulesets`);
     assert.equal(list.statusCode, 200);

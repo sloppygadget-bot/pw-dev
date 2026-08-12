@@ -9,7 +9,7 @@
   "paths": {
     "/proxies": {
       "get": { "operationId": "listManagedProxies", "responses": { "200": { "description": "Durable managed proxy profiles and runtime state" } } },
-      "post": { "operationId": "createManagedProxy", "responses": { "200": { "description": "Created and started durable managed proxy profile" } } }
+      "post": { "operationId": "createManagedProxy", "responses": { "200": { "description": "Created a stopped durable managed proxy profile; browser start launches it on demand" } } }
     },
     "/proxies/{id}": {
       "get": {
