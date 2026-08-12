@@ -77,6 +77,12 @@ export class BrowserMonitorHub {
     return { ok: true, action, path, result };
   }
 
+  async preview(browserId) {
+    const connection = await this.ensureConnection(browserId);
+    if (connection.page.isClosed()) throw httpError(409, 'Browser session has no page to monitor');
+    return connection.page.screenshot({ type: 'jpeg', quality: 60, scale: 'css' });
+  }
+
   async close() {
     const connections = [...this.connections.values()];
     this.connections.clear();
@@ -97,7 +103,9 @@ export class BrowserMonitorHub {
     if (existing) this.connections.delete(browserId);
 
     const browserRecord = await fetchJson(`${this.pwDevUrl}/_pwdev/browsers/${encodeURIComponent(browserId)}`);
-    const session = browserRecord.body?.browser?.components?.session;
+    const session = browserRecord.body?.browser?.components?.session
+      ?? browserRecord.body?.browser?.runtime
+      ?? browserRecord.body?.browser?.sessions?.[0];
     if (!browserRecord.ok || !session?.cdpUrl) {
       throw httpError(browserRecord.statusCode === 404 ? 404 : 409, session ? 'Browser has no live session' : browserRecord.error || 'Browser has no live session');
     }

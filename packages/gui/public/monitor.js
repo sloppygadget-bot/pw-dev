@@ -117,7 +117,9 @@ function renderSnapshot(snapshot) {
   empty.textContent = 'Rendering DOM snapshot…';
   empty.classList.remove('hidden');
   frame.srcdoc = documentHtml;
-  pageMeta.textContent = `${snapshot.title || '(untitled)'} · ${snapshot.url}`;
+  const meta = `${snapshot.title || '(untitled)'} · ${snapshot.url}`;
+  pageMeta.textContent = meta;
+  pageMeta.title = meta;
   document.querySelector('#state-url').textContent = snapshot.url;
   document.querySelector('#state-title').textContent = snapshot.title || '(untitled)';
   updateTargetUrl(snapshot.url);

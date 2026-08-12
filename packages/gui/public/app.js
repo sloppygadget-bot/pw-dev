@@ -6,6 +6,7 @@ const state = {
   currentView: 'browsers',
   last: undefined,
   browserView: 'diagram',
+  previewUrls: new Map(),
   markdownModalText: '',
   editingBrowserId: undefined,
   editingBrowserConfigId: undefined,
@@ -268,6 +269,9 @@ function normalizeSnapshot(raw) {
       slot: session.scope,
     }))
     : [];
+  const browserList = raw.server.browsers?.ok && raw.server.browsers.body?.browsers
+    ? raw.server.browsers.body.browsers.map(normalizeBrowser)
+    : [];
   const relationships = computeRelationships({ apps: appList, browserConfigs: browserConfigs, sessions, proxies: proxyList, networks: networkList, proxyForwards, brokerStatus });
 
   return {
@@ -283,12 +287,23 @@ function normalizeSnapshot(raw) {
     networks: networkList,
     proxyForwards,
     sessions,
-    browsers: raw.server.browsers?.ok && raw.server.browsers.body?.browsers
-      ? raw.server.browsers.body.browsers
-      : [],
+    browsers: browserList,
     relationships,
     errors: [status, apps, serverBrowserConfigs, serverSessions, proxies, serverNetworks, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
     updatedAt: new Date(raw.collectedAt),
+  };
+}
+
+function normalizeBrowser(browser) {
+  const session = browser.runtime ?? browser.sessions?.[0];
+  const sessionId = browser.sessionId ?? session?.sessionId;
+  return {
+    ...browser,
+    sessionId,
+    profile: browser.profile ?? session?.profile,
+    proxyId: browser.proxyId ?? session?.proxyId,
+    status: browser.status ?? (sessionId ? 'occupied' : 'ready'),
+    occupancy: browser.occupancy ?? (sessionId ? { state: 'unclaimed' } : { state: 'ready' }),
   };
 }
 
@@ -410,6 +425,7 @@ async function render(snapshot) {
   setCount('sessions', snapshot.sessions.length);
   setCount('proxies', snapshot.proxies.length);
 
+  await refreshBrowserPreviews(snapshot.browsers);
   renderBrowsers(snapshot.browsers);
   renderApps(snapshot.apps, snapshot.relationships, snapshot.browsers);
   renderBroker(snapshot);
@@ -616,11 +632,11 @@ function browserActions(browser) {
   return actionGroup([
     { label: 'Edit', onClick: () => openBrowserEditor(browser) },
     browser.sessionId
-      ? { label: 'Monitor', onClick: () => window.open(`/monitor/${encodeURIComponent(browser.id)}`, '_blank', 'noopener,noreferrer') }
+      ? { label: 'Monitor', onClick: () => openBrowserMonitor(browser) }
       : undefined,
     browser.sessionId
-      ? { label: 'Delete session', onClick: () => stopBrowser(browser) }
-      : { label: 'Create session', onClick: () => startBrowser(browser) },
+      ? { label: 'Stop', onClick: () => stopBrowser(browser) }
+      : { label: 'Start', onClick: () => startBrowser(browser) },
     {
       label: 'Delete browser',
       disabled: deleteBlocked,
@@ -630,6 +646,31 @@ function browserActions(browser) {
       onClick: () => deleteBrowser(browser),
     },
   ]);
+}
+
+function openBrowserMonitor(browser) {
+  window.open(`/monitor/${encodeURIComponent(browser.id)}`, '_blank', 'noopener,noreferrer');
+}
+
+async function refreshBrowserPreviews(browsers) {
+  const activeIds = new Set(browsers.filter((browser) => browser.sessionId).map((browser) => browser.id));
+  for (const [browserId, url] of state.previewUrls) {
+    if (activeIds.has(browserId)) continue;
+    URL.revokeObjectURL(url);
+    state.previewUrls.delete(browserId);
+  }
+  await Promise.all(browsers.filter((browser) => browser.sessionId).map(async (browser) => {
+    try {
+      const response = await fetch(`/api/monitor/${encodeURIComponent(browser.id)}/preview`, { cache: 'no-store' });
+      if (!response.ok) return;
+      const url = URL.createObjectURL(await response.blob());
+      const previous = state.previewUrls.get(browser.id);
+      state.previewUrls.set(browser.id, url);
+      if (previous) URL.revokeObjectURL(previous);
+    } catch {
+      // Keep the previous preview when a transient monitor capture fails.
+    }
+  }));
 }
 
 function actionGroup(actions) {
@@ -691,11 +732,43 @@ function renderBrowserDiagram(root, browsers) {
   for (const browser of browsers) {
     const card = document.createElement('article');
     card.className = 'browser-diagram card';
+    const heading = document.createElement('div');
+    heading.className = 'browser-diagram-title';
+    const titleInfo = document.createElement('div');
+    titleInfo.className = 'browser-diagram-info';
+    const titleGroup = document.createElement('div');
+    titleGroup.className = 'browser-diagram-name';
     const title = document.createElement('h3');
     title.textContent = browser.name ?? browser.id;
-    card.append(title);
+    titleGroup.append(title);
+    const configLink = browserConfigLink(browser.browserConfigId);
+    if (configLink) {
+      const separator = document.createElement('span');
+      separator.className = 'browser-config-separator';
+      separator.textContent = '·';
+      const browserConfigLabel = document.createElement('a');
+      browserConfigLabel.className = 'browser-config-title-link entity-link mono';
+      browserConfigLabel.textContent = configLink.text;
+      browserConfigLabel.href = configLink.href;
+      browserConfigLabel.addEventListener('click', (event) => {
+        event.preventDefault();
+        configLink.onClick();
+      });
+      titleGroup.append(separator, browserConfigLabel);
+    }
+    const occupancyLabel = document.createElement('div');
+    occupancyLabel.className = 'browser-occupancy';
+    occupancyLabel.textContent = `occupancy: ${formatBrowserOccupancy(browser)}`;
+    titleInfo.append(titleGroup, occupancyLabel);
+    const controls = document.createElement('div');
+    controls.className = 'browser-diagram-controls';
+    controls.append(createActionButtons(browserActions(browser).actions));
+    heading.append(titleInfo, controls);
+    card.append(heading);
     const flow = document.createElement('div');
     flow.className = 'browser-flow';
+    const flowColumn = document.createElement('div');
+    flowColumn.className = 'browser-flow-column';
     const nodes = [
       ['session', browser.sessionId ?? 'No active session', sessionLink(browser.sessionId)],
       ['proxy', browser.proxyId ?? 'No proxy', proxyLink(browser.proxyId)],
@@ -704,6 +777,7 @@ function renderBrowserDiagram(root, browsers) {
     for (const [index, [kind, label, link]] of nodes.entries()) {
       const node = document.createElement(link ? 'a' : 'div');
       node.className = `browser-node ${kind}`;
+      if (kind === 'session' && !browser.sessionId) node.classList.add('inactive');
       node.textContent = label;
       if (link) {
         node.classList.add('entity-node-link', `${kind}-link`);
@@ -713,30 +787,40 @@ function renderBrowserDiagram(root, browsers) {
           link.onClick();
         });
       }
-      flow.append(node);
+      flowColumn.append(node);
       if (index < nodes.length - 1) {
         const arrow = document.createElement('span');
         arrow.className = 'browser-arrow';
-        arrow.textContent = '→';
-        flow.append(arrow);
+        arrow.textContent = '↓';
+        flowColumn.append(arrow);
       }
     }
-    const configLink = browserConfigLink(browser.browserConfigId);
-    const browserConfigLabel = document.createElement(configLink ? 'a' : 'div');
-    browserConfigLabel.className = 'browser-config-label';
-    browserConfigLabel.textContent = `spawned from ${browser.browserConfigId ?? 'browser config'}`;
-    if (configLink) {
-      browserConfigLabel.href = configLink.href;
-      browserConfigLabel.classList.add('entity-link');
-      browserConfigLabel.addEventListener('click', (event) => {
-        event.preventDefault();
-        configLink.onClick();
+    flow.append(flowColumn);
+    const preview = document.createElement('section');
+    preview.className = 'browser-preview';
+    const previewUrl = state.previewUrls.get(browser.id);
+    if (browser.sessionId && previewUrl) {
+      preview.classList.add('enabled');
+      preview.tabIndex = 0;
+      preview.title = 'Open browser monitor';
+      preview.setAttribute('role', 'button');
+      preview.addEventListener('click', () => openBrowserMonitor(browser));
+      preview.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openBrowserMonitor(browser);
+        }
       });
+      const image = document.createElement('img');
+      image.alt = `Latest browser preview for ${browser.name ?? browser.id}`;
+      image.src = previewUrl;
+      preview.append(image);
+    } else {
+      preview.classList.add('empty');
+      preview.textContent = browser.sessionId ? 'Loading preview…' : 'Start the browser to load a preview.';
     }
-    const occupancyLabel = document.createElement('div');
-    occupancyLabel.className = 'browser-config-label';
-    occupancyLabel.textContent = `occupancy: ${formatBrowserOccupancy(browser)}`;
-    card.append(flow, browserConfigLabel, occupancyLabel, createActionButtons(browserActions(browser).actions));
+    flow.append(preview);
+    card.append(flow);
     root.append(card);
   }
 }
@@ -1208,7 +1292,10 @@ function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'ses
     body.append(tableRow);
   }
   table.append(body);
-  root.append(table);
+  const scroll = document.createElement('div');
+  scroll.className = 'table-scroll';
+  scroll.append(table);
+  root.append(scroll);
 }
 
 function renderCards(root, cards) {

@@ -58,6 +58,13 @@ export async function startPwDevGuiServer(options = {}) {
         await monitorHub.stream(decodePathSegment(monitorEvents[1]), req, res);
         return;
       }
+      const monitorPreview = /^\/api\/monitor\/([^/]+)\/preview$/.exec(requestUrl.pathname);
+      if (monitorPreview) {
+        const image = await monitorHub.preview(decodePathSegment(monitorPreview[1]));
+        res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'image/jpeg' });
+        res.end(image);
+        return;
+      }
       const monitorAction = /^\/api\/monitor\/([^/]+)\/action$/.exec(requestUrl.pathname);
       if (monitorAction) {
         if (req.method !== 'POST') {

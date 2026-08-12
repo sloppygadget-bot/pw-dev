@@ -50,18 +50,18 @@ h2 { font-size: 15px; }
 }
 .monitor-brand {
   min-width: 0;
-  flex: 0 0 auto;
+  flex: 0 1 min(42vw, 520px);
   display: flex;
   align-items: baseline;
   gap: 9px;
 }
 .monitor-brand .eyebrow { font-size: 9px; }
-.monitor-brand .muted { font-size: 11px; white-space: nowrap; }
+.monitor-brand .muted { max-width: 100%; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .monitor-topbar a { color: #b9dcff; }
 .eyebrow { color: #9fb5ca; font-size: 11px; letter-spacing: .08em; }
 .monitor-topbar .muted { color: #c1c9d0; }
 .monitor-nav { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; gap: 14px; min-width: 0; }
-.target-nav { display: flex; flex: 1 1 auto; flex-direction: column; align-items: flex-end; min-width: 0; max-width: none; }
+.target-nav { display: flex; flex: 0 1 min(45vw, 560px); flex-direction: column; align-items: flex-end; min-width: 0; max-width: min(45vw, 560px); }
 .target-nav a { display: block; width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .drawer-toggle { width: 34px; padding: 0; border-color: #56616c; background: #252b31; color: #fff; font-size: 18px; line-height: 1; }
 .drawer-toggle:hover { border-color: #a9bac8; background: #303841; }
@@ -104,6 +104,7 @@ h2 { font-size: 15px; }
 }
 .panel-head.compact { align-items: center; padding: 11px 13px; }
 .mirror-head { min-height: 48px; align-items: center; }
+.mirror-head #page-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mirror-tools { display: flex; flex-direction: column; gap: 10px; padding: 13px; }
 .mirror-tools label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 12px; }
 .mirror-tools input { width: 100%; }
