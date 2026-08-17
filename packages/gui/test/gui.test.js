@@ -4,6 +4,7 @@ import http from 'node:http';
 import test from 'node:test';
 
 import { parseArgs } from '../src/cli.js';
+import { BrowserMonitorHub } from '../src/monitor.js';
 import { resolveStaticPath, startPwDevGuiServer } from '../src/server.js';
 
 test('parseArgs reads gui options', () => {
@@ -25,6 +26,43 @@ test('parseArgs reads gui options', () => {
 test('resolveStaticPath keeps gui static requests under root', () => {
   assert.equal(resolveStaticPath('/tmp/gui', '/index.html'), '/tmp/gui/index.html');
   assert.equal(resolveStaticPath('/tmp/gui', '/../secret'), '/tmp/gui/secret');
+});
+
+test('monitor retries a navigation-context race without rejecting', async () => {
+  const hub = new BrowserMonitorHub({ pwDevUrl: 'http://127.0.0.1:9696' });
+  let evaluations = 0;
+  const page = {
+    isClosed: () => false,
+    exposeFunction: async () => {},
+    evaluate: async () => {
+      evaluations += 1;
+      if (evaluations === 1) throw new Error('Execution context was destroyed, most likely because of a navigation');
+      return {
+        type: 'snapshot',
+        url: 'https://example.test/after-navigation',
+        title: 'After navigation',
+        html: '<html></html>',
+        styles: [],
+        viewport: { width: 1280, height: 720, devicePixelRatio: 1 },
+        scroll: { x: 0, y: 0 },
+        capturedAt: '2026-08-12T00:00:00.000Z',
+      };
+    },
+  };
+  const connection = {
+    browserId: 'navigation-race',
+    browser: { isConnected: () => true },
+    page,
+    subscribers: new Set(),
+    bindingName: '__pwdevMonitor_navigation_race',
+  };
+  hub.connections.set(connection.browserId, connection);
+
+  await hub.refresh(connection);
+
+  assert.equal(evaluations, 3, 'the observer injection should retry, then capture a snapshot');
+  assert.equal(connection.lastSnapshot?.url, 'https://example.test/after-navigation');
+  assert.equal(connection.refreshPromise, undefined);
 });
 
 test('gui serves static app and read-only config', async () => {
@@ -49,6 +87,7 @@ test('gui serves static app and read-only config', async () => {
     assert.match(index.body, /id="browser-editor"/);
     assert.match(index.body, /id="new-browser-config"/);
     assert.match(index.body, /id="browser-config-editor"/);
+    assert.match(index.body, /id="browser-config-ignore-ssl-errors"[^>]*checked/);
     assert.match(index.body, /id="markdown-modal"/);
     assert.match(index.body, /<details class="nav-group" data-nav-group="assets">/);
     assert.match(index.body, /<details class="nav-group" data-nav-group="runtime">/);
@@ -120,6 +159,7 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /function saveBrowser/);
     assert.match(appScript.body, /function browserActions/);
     assert.match(appScript.body, /function saveBrowserConfig/);
+    assert.match(appScript.body, /browserConfigIgnoreSslErrors\.checked = browserConfig\?\.ignoreSslErrors \?\? true/);
     assert.match(appScript.body, /function browserConfigActions/);
     assert.match(appScript.body, /function saveProxy/);
     assert.match(appScript.body, /function proxyActions/);

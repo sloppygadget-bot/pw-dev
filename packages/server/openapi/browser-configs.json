@@ -30,7 +30,7 @@
                   "profile": { "type": "string" },
                   "brokerUrl": { "type": "string" },
                   "proxyBypassList": { "type": "string" },
-                  "ignoreSslErrors": { "type": "boolean" },
+                  "ignoreSslErrors": { "type": "boolean", "default": true, "description": "Ignore TLS certificate errors when launching Chrome. Defaults to true; set false for strict verification." },
                   "headless": { "type": "boolean" },
                   "resetProfile": { "type": "boolean" }
                 }

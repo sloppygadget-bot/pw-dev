@@ -532,7 +532,7 @@ function openBrowserConfigEditor(browserConfig) {
   els.browserConfigBrokerUrl.value = browserConfig?.brokerUrl ?? '';
   els.browserConfigProfile.value = browserConfig?.profile ?? '';
   els.browserConfigProxyBypassList.value = browserConfig?.proxyBypassList ?? '';
-  els.browserConfigIgnoreSslErrors.checked = Boolean(browserConfig?.ignoreSslErrors);
+  els.browserConfigIgnoreSslErrors.checked = browserConfig?.ignoreSslErrors ?? true;
   els.browserConfigHeadless.checked = Boolean(browserConfig?.headless);
   els.browserConfigResetProfile.checked = Boolean(browserConfig?.resetProfile);
   els.browserConfigEditorError.textContent = '';

@@ -28,7 +28,8 @@ component-owned contract under `/_pwdev/proxy/*`; do not call its internal port.
   explicit proxy deletion is the destructive operation.
 - **browserConfig**: reusable Chrome launch configuration. Fields include `id`,
   optional `name`, `targetUrl`, `brokerUrl`, `profile`, `proxyBypassList`,
-  `ignoreSslErrors`, `headless`, and `resetProfile`. A browser config cannot be started directly.
+  `ignoreSslErrors` (defaults to `true`; set `false` for strict TLS verification),
+  `headless`, and `resetProfile`. A browser config cannot be started directly.
   Do not edit a config referenced by a browser; deletion is blocked while it is
   referenced or occupied by a live session.
 - **browser**: durable reusable browser. It requires one

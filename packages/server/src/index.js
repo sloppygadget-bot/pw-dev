@@ -2963,7 +2963,10 @@ function validateBrowserConfig(rawBrowser) {
     profile,
     brokerUrl: optionalString(rawBrowser.brokerUrl, 'brokerUrl'),
     proxyBypassList: optionalString(rawBrowser.proxyBypassList, 'proxyBypassList'),
-    ignoreSslErrors: rawBrowser.ignoreSslErrors === undefined ? undefined : Boolean(rawBrowser.ignoreSslErrors),
+    // pw-dev commonly runs browsers through an intercepting development proxy.
+    // Make certificate-error tolerance the reusable browser-config default while
+    // preserving an explicit false for strict TLS verification.
+    ignoreSslErrors: rawBrowser.ignoreSslErrors === undefined ? true : Boolean(rawBrowser.ignoreSslErrors),
     headless: rawBrowser.headless === undefined ? undefined : Boolean(rawBrowser.headless),
     resetProfile: rawBrowser.resetProfile === undefined ? undefined : Boolean(rawBrowser.resetProfile),
   });

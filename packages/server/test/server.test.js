@@ -465,6 +465,7 @@ test('server starts a standalone browser without an app or proxy', async () => {
     });
     assert.equal(created.statusCode, 200);
     assert.equal(created.body.browserConfig.id, 'docs-chrome');
+    assert.equal(created.body.browserConfig.ignoreSslErrors, true);
     const misplacedComposition = await postJson(`${server.origin}/_pwdev/browser-configs`, {
       id: 'invalid-config', appId: 'not-allowed',
     });
@@ -815,6 +816,7 @@ test('server resolves managed browser proxies for an SSH-backed broker', async (
       proxyServer: 'http://127.0.0.1:8899',
       proxyPeer: 'ssh-peer',
       proxyName: 'ssh-proxy',
+      ignoreSslErrors: true,
       headless: true,
     });
   } finally {

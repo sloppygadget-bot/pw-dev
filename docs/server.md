@@ -96,6 +96,9 @@ restart.
 Browser configs persist in `<worktree>/.pw-dev/browser-configs.json`. A config
 contains reusable Chrome launch settings such as `targetUrl`, `profile`, broker
 override, SSL handling, and headless mode. It cannot be started directly.
+`ignoreSslErrors` defaults to `true` for development proxies that intercept
+HTTPS; set it explicitly to `false` when strict certificate verification is
+required.
 Browsers persist in `<worktree>/.pw-dev/browsers.json`; each browser requires a
 `browserConfigId` and may reference an app and one fixed proxy or proxy pool.
 

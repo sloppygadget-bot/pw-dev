@@ -6,6 +6,8 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const MAX_PATH_LENGTH = 80;
 const ALLOWED_ACTIONS = new Set(['click', 'focus', 'highlight', 'scrollIntoView']);
+const NAVIGATION_RETRY_DELAY_MS = 25;
+const MAX_NAVIGATION_RETRIES = 3;
 
 /**
  * Keeps one Playwright/CDP observer per monitored browser session. The GUI
@@ -24,7 +26,7 @@ export class BrowserMonitorHub {
     // A monitor tab may attach to a connection that has remained alive while
     // the browser navigated elsewhere. Refresh before sending the cached
     // snapshot so a newly opened or refreshed tab never starts with stale DOM.
-    await this.emitSnapshot(connection);
+    await this.refresh(connection);
     res.writeHead(200, {
       'cache-control': 'no-store',
       'connection': 'keep-alive',
@@ -136,14 +138,57 @@ export class BrowserMonitorHub {
       this.connections.delete(browserId);
       this.broadcast(connection, { type: 'disconnected', browserId, reason: 'browser disconnected' });
     });
-    page.on('domcontentloaded', () => void this.attachPageObserver(connection));
-    page.on('load', () => void this.emitSnapshot(connection));
+    // Navigation events can arrive while a previous evaluate is still in
+    // flight. Route each event through one serialized, non-throwing refresh
+    // so an execution-context race cannot become an unhandled rejection.
+    page.on('domcontentloaded', () => void this.refresh(connection));
+    page.on('load', () => void this.refresh(connection));
     page.on('framenavigated', (frame) => {
-      if (frame === page.mainFrame()) void this.emitSnapshot(connection);
+      if (frame === page.mainFrame()) void this.refresh(connection);
     });
-    await this.attachPageObserver(connection);
-    await this.emitSnapshot(connection);
+    await this.refresh(connection);
     return connection;
+  }
+
+  async refresh(connection) {
+    connection.refreshRequested = true;
+    if (connection.refreshPromise) return connection.refreshPromise;
+    connection.refreshPromise = this.drainRefresh(connection)
+      .catch((error) => this.reportRefreshError(connection, error))
+      .finally(() => {
+        connection.refreshPromise = undefined;
+      });
+    return connection.refreshPromise;
+  }
+
+  async drainRefresh(connection) {
+    let retries = 0;
+    while (connection.refreshRequested && this.isConnectionActive(connection)) {
+      connection.refreshRequested = false;
+      try {
+        await this.attachPageObserver(connection);
+        await this.emitSnapshot(connection);
+        retries = 0;
+      } catch (error) {
+        if (isTransientNavigationError(error) && retries < MAX_NAVIGATION_RETRIES) {
+          retries += 1;
+          await delay(NAVIGATION_RETRY_DELAY_MS);
+          connection.refreshRequested = true;
+          continue;
+        }
+        this.reportRefreshError(connection, error);
+      }
+    }
+  }
+
+  isConnectionActive(connection) {
+    return this.connections.get(connection.browserId) === connection
+      && connection.browser.isConnected()
+      && !connection.page.isClosed();
+  }
+
+  reportRefreshError(connection, error) {
+    this.broadcast(connection, { type: 'error', error: error?.message ?? String(error) });
   }
 
   async attachPageObserver(connection) {
@@ -229,26 +274,22 @@ export class BrowserMonitorHub {
 
   async emitSnapshot(connection) {
     if (connection.page.isClosed()) return;
-    try {
-      const snapshot = await connection.page.evaluate(() => ({
-        type: 'snapshot',
-        url: location.href,
-        title: document.title,
-        html: document.documentElement.outerHTML,
-        styles: [...document.styleSheets].map((sheet) => {
-          let text = '';
-          try { text = [...sheet.cssRules].map((rule) => rule.cssText).join('\n'); } catch { /* cross-origin sheet */ }
-          return { href: sheet.href, text };
-        }).filter((sheet) => sheet.href || sheet.text),
-        viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
-        scroll: { x: scrollX, y: scrollY },
-        capturedAt: new Date().toISOString(),
-      }));
-      connection.lastSnapshot = snapshot;
-      this.broadcast(connection, snapshot);
-    } catch (error) {
-      this.broadcast(connection, { type: 'error', error: error.message });
-    }
+    const snapshot = await connection.page.evaluate(() => ({
+      type: 'snapshot',
+      url: location.href,
+      title: document.title,
+      html: document.documentElement.outerHTML,
+      styles: [...document.styleSheets].map((sheet) => {
+        let text = '';
+        try { text = [...sheet.cssRules].map((rule) => rule.cssText).join('\n'); } catch { /* cross-origin sheet */ }
+        return { href: sheet.href, text };
+      }).filter((sheet) => sheet.href || sheet.text),
+      viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+      scroll: { x: scrollX, y: scrollY },
+      capturedAt: new Date().toISOString(),
+    }));
+    connection.lastSnapshot = snapshot;
+    this.broadcast(connection, snapshot);
   }
 
   handlePageEvent(connection, event) {
@@ -284,6 +325,14 @@ function httpError(statusCode, message) {
   return error;
 }
 
+function isTransientNavigationError(error) {
+  return /Execution context was destroyed|Cannot find context with specified id|Frame was detached/i.test(error?.message ?? String(error));
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function fetchJson(rawUrl) {
   const url = new URL(rawUrl);
   return new Promise((resolve) => {
@@ -308,4 +357,4 @@ function fetchJson(rawUrl) {
   });
 }
 
-/** @typedef {{ browserId: string, sessionId?: string, browser: any, page: any, subscribers: Set<import('node:http').ServerResponse>, lastSnapshot?: Record<string, unknown>, bindingName: string }} MonitorConnection */
+/** @typedef {{ browserId: string, sessionId?: string, browser: any, page: any, subscribers: Set<import('node:http').ServerResponse>, lastSnapshot?: Record<string, unknown>, bindingName: string, refreshRequested?: boolean, refreshPromise?: Promise<void> }} MonitorConnection */
