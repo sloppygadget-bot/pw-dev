@@ -196,6 +196,19 @@ main {
   line-height: inherit;
 }
 
+.metric-button {
+  appearance: none;
+  width: 100%;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.metric-button:hover,
+.metric-button:focus-visible {
+  background: var(--surface-2);
+}
+
 .metric-status {
   font-size: 18px;
   font-weight: 700;

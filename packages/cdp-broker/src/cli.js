@@ -115,7 +115,9 @@ export async function main(argv) {
   }
 
   let sshRemoteMachine;
+  let sshLocalMachine;
   if (options.ssh) {
+    sshLocalMachine = inspectLocalMachine();
     ensureSshControlMaster({
       target: options.ssh,
       controlPersist: sshControlPersist,
@@ -139,6 +141,7 @@ export async function main(argv) {
         target: options.ssh,
         remotePort: brokerRemotePort,
         controlPersist: sshControlPersist,
+        localMachine: sshLocalMachine,
         remoteMachine: sshRemoteMachine,
       },
     } : undefined,
@@ -458,6 +461,19 @@ export function parseSshRemoteMachine(output) {
       Array.isArray(value) ? value.length > 0 : value !== undefined
     )
   );
+}
+
+function inspectLocalMachine() {
+  const addresses = Object.values(os.networkInterfaces())
+    .flatMap((interfaces) => interfaces ?? [])
+    .filter((address) => !address.internal && address.address)
+    .map((address) => address.address);
+  return {
+    hostname: os.hostname(),
+    ...(addresses.length ? { addresses } : {}),
+    platform: os.type(),
+    release: os.release(),
+  };
 }
 
 function inspectSshRemoteMachine({ target, controlPath }) {

@@ -79,6 +79,8 @@ test('gui serves static app and read-only config', async () => {
     assert.equal(index.statusCode, 200);
     assert.match(index.body, /<h1>pw-dev<\/h1>/);
     assert.match(index.body, /Browsers/);
+    assert.match(index.body, /id="broker-card"/);
+    assert.match(index.body, /id="broker-state"><span class="good-text">online: 0<\/span><\/strong>/);
     assert.doesNotMatch(index.body, /data-view="topology"/);
     assert.match(index.body, /data-view="broker"/);
     assert.match(index.body, /data-browser-view="diagram"/);
@@ -165,6 +167,8 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /function proxyActions/);
     assert.match(appScript.body, /label: 'Monitor'/);
     assert.match(appScript.body, /Found on localhost/);
+    assert.match(appScript.body, /Local hostname/);
+    assert.match(appScript.body, /broker\?\.topology\?\.ssh\?\.localMachine/);
     assert.match(appScript.body, /Use in browser config/);
     assert.match(appScript.body, /function useDiscoveredBroker/);
     assert.match(appScript.body, /\? \{ label: 'Stop', onClick: \(\) => stopBrowser\(browser\) \}/);
@@ -199,8 +203,8 @@ test('gui serves static app and read-only config', async () => {
     assert.doesNotMatch(styles.body, /\.browser-preview-head/);
     assert.match(styles.body, /max-width: 100%/);
     assert.match(styles.body, /width: max-content/);
-    assert.match(appScript.body, /Remote IP addresses/);
-    assert.match(appScript.body, /Remote OS \/ kernel/);
+    assert.match(appScript.body, /SSH peer IP addresses/);
+    assert.match(appScript.body, /SSH peer OS \/ kernel/);
 
     const config = await getJson(`${server.origin}/api/config`);
     assert.equal(config.statusCode, 200);

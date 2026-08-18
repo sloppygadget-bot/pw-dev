@@ -17,6 +17,7 @@ const els = {
   interval: document.querySelector('#interval'),
   refresh: document.querySelector('#refresh'),
   serverState: document.querySelector('#server-state'),
+  brokerCard: document.querySelector('#broker-card'),
   brokerState: document.querySelector('#broker-state'),
   sessionsState: document.querySelector('#sessions-state'),
   updatedAt: document.querySelector('#updated-at'),
@@ -96,6 +97,7 @@ for (const button of document.querySelectorAll('.nav-item')) {
 }
 
 els.refresh.addEventListener('click', () => void refresh());
+els.brokerCard.addEventListener('click', () => showView('broker'));
 els.newBrowser.addEventListener('click', () => openBrowserEditor());
 els.cancelBrowser.addEventListener('click', closeBrowserEditor);
 els.browserEditor.addEventListener('submit', (event) => {
@@ -402,16 +404,16 @@ async function render(snapshot) {
   els.serverState.textContent = snapshot.serverOk ? 'Online' : 'Error';
   els.serverState.className = snapshot.serverOk ? 'good-text' : 'bad-text';
 
-  const brokerReachable = snapshot.brokers.some((broker) => broker.status);
-  els.brokerState.replaceChildren();
-  for (const [index, broker] of snapshot.brokers.entries()) {
-    const line = document.createElement('div');
-    line.textContent = `${index + 1} ${brokerLabel(broker.status)}`;
-    line.className = `metric-status ${broker.status ? 'good-text' : 'bad-text'}`;
-    els.brokerState.append(line);
-  }
-  if (!snapshot.brokers.length) els.brokerState.textContent = 'None';
-  els.brokerState.className = brokerReachable ? 'good-text' : 'bad-text';
+  const onlineBrokers = snapshot.brokers.filter((broker) => broker.status).length;
+  const offlineBrokers = snapshot.brokers.length - onlineBrokers;
+  const online = document.createElement('span');
+  online.className = 'good-text';
+  online.textContent = `online: ${onlineBrokers}`;
+  const offline = document.createElement('span');
+  offline.className = 'bad-text';
+  offline.textContent = `offline: ${offlineBrokers}`;
+  els.brokerState.replaceChildren(online);
+  if (offlineBrokers) els.brokerState.append(', ', offline);
 
   els.sessionsState.textContent = `${snapshot.sessions.length} active`;
   els.sessionsState.className = snapshot.sessions.length ? 'good-text' : 'good-text';
@@ -861,7 +863,9 @@ function renderBroker(snapshot) {
   renderCards(els.broker, snapshot.brokers.map((entry, index) => {
     const broker = entry.status;
     const active = broker?.state === 'active';
+    const localMachine = broker?.topology?.ssh?.localMachine;
     const remoteMachine = broker?.topology?.ssh?.remoteMachine;
+    const localOs = [localMachine?.platform, localMachine?.release].filter(Boolean).join(' ');
     const remoteOs = [remoteMachine?.platform, remoteMachine?.release].filter(Boolean).join(' ');
     return {
       title: `BROKER${index + 1}`,
@@ -875,12 +879,14 @@ function renderBroker(snapshot) {
         Topology: broker?.topology?.mode,
         Remote: broker?.topology?.remote ? 'Yes' : 'No',
         'SSH target': broker?.topology?.ssh?.target,
-        'Remote hostname': remoteMachine?.hostname,
-        'Remote IP addresses': joinList(remoteMachine?.addresses),
-        'Remote OS / kernel': remoteOs,
-        'Remote machine probe': remoteMachine?.error,
+        'Local hostname': localMachine?.hostname,
+        'Local IP addresses': joinList(localMachine?.addresses),
+        'Local OS / kernel': localOs,
+        'SSH peer hostname': remoteMachine?.hostname,
+        'SSH peer IP addresses': joinList(remoteMachine?.addresses),
+        'SSH peer OS / kernel': remoteOs,
+        'SSH peer machine probe': remoteMachine?.error,
         Instances: broker?.instanceCount ?? broker?.instances?.length ?? 0,
-        Networks: networkLink(broker?.networks),
       },
       actions: entry.discovered
         ? [{ label: 'Use in browser config', onClick: () => useDiscoveredBroker(entry.url) }]
