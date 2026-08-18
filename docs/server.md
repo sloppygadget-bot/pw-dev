@@ -46,12 +46,13 @@ configured broker is not reachable, `GET /_pwdev/status` reports
 ## Remote Linux Brokers
 
 The server can provision a broker on a Linux SSH peer and keep a local forward
-healthy:
+healthy. Store a key and remote host first; key reads return only metadata and
+the private key is written owner-only under `.pw-dev/ssh-keys/`.
 
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/remote-brokers \
   -H 'content-type: application/json' \
-  -d '{"id":"lab","target":"agent@10.11.2.2"}'
+  -d '{"id":"lab","hostId":"lab-linux","remotePort":18080,"localPort":18081}'
 ```
 
 The server compares the remote checkout with its own Git revision first. A
@@ -82,11 +83,20 @@ curl -X POST http://127.0.0.1:9696/_pwdev/remote-brokers/lab/disconnect
 curl -X POST http://127.0.0.1:9696/_pwdev/remote-brokers/lab/stop
 ```
 
+`remotePort` is the broker port on the remote host; `localPort` is the
+loopback-only port on the pw-dev server. Thus `localPort: 18081` and
+`remotePort: 18080` creates `127.0.0.1:18081 -> remote 127.0.0.1:18080`.
+
+Manage the durable assets with `POST/GET/DELETE /_pwdev/ssh-keys` and
+`POST/GET/DELETE /_pwdev/remote-hosts`. Posting a private key with an existing
+key ID rotates it in place; remote hosts retain their key reference. Re-provision
+or reconnect a remote broker after rotation so its SSH control master uses it.
+
 `disconnect` (or `DELETE /_pwdev/remote-brokers/:id`) releases only the local
 forward. `stop` releases it and sends `SIGTERM` only when the remote pid file
-verifies that the process is the pw-dev-managed broker. The server does not
-store SSH credentials; OpenSSH handles host-key, password, passphrase, and MFA
-prompts.
+verifies that the process is the pw-dev-managed broker. The server uses the
+stored key file only for the SSH control master; private-key content is never
+returned by the API or GUI.
 
 The app registry persists in `<worktree>/.pw-dev/apps.json` by default. Pass
 `--app-registry-file <file>` to place it elsewhere. Browser sessions are

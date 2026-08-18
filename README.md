@@ -102,17 +102,19 @@ npm start -- server \
 By default the server probes the broker at `http://127.0.0.1:18080`. Use
 `--broker-url` only when the broker runs somewhere else.
 
-Provision a remote Linux broker through the running server:
+Provision a remote Linux broker through the running server. Prefer a stored
+remote-host asset so server-owned reconnects use a stable key identity:
 
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/remote-brokers \
   -H 'content-type: application/json' \
-  -d '{"id":"lab","target":"agent@10.11.2.2"}'
+  -d '{"id":"lab","hostId":"lab-linux","remotePort":18080,"localPort":18081}'
 ```
 
 The remote checkout defaults to `~/.pw-dev/pw-dev`, is compared with the
 server's Git revision before reuse/update, and is exposed through a
-server-owned local port in `18080-18089`. The server monitors and reconnects
+server-owned local port in `18080-18089`. Here `localPort: 18081` forwards to
+the broker's loopback-only `remotePort: 18080`. The server monitors and reconnects
 dead SSH forwards. See [docs/server.md](docs/server.md#remote-linux-brokers)
 for cleanup and remote-stop behavior.
 
@@ -187,7 +189,9 @@ The instructions endpoint is the machine-readable usage guide; status reports
 whether the required broker component is configured and reachable. When the
 broker was started with `--ssh`, broker status includes
 `topology.remote: true` and `topology.mode: "ssh"` so agents can treat the SSH
-peer as the broker's remote network side.
+peer as the broker's remote network side. Every broker reports
+`topology.localMachine` for the host where it runs. Server-owned remote brokers
+are shown as `ssh/outward`; ordinary SSH broker topology defaults to `ssh/inward`.
 
 `GET /_pwdev/openapi.json` is the compact progressive-discovery catalog. Read
 its `x-pwdev-documents` links and fetch only the relevant domain document, such

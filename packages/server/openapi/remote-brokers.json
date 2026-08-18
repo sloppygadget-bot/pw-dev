@@ -23,10 +23,10 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["target"],
                 "properties": {
                   "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
                   "target": { "type": "string", "description": "SSH host or user@host accepted by OpenSSH." },
+                  "hostId": { "type": "string", "description": "Stored remote-host asset ID. Resolves target and SSH identity." },
                   "repository": { "type": "string", "format": "uri", "default": "https://github.com/sloppygadget-bot/pw-dev.git" },
                   "worktree": { "type": "string", "default": ".pw-dev/pw-dev", "description": "Absolute remote path or path relative to the remote user's home directory." },
                   "revision": { "type": "string", "description": "Git revision to run remotely. Defaults to the local pw-dev server checkout's current HEAD." },

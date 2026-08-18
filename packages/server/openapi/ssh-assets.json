@@ -1,0 +1,22 @@
+{
+  "openapi": "3.1.1",
+  "info": { "title": "pw-dev SSH assets API", "version": "1.0.0" },
+  "paths": {
+    "/_pwdev/ssh-keys": {
+      "get": { "operationId": "listSshKeys", "summary": "List redacted SSH key metadata", "responses": { "200": { "description": "SSH keys" } } },
+      "post": { "operationId": "importSshKey", "summary": "Import or rotate an SSH private key", "requestBody": { "required": true }, "responses": { "201": { "description": "Redacted SSH key metadata" } } }
+    },
+    "/_pwdev/ssh-keys/{id}": {
+      "get": { "operationId": "getSshKey", "summary": "Get redacted SSH key metadata", "responses": { "200": { "description": "SSH key" } } },
+      "delete": { "operationId": "deleteSshKey", "summary": "Delete an unreferenced SSH key", "responses": { "200": { "description": "Deleted" } } }
+    },
+    "/_pwdev/remote-hosts": {
+      "get": { "operationId": "listRemoteHosts", "summary": "List remote hosts", "responses": { "200": { "description": "Remote hosts" } } },
+      "post": { "operationId": "upsertRemoteHost", "summary": "Create or update a remote host", "requestBody": { "required": true }, "responses": { "201": { "description": "Remote host" } } }
+    },
+    "/_pwdev/remote-hosts/{id}": {
+      "get": { "operationId": "getRemoteHost", "summary": "Get a remote host", "responses": { "200": { "description": "Remote host" } } },
+      "delete": { "operationId": "deleteRemoteHost", "summary": "Delete a remote host", "responses": { "200": { "description": "Deleted" } } }
+    }
+  }
+}
