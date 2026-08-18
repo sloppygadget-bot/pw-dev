@@ -879,6 +879,8 @@ function renderBroker(snapshot) {
         Topology: broker?.topology?.mode,
         Remote: broker?.topology?.remote ? 'Yes' : 'No',
         'SSH target': broker?.topology?.ssh?.target,
+        'SSH connection initiator': broker?.topology?.ssh?.connectionInitiator,
+        'Broker port forward': broker?.topology?.ssh?.brokerPortForward,
         'Local hostname': localMachine?.hostname,
         'Local IP addresses': joinList(localMachine?.addresses),
         'Local OS / kernel': localOs,

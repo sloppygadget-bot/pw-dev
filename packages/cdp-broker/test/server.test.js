@@ -267,6 +267,8 @@ test('status reports SSH remote broker topology', async () => {
         target: 'user@code-server',
         remotePort: 18080,
         controlPersist: '24h',
+        connectionInitiator: 'broker',
+        brokerPortForward: 'reverse',
         localMachine: {
           hostname: 'broker-host',
           addresses: ['192.0.2.10'],
@@ -300,6 +302,8 @@ test('status reports SSH remote broker topology', async () => {
       target: 'user@code-server',
       remotePort: 18080,
       controlPersist: '24h',
+      connectionInitiator: 'broker',
+      brokerPortForward: 'reverse',
       localMachine: {
         hostname: 'broker-host',
         addresses: ['192.0.2.10'],

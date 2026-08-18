@@ -141,6 +141,8 @@ export async function main(argv) {
         target: options.ssh,
         remotePort: brokerRemotePort,
         controlPersist: sshControlPersist,
+        connectionInitiator: 'broker',
+        brokerPortForward: 'reverse',
         localMachine: sshLocalMachine,
         remoteMachine: sshRemoteMachine,
       },

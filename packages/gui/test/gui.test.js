@@ -169,6 +169,8 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /Found on localhost/);
     assert.match(appScript.body, /Local hostname/);
     assert.match(appScript.body, /broker\?\.topology\?\.ssh\?\.localMachine/);
+    assert.match(appScript.body, /SSH connection initiator/);
+    assert.match(appScript.body, /Broker port forward/);
     assert.match(appScript.body, /Use in browser config/);
     assert.match(appScript.body, /function useDiscoveredBroker/);
     assert.match(appScript.body, /\? \{ label: 'Stop', onClick: \(\) => stopBrowser\(browser\) \}/);
