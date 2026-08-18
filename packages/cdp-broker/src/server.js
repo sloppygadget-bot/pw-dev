@@ -252,6 +252,7 @@ function normalizeBrokerTopology(topology) {
   return {
     mode: topology.mode ?? (topology.remote ? 'ssh' : 'local'),
     remote: Boolean(topology.remote),
+    ...(topology.localMachine ? { localMachine: { ...topology.localMachine } } : {}),
     ...(topology.ssh ? { ssh: { ...topology.ssh } } : {}),
   };
 }

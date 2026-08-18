@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
+import { isIP } from 'node:net';
 import path from 'node:path';
 
 import { createBrowserManager } from './browser-manager.js';
@@ -43,7 +44,15 @@ export async function main(argv) {
     options.proxyServer ||
     (sshProxyForward ? `http://127.0.0.1:${sshProxyForward.localPort}` : undefined);
   const sshControlPersist = options.sshControlPersist ?? DEFAULT_SSH_CONTROL_PERSIST;
+  const sshDirection = options.sshDirection ?? 'inward';
   const sshControlPath = options.ssh ? prepareSshControlPath() : undefined;
+
+  if (options.sshDirection && !options.ssh) {
+    throw new Error('--ssh-direction requires --ssh');
+  }
+  if (!['inward', 'outward'].includes(sshDirection)) {
+    throw new Error('--ssh-direction must be inward or outward');
+  }
 
   if (defaultProfile) {
     validateProfileName(defaultProfile);
@@ -114,10 +123,9 @@ export async function main(argv) {
     });
   }
 
+  const localMachine = inspectLocalMachine();
   let sshRemoteMachine;
-  let sshLocalMachine;
   if (options.ssh) {
-    sshLocalMachine = inspectLocalMachine();
     ensureSshControlMaster({
       target: options.ssh,
       controlPersist: sshControlPersist,
@@ -134,19 +142,24 @@ export async function main(argv) {
     browserManager,
     proxyForwardManager,
     networkManager,
-    topology: options.ssh ? {
-      mode: 'ssh',
-      remote: true,
-      ssh: {
-        target: options.ssh,
-        remotePort: brokerRemotePort,
-        controlPersist: sshControlPersist,
-        connectionInitiator: 'broker',
-        brokerPortForward: 'reverse',
-        localMachine: sshLocalMachine,
-        remoteMachine: sshRemoteMachine,
-      },
-    } : undefined,
+    topology: {
+      mode: options.ssh ? 'ssh' : 'local',
+      remote: Boolean(options.ssh),
+      localMachine,
+      ...(options.ssh ? {
+        ssh: {
+          target: options.ssh,
+          remotePort: brokerRemotePort,
+          controlPersist: sshControlPersist,
+          connectionInitiator: 'broker',
+          connectionDirection: sshDirection,
+          brokerPortForward: 'reverse',
+          // Retained for existing consumers; topology.localMachine is canonical.
+          localMachine,
+          remoteMachine: sshRemoteMachine,
+        },
+      } : {}),
+    },
   });
 
   await new Promise((resolve, reject) => {
@@ -246,6 +259,9 @@ export function parseArgs(argv) {
           break;
         case '--ssh-remote-port':
           options.sshRemotePort = value;
+          break;
+        case '--ssh-direction':
+          options.sshDirection = value;
           break;
         case '--ssh-control-persist':
           options.sshControlPersist = value;
@@ -454,7 +470,7 @@ export function parseSshRemoteMachine(output) {
 
   const remoteMachine = {
     hostname: values.hostname,
-    addresses: values.addresses?.split(/\s+/).filter(Boolean),
+    addresses: values.addresses?.split(/\s+/).filter((address) => isIP(address) === 4),
     platform: values.platform,
     release: values.release,
   };
@@ -468,7 +484,7 @@ export function parseSshRemoteMachine(output) {
 function inspectLocalMachine() {
   const addresses = Object.values(os.networkInterfaces())
     .flatMap((interfaces) => interfaces ?? [])
-    .filter((address) => !address.internal && address.address)
+    .filter((address) => !address.internal && address.family === 'IPv4' && address.address)
     .map((address) => address.address);
   return {
     hostname: os.hostname(),
@@ -572,6 +588,7 @@ Options:
   --standby                     Listen for broker control requests without launching Chrome
   --headless                    Launch Chrome headless
   --ssh <user@host>             Start an SSH reverse tunnel to a code-server host
+  --ssh-direction <direction>   Connection direction: inward or outward. Default: inward
   --ssh-remote-port <port>      Remote tunnel port. Default: same as --port
   --ssh-proxy-remote-port <p>   Forward remote proxy port to local Chrome
   --ssh-proxy-local-port <p>    Local forwarded proxy port. Default: same as remote

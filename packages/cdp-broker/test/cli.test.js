@@ -48,6 +48,14 @@ test('parses SSH proxy forwarding options', () => {
   );
 });
 
+test('parses SSH connection direction', () => {
+  assert.deepEqual(parseArgs(['--ssh', 'user@host', '--ssh-direction', 'inward']), {
+    chromeArg: [],
+    ssh: 'user@host',
+    sshDirection: 'inward',
+  });
+});
+
 test('parses quiet option', () => {
   assert.deepEqual(parseArgs(['--quiet']), {
     chromeArg: [],
@@ -175,7 +183,7 @@ test('builds and parses SSH remote machine probe data', () => {
     ]
   );
   assert.deepEqual(
-    parseSshRemoteMachine('hostname=code-server\naddresses=10.11.2.10 172.17.0.1\nplatform=Linux\nrelease=6.8.0\n'),
+    parseSshRemoteMachine('hostname=code-server\naddresses=10.11.2.10 2001:db8::20 172.17.0.1\nplatform=Linux\nrelease=6.8.0\n'),
     {
       hostname: 'code-server',
       addresses: ['10.11.2.10', '172.17.0.1'],

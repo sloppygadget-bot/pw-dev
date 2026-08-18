@@ -263,11 +263,18 @@ test('status reports SSH remote broker topology', async () => {
     topology: {
       mode: 'ssh',
       remote: true,
+      localMachine: {
+        hostname: 'broker-host',
+        addresses: ['192.0.2.10'],
+        platform: 'Linux',
+        release: '6.8.0',
+      },
       ssh: {
         target: 'user@code-server',
         remotePort: 18080,
         controlPersist: '24h',
         connectionInitiator: 'broker',
+        connectionDirection: 'outward',
         brokerPortForward: 'reverse',
         localMachine: {
           hostname: 'broker-host',
@@ -298,11 +305,18 @@ test('status reports SSH remote broker topology', async () => {
     assert.equal(response.body.instanceCount, 0);
     assert.equal(response.body.topology.mode, 'ssh');
     assert.equal(response.body.topology.remote, true);
+    assert.deepEqual(response.body.topology.localMachine, {
+      hostname: 'broker-host',
+      addresses: ['192.0.2.10'],
+      platform: 'Linux',
+      release: '6.8.0',
+    });
     assert.deepEqual(response.body.topology.ssh, {
       target: 'user@code-server',
       remotePort: 18080,
       controlPersist: '24h',
       connectionInitiator: 'broker',
+      connectionDirection: 'outward',
       brokerPortForward: 'reverse',
       localMachine: {
         hostname: 'broker-host',
