@@ -63,6 +63,12 @@
             <button class="nav-item" data-view="proxies" type="button">
               <span>Proxies</span><b id="count-proxies">0</b>
             </button>
+            <button class="nav-item" data-view="remote-hosts" type="button">
+              <span>Remote Hosts</span><b id="count-remote-hosts">0</b>
+            </button>
+            <button class="nav-item" data-view="ssh-keys" type="button">
+              <span>SSH Keys</span><b id="count-ssh-keys">0</b>
+            </button>
           </details>
           <details class="nav-group" data-nav-group="runtime">
             <summary class="nav-heading">Runtime</summary>
@@ -185,6 +191,8 @@
             </form>
             <div id="proxies-list" class="cards"></div>
           </section>
+          <section class="view" id="view-remote-hosts"><div class="section-title"><h2>Remote Hosts</h2></div><div id="remote-hosts-list" class="cards"></div></section>
+          <section class="view" id="view-ssh-keys"><div class="section-title"><h2>SSH Keys</h2></div><div id="ssh-keys-list" class="cards"></div></section>
         </div>
       </section>
     </main>

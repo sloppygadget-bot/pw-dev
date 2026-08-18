@@ -167,12 +167,14 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /function proxyActions/);
     assert.match(appScript.body, /label: 'Monitor'/);
     assert.match(appScript.body, /Found on localhost/);
-    assert.match(appScript.body, /Local hostname/);
-    assert.match(appScript.body, /broker\?\.topology\?\.ssh\?\.localMachine/);
+    assert.match(appScript.body, /Broker host hostname/);
+    assert.match(appScript.body, /broker\?\.topology\?\.localMachine/);
+    assert.match(appScript.body, /function joinIpv4Addresses/);
+    assert.match(appScript.body, /card\.classList\.add\('broker-card'\)/);
     assert.match(appScript.body, /SSH connection initiator/);
+    assert.match(appScript.body, /SSH connection direction/);
     assert.match(appScript.body, /Broker port forward/);
-    assert.match(appScript.body, /Use in browser config/);
-    assert.match(appScript.body, /function useDiscoveredBroker/);
+    assert.doesNotMatch(appScript.body, /Use in browser config/);
     assert.match(appScript.body, /\? \{ label: 'Stop', onClick: \(\) => stopBrowser\(browser\) \}/);
     assert.match(appScript.body, /: \{ label: 'Start', onClick: \(\) => startBrowser\(browser\) \}/);
     assert.match(appScript.body, /\['session', browser\.sessionId[\s\S]*?\['proxy', browser\.proxyId[\s\S]*?\['app', browser\.appId/);
@@ -205,6 +207,7 @@ test('gui serves static app and read-only config', async () => {
     assert.doesNotMatch(styles.body, /\.browser-preview-head/);
     assert.match(styles.body, /max-width: 100%/);
     assert.match(styles.body, /width: max-content/);
+    assert.match(styles.body, /\.broker-card \.kv[\s\S]*?180px/);
     assert.match(appScript.body, /SSH peer IP addresses/);
     assert.match(appScript.body, /SSH peer OS \/ kernel/);
 
@@ -283,6 +286,14 @@ test('gui proxies a managed Whistle GUI under a same-origin route', async () => 
     req.setEncoding('utf8');
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
+      if (req.url === '/cgi-bin/server-info') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          ec: 0,
+          server: { ipv4: ['192.0.2.20'], ipv6: ['2001:db8::20'], port: 9800 },
+        }));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'text/html' });
       res.end(`whistle gui ${req.method} ${req.url} ${body}`);
     });
@@ -309,6 +320,12 @@ test('gui proxies a managed Whistle GUI under a same-origin route', async () => 
     });
     assert.equal(saved.statusCode, 200);
     assert.match(saved.body, /whistle gui POST \/cgi-bin\/rules\/project name=local-api&rules=example.test/);
+
+    const serverInfo = await getJson(`${gui.origin}/proxy/proxy-main/gui/cgi-bin/server-info`);
+    assert.equal(serverInfo.statusCode, 200);
+    assert.deepEqual(serverInfo.body.server.ipv4, ['127.0.0.1']);
+    assert.deepEqual(serverInfo.body.server.ipv6, []);
+    assert.equal(serverInfo.body.server.port, `${new URL(gui.origin).port}/proxy/proxy-main/gui`);
   } finally {
     await gui.close();
     await pwdev.close();

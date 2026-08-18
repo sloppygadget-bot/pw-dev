@@ -293,7 +293,7 @@ export function createRemoteBrokerManager(options = {}) {
   async function connect(record) {
     if (record.released) return;
     record.status = record.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
-    ensureSshControlMaster({ spawnSyncImpl, target: record.target, controlPath: record.controlPath });
+    ensureSshControlMaster({ spawnSyncImpl, target: record.target, controlPath: record.controlPath, identityFile: record.identityFile });
     const bootstrap = runRemoteBootstrap({ spawnSyncImpl, ...record });
     if (bootstrap.revision) record.remoteRevision = bootstrap.revision;
     if (bootstrap.updated !== undefined) record.remoteUpdated = bootstrap.updated === 'true';
@@ -491,8 +491,10 @@ function validateProvisionRequest(raw, localRevision) {
     revision: raw.revision === undefined
       ? requiredRevision(localRevision)
       : requiredRevision(raw.revision),
+    ...(raw.identityFile ? { identityFile: requiredString(raw.identityFile, 'identityFile') } : {}),
     remotePort,
     localPort,
+    connectionDirection: 'outward',
   };
 }
 
@@ -541,7 +543,7 @@ function prepareSshControlPath() {
   return path.join(controlDir, '%C');
 }
 
-function ensureSshControlMaster({ spawnSyncImpl, target, controlPath }) {
+function ensureSshControlMaster({ spawnSyncImpl, target, controlPath, identityFile }) {
   const result = spawnSyncImpl('ssh', [
     '-o', 'ControlMaster=auto',
     '-o', `ControlPersist=${SSH_CONTROL_PERSIST}`,
@@ -549,6 +551,7 @@ function ensureSshControlMaster({ spawnSyncImpl, target, controlPath }) {
     '-o', 'ConnectTimeout=10',
     '-o', 'ServerAliveInterval=15',
     '-o', 'ServerAliveCountMax=2',
+    ...(identityFile ? ['-i', identityFile, '-o', 'IdentitiesOnly=yes'] : []),
     '-N',
     '-f',
     '--',

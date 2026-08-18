@@ -69,6 +69,7 @@ test('provisions, lists, and releases one server-owned remote broker forward', a
     revision: 'abc123',
     remotePort: 18080,
     localPort: 18083,
+    connectionDirection: 'outward',
     brokerUrl: 'http://127.0.0.1:18083',
     createdAt: '2026-08-09T00:00:00.000Z',
     status: 'ready',

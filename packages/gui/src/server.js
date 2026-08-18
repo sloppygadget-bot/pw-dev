@@ -158,6 +158,8 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl, brokerDis
     browsers,
     serverProxies,
     serverNetworks,
+    sshKeys,
+    remoteHosts,
     brokerStatus,
     brokerNetworks,
     brokerForwards,
@@ -170,6 +172,8 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl, brokerDis
     fetchJsonFrom(`${pwDevUrl}/_pwdev/browsers`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/proxies`),
     fetchJsonFrom(`${pwDevUrl}/_pwdev/networks`),
+    fetchJsonFrom(`${pwDevUrl}/_pwdev/ssh-keys`),
+    fetchJsonFrom(`${pwDevUrl}/_pwdev/remote-hosts`),
     fetchJsonFrom(`${brokerUrl}/_broker/status`),
     fetchJsonFrom(`${brokerUrl}/_broker/networks`),
     fetchJsonFrom(`${brokerUrl}/_broker/proxy-forwards`),
@@ -203,6 +207,8 @@ async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl, brokerDis
       proxies: serverProxies,
       proxyStatuses,
       networks: serverNetworks,
+      sshKeys,
+      remoteHosts,
     },
     broker: {
       status: primaryBroker?.status ?? brokerStatus,
@@ -355,6 +361,8 @@ async function proxyPwDevRequest({ req, res, requestUrl, pwDevUrl }) {
   const upstreamPath = isGuiApiPath ? `/_pwdev${suffix || ''}` : suffix;
   const assetMutation = isGuiApiPath && (
     upstreamPath === '/_pwdev/browser-configs' || upstreamPath.startsWith('/_pwdev/browser-configs/') ||
+    upstreamPath === '/_pwdev/ssh-keys' || upstreamPath.startsWith('/_pwdev/ssh-keys/') ||
+    upstreamPath === '/_pwdev/remote-hosts' || upstreamPath.startsWith('/_pwdev/remote-hosts/') ||
     upstreamPath === '/_pwdev/browsers' || upstreamPath.startsWith('/_pwdev/browsers/') ||
     upstreamPath === '/_pwdev/proxies' || upstreamPath.startsWith('/_pwdev/proxies/')
   ) && ['POST', 'DELETE'].includes(req.method);
@@ -464,6 +472,7 @@ async function proxyWhistleGui({ req, res, requestUrl, pwDevUrl }) {
 
   const upstreamUrl = new URL(match[2] || '/', ensureTrailingSlash(guiUrl));
   upstreamUrl.search = requestUrl.search;
+  const rewriteServerInfo = /^\/cgi-bin\/(?:get-data|init|server-info)$/.test(upstreamUrl.pathname);
   const headers = { ...req.headers };
   delete headers.connection;
   delete headers.host;
@@ -476,6 +485,10 @@ async function proxyWhistleGui({ req, res, requestUrl, pwDevUrl }) {
     },
   }, (response) => {
     const headers = { ...response.headers, 'cache-control': 'no-store' };
+    if (rewriteServerInfo && isJsonResponse(response)) {
+      proxyWhistleServerInfo({ response, res, headers, req, proxyId });
+      return;
+    }
     res.writeHead(response.statusCode ?? 502, headers);
     response.pipe(res);
   });
@@ -484,6 +497,38 @@ async function proxyWhistleGui({ req, res, requestUrl, pwDevUrl }) {
     error: `Whistle GUI is unreachable at ${guiUrl}: ${error.message}`,
   }));
   req.pipe(upstream);
+}
+
+function proxyWhistleServerInfo({ response, res, headers, req, proxyId }) {
+  let body = '';
+  response.setEncoding('utf8');
+  response.on('data', (chunk) => { body += chunk; });
+  response.on('end', () => {
+    try {
+      const payload = JSON.parse(body);
+      const server = payload.server;
+      if (server && typeof server === 'object') {
+        const guiUrl = new URL(req.url || '/', `http://${req.headers.host || DEFAULT_HOST}`);
+        const port = guiUrl.port || '80';
+        // Whistle combines every IPv4 entry with server.port to render the
+        // bottom-right network/Root CA links. Point that composed link back
+        // through this GUI's same-origin proxy instead of its private UI port.
+        server.ipv4 = [guiUrl.hostname];
+        server.ipv6 = [];
+        server.port = `${port}/proxy/${encodeURIComponent(proxyId)}/gui`;
+      }
+      delete headers['content-length'];
+      res.writeHead(response.statusCode ?? 502, headers);
+      res.end(JSON.stringify(payload));
+    } catch {
+      res.writeHead(response.statusCode ?? 502, headers);
+      res.end(body);
+    }
+  });
+}
+
+function isJsonResponse(response) {
+  return /^application\/json(?:;|$)/i.test(String(response.headers['content-type'] || ''));
 }
 
 async function serveStatic({ req, res, root }) {

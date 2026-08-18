@@ -28,6 +28,8 @@ const els = {
   browserConfigs: document.querySelector('#browser-configs-list'),
   sessions: document.querySelector('#sessions-list'),
   proxies: document.querySelector('#proxies-list'),
+  remoteHosts: document.querySelector('#remote-hosts-list'),
+  sshKeys: document.querySelector('#ssh-keys-list'),
   newBrowser: document.querySelector('#new-browser'),
   browserEditor: document.querySelector('#browser-editor'),
   browserEditorTitle: document.querySelector('#browser-editor-title'),
@@ -230,6 +232,8 @@ function normalizeSnapshot(raw) {
   const serverSessions = raw.server.sessions;
   const proxies = raw.server.proxies;
   const serverNetworks = raw.server.networks;
+  const sshKeys = raw.server.sshKeys;
+  const remoteHosts = raw.server.remoteHosts;
   const brokerStatusFetch = raw.broker.status;
   const brokerNetworks = raw.broker.networks;
   const brokerForwards = raw.broker.proxyForwards;
@@ -286,12 +290,14 @@ function normalizeSnapshot(raw) {
     proxyStatus,
     apps: appList,
     proxies: proxyList,
+    sshKeys: sshKeys.ok && sshKeys.body?.sshKeys ? sshKeys.body.sshKeys : [],
+    remoteHosts: remoteHosts.ok && remoteHosts.body?.remoteHosts ? remoteHosts.body.remoteHosts : [],
     networks: networkList,
     proxyForwards,
     sessions,
     browsers: browserList,
     relationships,
-    errors: [status, apps, serverBrowserConfigs, serverSessions, proxies, serverNetworks, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
+    errors: [status, apps, serverBrowserConfigs, serverSessions, proxies, serverNetworks, sshKeys, remoteHosts, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
     updatedAt: new Date(raw.collectedAt),
   };
 }
@@ -311,6 +317,7 @@ function normalizeBrowser(browser) {
 
 function normalizeBrokerEntries(raw) {
   const primaryViaServer = raw.server.status.body?.broker?.status;
+  const remoteBrokers = raw.server.status.body?.remoteBrokers ?? [];
   const entries = Array.isArray(raw.brokers) && raw.brokers.length
     ? raw.brokers
     : [{
@@ -329,6 +336,7 @@ function normalizeBrokerEntries(raw) {
     }),
     networks: entry.networks,
     proxyForwards: entry.proxyForwards,
+    remoteBroker: remoteBrokers.find((remoteBroker) => remoteBroker.brokerUrl === entry.url),
   }));
 }
 
@@ -426,6 +434,8 @@ async function render(snapshot) {
   setCount('browser-configs', snapshot.browserConfigs.length);
   setCount('sessions', snapshot.sessions.length);
   setCount('proxies', snapshot.proxies.length);
+  setCount('remote-hosts', snapshot.remoteHosts.length);
+  setCount('ssh-keys', snapshot.sshKeys.length);
 
   await refreshBrowserPreviews(snapshot.browsers);
   renderBrowsers(snapshot.browsers);
@@ -434,6 +444,8 @@ async function render(snapshot) {
   renderBrowserConfigs(snapshot.browserConfigs, snapshot.sessions, snapshot.browsers);
   renderSessions(snapshot.sessions, snapshot.relationships, snapshot.browsers);
   renderProxies(snapshot.proxies, snapshot.relationships, snapshot.browsers, snapshot.apps, snapshot.sessions);
+  renderCards(els.remoteHosts, snapshot.remoteHosts.map((host) => ({ title: host.name ?? host.id, subtitle: host.id, rows: { Target: host.target, 'SSH key': host.sshKeyId } })));
+  renderCards(els.sshKeys, snapshot.sshKeys.map((key) => ({ title: key.name ?? key.id, subtitle: key.id, rows: { Fingerprint: key.fingerprint, Updated: formatDate(key.updatedAt) } })));
 }
 
 function openBrowserEditor(browser) {
@@ -863,11 +875,15 @@ function renderBroker(snapshot) {
   renderCards(els.broker, snapshot.brokers.map((entry, index) => {
     const broker = entry.status;
     const active = broker?.state === 'active';
-    const localMachine = broker?.topology?.ssh?.localMachine;
+    const localMachine = broker?.topology?.localMachine ?? broker?.topology?.ssh?.localMachine;
+    const ssh = entry.remoteBroker
+      ? { target: entry.remoteBroker.target, connectionDirection: entry.remoteBroker.connectionDirection ?? 'outward', connectionInitiator: 'server', brokerPortForward: 'local' }
+      : broker?.topology?.ssh;
     const remoteMachine = broker?.topology?.ssh?.remoteMachine;
     const localOs = [localMachine?.platform, localMachine?.release].filter(Boolean).join(' ');
     const remoteOs = [remoteMachine?.platform, remoteMachine?.release].filter(Boolean).join(' ');
     return {
+      broker: true,
       title: `BROKER${index + 1}`,
       subtitle: entry.url,
       badge: [
@@ -876,32 +892,23 @@ function renderBroker(snapshot) {
       ].join(' '),
       rows: {
         URL: entry.url,
-        Topology: broker?.topology?.mode,
-        Remote: broker?.topology?.remote ? 'Yes' : 'No',
-        'SSH target': broker?.topology?.ssh?.target,
-        'SSH connection initiator': broker?.topology?.ssh?.connectionInitiator,
-        'Broker port forward': broker?.topology?.ssh?.brokerPortForward,
-        'Local hostname': localMachine?.hostname,
-        'Local IP addresses': joinList(localMachine?.addresses),
-        'Local OS / kernel': localOs,
+        Topology: ssh ? 'ssh' : broker?.topology?.mode,
+        Remote: ssh ? 'Yes' : broker?.topology?.remote ? 'Yes' : 'No',
+        'SSH target': ssh?.target,
+        'SSH connection initiator': ssh?.connectionInitiator,
+        'SSH connection direction': ssh?.connectionDirection ?? (broker?.topology?.ssh ? 'inward' : undefined),
+        'Broker port forward': ssh?.brokerPortForward,
+        'Broker host hostname': localMachine?.hostname,
+        'Broker host IP addresses': joinIpv4Addresses(localMachine?.addresses),
+        'Broker host OS / kernel': localOs,
         'SSH peer hostname': remoteMachine?.hostname,
-        'SSH peer IP addresses': joinList(remoteMachine?.addresses),
+        'SSH peer IP addresses': joinIpv4Addresses(remoteMachine?.addresses),
         'SSH peer OS / kernel': remoteOs,
         'SSH peer machine probe': remoteMachine?.error,
         Instances: broker?.instanceCount ?? broker?.instances?.length ?? 0,
       },
-      actions: entry.discovered
-        ? [{ label: 'Use in browser config', onClick: () => useDiscoveredBroker(entry.url) }]
-        : undefined,
     };
   }));
-}
-
-function useDiscoveredBroker(url) {
-  showView('browser-configs');
-  openBrowserConfigEditor();
-  els.browserConfigBrokerUrl.value = url;
-  els.browserConfigBrokerUrl.focus();
 }
 
 function renderBrowserConfigs(browserConfigs, sessions, browsers) {
@@ -1316,6 +1323,7 @@ function renderCards(root, cards) {
   for (const item of cards) {
     const card = document.createElement('article');
     card.className = 'card';
+    if (item.broker) card.classList.add('broker-card');
     if (item.appId) {
       card.dataset.appId = item.appId;
       card.tabIndex = -1;
@@ -1650,6 +1658,10 @@ function formatDate(value) {
 function joinList(list) {
   const values = [...new Set((list ?? []).filter(Boolean))];
   return values.length ? values.join(', ') : undefined;
+}
+
+function joinIpv4Addresses(addresses) {
+  return joinList((addresses ?? []).filter((address) => typeof address === 'string' && !address.includes(':')));
 }
 
 function looksCodeLike(value) {

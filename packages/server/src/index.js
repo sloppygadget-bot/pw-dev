@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRemoteBrokerManager } from './remote-brokers.js';
+import { createSshAssetRegistry } from './ssh-assets.js';
 
 const require = createRequire(import.meta.url);
 const SERVER_PACKAGE_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -331,6 +332,10 @@ export async function startPwDevServer(options = {}) {
   const startedAt = new Date().toISOString();
   const broker = createBrokerPairing({ brokerUrl: options.brokerUrl });
   const remoteBrokers = options.remoteBrokerManager ?? createRemoteBrokerManager();
+  const sshAssets = createSshAssetRegistry({
+    registryFile: path.join(worktree, '.pw-dev', 'ssh-assets.json'),
+    keyDirectory: path.join(worktree, '.pw-dev', 'ssh-keys'),
+  });
   const proxyManagerUrl = normalizeHttpUrl(options.proxyManagerUrl ?? DEFAULT_PROXY_MANAGER_URL, 'proxyManagerUrl');
   const appRegistryFile = path.resolve(options.appRegistryFile ?? path.join(worktree, '.pw-dev', 'apps.json'));
   const apps = createAppRegistry(loadPersistedApps(appRegistryFile), {
@@ -354,7 +359,7 @@ export async function startPwDevServer(options = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
+        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -464,7 +469,7 @@ export async function startPwDevServer(options = {}) {
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, proxyManagerUrl, ensureProxyManager }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -512,7 +517,12 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname === '/_pwdev/remote-brokers' || requestUrl.pathname.startsWith('/_pwdev/remote-brokers/')) {
-    await handleRemoteBrokersRequest({ req, res, requestUrl, remoteBrokers, writeBody });
+    await handleRemoteBrokersRequest({ req, res, requestUrl, remoteBrokers, sshAssets, writeBody });
+    return;
+  }
+
+  if (requestUrl.pathname === '/_pwdev/ssh-keys' || requestUrl.pathname.startsWith('/_pwdev/ssh-keys/') || requestUrl.pathname === '/_pwdev/remote-hosts' || requestUrl.pathname.startsWith('/_pwdev/remote-hosts/')) {
+    await handleSshAssetsRequest({ req, res, requestUrl, sshAssets, writeBody });
     return;
   }
 
@@ -2761,7 +2771,7 @@ function ensureTrailingSlash(value) {
  *   writeBody: boolean,
  * }} options
  */
-async function handleRemoteBrokersRequest({ req, res, requestUrl, remoteBrokers, writeBody }) {
+async function handleRemoteBrokersRequest({ req, res, requestUrl, remoteBrokers, sshAssets, writeBody }) {
   const basePath = '/_pwdev/remote-brokers';
   if (requestUrl.pathname === basePath) {
     if (req.method === 'GET' || req.method === 'HEAD') {
@@ -2769,7 +2779,14 @@ async function handleRemoteBrokersRequest({ req, res, requestUrl, remoteBrokers,
       return;
     }
     if (req.method === 'POST') {
-      const remoteBroker = await remoteBrokers.provision(await readJsonBody(req));
+      const request = await readJsonBody(req);
+      if (request.hostId) {
+        const host = sshAssets.getHost(request.hostId);
+        if (!host) throw Object.assign(new Error(`Unknown remote host: ${request.hostId}`), { statusCode: 404 });
+        request.target = host.target;
+        request.identityFile = sshAssets.identityFile(host.id);
+      }
+      const remoteBroker = await remoteBrokers.provision(request);
       writeJson(res, 201, { ok: true, remoteBroker }, writeBody);
       return;
     }
@@ -2816,6 +2833,22 @@ async function handleRemoteBrokersRequest({ req, res, requestUrl, remoteBrokers,
     throw error;
   }
   writeJson(res, 200, { ok: true, id, released: true }, writeBody);
+}
+
+async function handleSshAssetsRequest({ req, res, requestUrl, sshAssets, writeBody }) {
+  const match = /^\/_pwdev\/(ssh-keys|remote-hosts)(?:\/([^/]+))?$/.exec(requestUrl.pathname);
+  if (!match) { writeJson(res, 404, { ok: false, error: 'Unknown SSH asset route' }, writeBody); return; }
+  const [, kind, rawId] = match;
+  const id = rawId ? decodeURIComponent(rawId) : undefined;
+  const api = kind === 'ssh-keys'
+    ? { list: sshAssets.listKeys, get: sshAssets.getKey, upsert: sshAssets.importKey, remove: sshAssets.deleteKey, singular: 'sshKey', plural: 'sshKeys' }
+    : { list: sshAssets.listHosts, get: sshAssets.getHost, upsert: sshAssets.upsertHost, remove: sshAssets.deleteHost, singular: 'remoteHost', plural: 'remoteHosts' };
+  if (!id && (req.method === 'GET' || req.method === 'HEAD')) { writeJson(res, 200, { ok: true, [api.plural]: api.list() }, writeBody); return; }
+  if (!id && req.method === 'POST') { const asset = api.upsert(await readJsonBody(req)); writeJson(res, 201, { ok: true, [api.singular]: asset }, writeBody); return; }
+  if (!id) { res.writeHead(405, { allow: 'GET, HEAD, POST' }); res.end('Method Not Allowed'); return; }
+  if (req.method === 'GET' || req.method === 'HEAD') { const asset = api.get(id); if (!asset) throw Object.assign(new Error(`Unknown ${api.singular}: ${id}`), { statusCode: 404 }); writeJson(res, 200, { ok: true, [api.singular]: asset }, writeBody); return; }
+  if (req.method === 'DELETE') { if (!api.remove(id)) throw Object.assign(new Error(`Unknown ${api.singular}: ${id}`), { statusCode: 404 }); writeJson(res, 200, { ok: true, id, deleted: true }, writeBody); return; }
+  res.writeHead(405, { allow: 'GET, HEAD, DELETE' }); res.end('Method Not Allowed');
 }
 
 function writeBrokerError(res, error) {
@@ -3491,6 +3524,7 @@ const SERVER_OPENAPI_DOCUMENTS = new Map([
   ['/_pwdev/openapi/browser-configs.json', 'browser-configs.json'],
   ['/_pwdev/openapi/browsers.json', 'browsers.json'],
   ['/_pwdev/openapi/remote-brokers.json', 'remote-brokers.json'],
+  ['/_pwdev/openapi/ssh-assets.json', 'ssh-assets.json'],
   ['/_pwdev/openapi/sessions.json', 'sessions.json'],
   ['/_pwdev/openapi/proxies.json', 'proxies/index.json'],
   ['/_pwdev/openapi/proxies/records.json', 'proxies/records.json'],

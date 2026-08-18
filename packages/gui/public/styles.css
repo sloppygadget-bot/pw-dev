@@ -739,6 +739,10 @@ body.modal-open { overflow: hidden; }
   gap: 6px 10px;
 }
 
+.broker-card .kv {
+  grid-template-columns: 180px minmax(0, 1fr);
+}
+
 .kv dt {
   color: var(--muted);
 }
