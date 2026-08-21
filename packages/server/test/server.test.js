@@ -87,6 +87,77 @@ test('server serves static index and health', async () => {
   }
 });
 
+test('status reports a stalled broker as unreachable within a bounded deadline', async () => {
+  const broker = await startBlackHoleServer();
+  const server = await startPwDevServer({ port: 0, brokerUrl: broker.origin });
+  const startedAt = Date.now();
+  try {
+    const response = await get(`${server.origin}/_pwdev/status`);
+    const elapsedMs = Date.now() - startedAt;
+    const status = JSON.parse(response.body);
+    assert.equal(response.statusCode, 200);
+    assert.equal(status.broker.reachable, false);
+    assert.match(status.broker.error, /timed out after 1500ms/);
+    assert.ok(elapsedMs >= 1_000 && elapsedMs < 3_000, `status took ${elapsedMs}ms`);
+  } finally {
+    await server.close();
+    await broker.close();
+  }
+});
+
+test('server close is bounded while a broker request is stalled', async () => {
+  const broker = await startBlackHoleServer();
+  const server = await startPwDevServer({ port: 0, brokerUrl: broker.origin });
+  const pendingStatus = get(`${server.origin}/_pwdev/status`).catch(() => undefined);
+  await broker.nextRequest;
+  const startedAt = Date.now();
+  try {
+    await server.close();
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 2_000, `close took ${elapsedMs}ms`);
+    await pendingStatus;
+  } finally {
+    if (server.server.listening) await server.close();
+    await broker.close();
+  }
+});
+
+test('app and browser lists preserve cached state when broker reconciliation stalls', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const broker = await startMockBroker();
+  const server = await startPwDevServer({ root, worktree: root, port: 0, brokerUrl: broker.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/apps`, {
+      id: 'stalled-app',
+      appUrl: 'http://127.0.0.1:5173',
+    });
+    await postJson(`${server.origin}/_pwdev/browser-configs`, { id: 'stalled-config' });
+    await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'stalled-browser',
+      appId: 'stalled-app',
+      browserConfigId: 'stalled-config',
+    });
+    await postJson(`${server.origin}/_pwdev/browsers/stalled-browser/start`, {});
+    broker.stall();
+
+    const startedAt = Date.now();
+    const [apps, browsers] = await Promise.all([
+      getJson(`${server.origin}/_pwdev/apps`),
+      getJson(`${server.origin}/_pwdev/browsers`),
+    ]);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(apps.statusCode, 200);
+    assert.equal(apps.body.apps[0].browserInstanceId, 'bkr_stalled-config__stalled-browser');
+    assert.equal(browsers.statusCode, 200);
+    assert.equal(browsers.body.browsers[0].status, 'occupied');
+    assert.ok(elapsedMs >= 1_000 && elapsedMs < 3_000, `lists took ${elapsedMs}ms`);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('server exposes pw-dev manifest and status endpoints', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
   const server = await startPwDevServer({
@@ -1979,10 +2050,12 @@ function startMockBroker({ topology } = {}) {
   const requests = [];
   const upgrades = [];
   const instances = new Map();
+  let stalled = false;
   let origin;
   const server = http.createServer(async (req, res) => {
     const body = await readRequestJson(req);
     requests.push({ method: req.method, path: req.url, body });
+    if (stalled) return;
 
     if (req.url === '/_broker/start' && req.method === 'POST') {
       const instanceId = `bkr_${body.profile}`;
@@ -2071,6 +2144,7 @@ function startMockBroker({ topology } = {}) {
       origin,
       requests,
       upgrades,
+      stall: () => { stalled = true; },
       crash: () => instances.clear(),
       close: () => new Promise((closeResolve, closeReject) => {
           server.close((error) => error ? closeReject(error) : closeResolve());
@@ -2133,6 +2207,27 @@ function startMockProxyManager(options = {}) {
         proxies,
         close: () => new Promise((closeResolve, closeReject) => {
           server.close((error) => error ? closeReject(error) : closeResolve());
+        }),
+      });
+    });
+  });
+}
+
+function startBlackHoleServer() {
+  let resolveNextRequest;
+  const nextRequest = new Promise((resolve) => { resolveNextRequest = resolve; });
+  const server = http.createServer(() => resolveNextRequest());
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      const address = server.address();
+      resolve({
+        origin: `http://127.0.0.1:${address.port}`,
+        nextRequest,
+        close: () => new Promise((closeResolve) => {
+          server.closeAllConnections?.();
+          server.close(closeResolve);
         }),
       });
     });

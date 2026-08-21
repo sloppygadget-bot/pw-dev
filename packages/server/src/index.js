@@ -11,6 +11,7 @@
 
 import fs from 'node:fs/promises';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import { createRequire } from 'node:module';
@@ -43,6 +44,11 @@ const DEFAULT_BROKER_URL = 'http://127.0.0.1:18080';
 const DEFAULT_PROXY_MANAGER_URL = 'http://127.0.0.1:9697';
 const DEFAULT_SESSION_LEASE_TTL_MS = 30_000;
 const MAX_SESSION_LEASE_TTL_MS = 60 * 60 * 1000;
+const BROKER_PROBE_TIMEOUT_MS = 1_500;
+const BROKER_OPERATION_TIMEOUT_MS = 20_000;
+const UPSTREAM_PROXY_TIMEOUT_MS = 30_000;
+const SERVER_SHUTDOWN_GRACE_MS = 1_000;
+const requestSignalStorage = new AsyncLocalStorage();
 
 /**
  * Options for `startPwDevServer`.
@@ -355,11 +361,17 @@ export async function startPwDevServer(options = {}) {
     persist: (registeredBrowsers) => persistBrowsers(browserRegistryFile, registeredBrowsers),
   });
   let origin;
+  const activeRequests = new Set();
 
   const server = http.createServer(async (req, res) => {
+    const controller = new AbortController();
+    activeRequests.add(controller);
+    const abortRequest = () => controller.abort();
+    req.once('aborted', abortRequest);
+    res.once('close', abortRequest);
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager });
+        await requestSignalStorage.run(controller.signal, () => handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager, signal: controller.signal }));
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -368,10 +380,15 @@ export async function startPwDevServer(options = {}) {
       }
       await serveStatic({ req, res, root });
     } catch (error) {
+      if (res.destroyed || controller.signal.aborted) return;
       writeJson(res, error?.statusCode || 500, {
         ok: false,
         error: error?.message || 'Internal Server Error',
       });
+    } finally {
+      activeRequests.delete(controller);
+      req.off('aborted', abortRequest);
+      res.off('close', abortRequest);
     }
   });
   server.on('upgrade', (req, socket, head) => {
@@ -403,9 +420,8 @@ export async function startPwDevServer(options = {}) {
     root,
     server,
     close: async () => {
-      await new Promise((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
+      for (const controller of activeRequests) controller.abort();
+      await closeHttpServer(server, SERVER_SHUTDOWN_GRACE_MS);
       await remoteBrokers.close();
     },
   };
@@ -469,7 +485,7 @@ export async function startPwDevServer(options = {}) {
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager, signal }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -506,7 +522,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/broker')) {
-    await proxyBrokerHttpRequest({ req, res, requestUrl, broker, sessions, serverUrl });
+    await proxyBrokerHttpRequest({ req, res, requestUrl, broker, sessions, serverUrl, signal });
     return;
   }
 
@@ -2155,45 +2171,57 @@ async function resolveFile(filePath) {
  * }} options
  * @returns {Promise<void>}
  */
-async function proxyBrokerHttpRequest({ req, res, requestUrl, broker, sessions, serverUrl, brokerPath }) {
+async function proxyBrokerHttpRequest({ req, res, requestUrl, broker, sessions, serverUrl, brokerPath, signal }) {
   const brokerUrl = resolveBrokerForCdpRequest({ requestUrl, broker, sessions });
   const upstreamUrl = new URL(brokerPath ?? proxyBrokerPath(requestUrl), ensureTrailingSlash(brokerUrl));
   const headers = { ...req.headers, host: upstreamUrl.host };
 
-  const upstream = http.request(upstreamUrl, {
-    method: req.method,
-    headers,
-  }, (response) => {
-    if (!isCdpDiscoveryPath(requestUrl)) {
-      res.writeHead(response.statusCode ?? 502, response.headers);
-      response.pipe(res);
-      return;
-    }
-    let body = '';
-    response.setEncoding('utf8');
-    response.on('data', (chunk) => { body += chunk; });
-    response.on('end', () => {
-      let payload;
-      try {
-        payload = JSON.parse(body);
-      } catch {
+  await new Promise((resolve) => {
+    const upstream = http.request(upstreamUrl, {
+      method: req.method,
+      headers,
+    }, (response) => {
+      if (!isCdpDiscoveryPath(requestUrl)) {
         res.writeHead(response.statusCode ?? 502, response.headers);
-        res.end(body);
+        response.pipe(res);
         return;
       }
-      const rewritten = rewriteCdpDebuggerUrls(payload, serverUrl);
-      const output = Buffer.from(JSON.stringify(rewritten));
-      const headers = { ...response.headers, 'content-length': output.length };
-      delete headers['transfer-encoding'];
-      res.writeHead(response.statusCode ?? 502, headers);
-      res.end(output);
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => {
+        let payload;
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          res.writeHead(response.statusCode ?? 502, response.headers);
+          res.end(body);
+          return;
+        }
+        const rewritten = rewriteCdpDebuggerUrls(payload, serverUrl);
+        const output = Buffer.from(JSON.stringify(rewritten));
+        const headers = { ...response.headers, 'content-length': output.length };
+        delete headers['transfer-encoding'];
+        res.writeHead(response.statusCode ?? 502, headers);
+        res.end(output);
+      });
     });
-  });
 
-  upstream.once('error', (error) => {
-    writeBrokerError(res, error);
+    const abortUpstream = () => upstream.destroy(abortError('Broker request aborted'));
+    if (signal?.aborted) abortUpstream();
+    else signal?.addEventListener('abort', abortUpstream, { once: true });
+    upstream.setTimeout(UPSTREAM_PROXY_TIMEOUT_MS, () => {
+      upstream.destroy(timeoutError(`Broker request timed out after ${UPSTREAM_PROXY_TIMEOUT_MS}ms`));
+    });
+    upstream.once('error', (error) => {
+      if (!res.destroyed) writeBrokerError(res, error);
+    });
+    upstream.once('close', () => {
+      signal?.removeEventListener('abort', abortUpstream);
+      resolve();
+    });
+    req.pipe(upstream);
   });
-  req.pipe(upstream);
 }
 
 /**
@@ -2654,15 +2682,28 @@ function validateBrowserProfileName(profile, name) {
  *
  * @param {string} brokerUrl Broker base URL, for example `http://127.0.0.1:18080`.
  * @param {string} pathname Broker API path.
- * @param {{ method?: string, body?: unknown }=} options Request options.
+ * @param {{ method?: string, body?: unknown, timeoutMs?: number, signal?: AbortSignal }=} options Request options.
  * @returns {Promise<Record<string, unknown>>}
  */
 async function brokerJson(brokerUrl, pathname, options = {}) {
   const url = new URL(pathname, ensureTrailingSlash(brokerUrl));
   const requestBody = options.body === undefined ? undefined : JSON.stringify(options.body);
+  const method = options.method ?? 'GET';
+  const timeoutMs = options.timeoutMs ?? (method === 'GET' ? BROKER_PROBE_TIMEOUT_MS : BROKER_OPERATION_TIMEOUT_MS);
+  const signal = options.signal ?? requestSignalStorage.getStore();
   const { statusCode, text } = await new Promise((resolve, reject) => {
+    let settled = false;
+    let deadline;
+    const abortRequest = () => request.destroy(abortError('Broker request aborted'));
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      signal?.removeEventListener('abort', abortRequest);
+      callback(value);
+    };
     const request = http.request(url, {
-      method: options.method ?? 'GET',
+      method,
       headers: requestBody ? {
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(requestBody),
@@ -2674,13 +2715,20 @@ async function brokerJson(brokerUrl, pathname, options = {}) {
         responseText += chunk;
       });
       response.on('end', () => {
-        resolve({ statusCode: response.statusCode || 0, text: responseText });
+        finish(resolve, { statusCode: response.statusCode || 0, text: responseText });
       });
     });
+    deadline = setTimeout(() => {
+      request.destroy(timeoutError(`Broker request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    deadline.unref?.();
+    if (signal?.aborted) abortRequest();
+    else signal?.addEventListener('abort', abortRequest, { once: true });
     request.once('error', (cause) => {
       const error = new Error(`Broker is unreachable at ${brokerUrl}: ${cause?.message || 'request failed'}`);
       error.statusCode = 503;
-      reject(error);
+      error.code = cause?.code;
+      finish(reject, error);
     });
     request.end(requestBody);
   });
@@ -2696,6 +2744,36 @@ async function brokerJson(brokerUrl, pathname, options = {}) {
     throw error;
   }
   return payload;
+}
+
+function timeoutError(message) {
+  const error = new Error(message);
+  error.code = 'ETIMEDOUT';
+  error.statusCode = 504;
+  return error;
+}
+
+function abortError(message) {
+  const error = new Error(message);
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
+function closeHttpServer(server, graceMs) {
+  return new Promise((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    const forceClose = setTimeout(() => server.closeAllConnections?.(), graceMs);
+    forceClose.unref?.();
+    server.closeIdleConnections?.();
+    server.close((error) => {
+      clearTimeout(forceClose);
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 /**
@@ -3722,7 +3800,7 @@ function pwDevApi(serverUrl) {
       apps: { persistent: true, fields: ['id', 'name', 'worktree', 'branch', 'readme', 'accounts'] },
       proxies: { persistent: true, fields: ['id', 'appId', 'ruleset', 'proxyUrl'] },
       browserConfigs: { persistent: true, path: '/_pwdev/browser-configs', fields: ['id', 'name?', 'targetUrl?', 'brokerUrl?', 'profile?', 'ignoreSslErrors?', 'proxyBypassList?', 'headless?', 'resetProfile?'] },
-      remoteBrokers: { persistent: false, path: '/_pwdev/remote-brokers', fields: ['id?', 'target', 'repository?', 'worktree?', 'revision?', 'remotePort?', 'localPort?'] },
+      remoteBrokers: { persistent: false, path: '/_pwdev/remote-brokers', fields: ['id?', 'target', 'repository?', 'worktree?', 'revision?', 'remotePort?', 'localPort?', 'platform?'] },
       browsers: { persistent: true, path: '/_pwdev/browsers', fields: ['id', 'name?', 'browserConfigId', 'appId?', 'proxyId?', 'proxyIds?', 'profile?', 'readme?', 'sessionId?', 'occupancy?'] },
       sessions: { persistent: false, sourceOfTruth: 'broker', fields: ['sessionId', 'browserId?', 'browserConfigId?', 'appId?', 'scope?', 'profile?', 'browserInstanceId', 'cdpUrl', 'proxyId?', 'proxyLease?', 'lease?'] },
     },
@@ -3737,7 +3815,7 @@ function pwDevApi(serverUrl) {
       { method: 'GET', path: '/_pwdev/apps/:id/manifest', summary: 'Read an app attach manifest' },
       { method: 'GET|POST', path: '/_pwdev/browser-configs', summary: 'List or upsert browser configs', body: { required: ['id'], optional: ['targetUrl', 'brokerUrl', 'profile', 'ignoreSslErrors', 'proxyBypassList', 'headless', 'resetProfile'] } },
       { method: 'GET|DELETE', path: '/_pwdev/browser-configs/:id', summary: 'Get or delete browser config' },
-      { method: 'GET|POST', path: '/_pwdev/remote-brokers', summary: 'List or provision a remote broker SSH forward', body: { required: ['target'], optional: ['id', 'repository', 'worktree', 'revision', 'remotePort', 'localPort'] } },
+      { method: 'GET|POST', path: '/_pwdev/remote-brokers', summary: 'List or provision a remote broker SSH forward', body: { required: ['target'], optional: ['id', 'repository', 'worktree', 'revision', 'remotePort', 'localPort', 'platform'] } },
       { method: 'DELETE', path: '/_pwdev/remote-brokers/:id', summary: 'Release one server-owned local SSH forward' },
       { method: 'POST', path: '/_pwdev/remote-brokers/:id/disconnect', summary: 'Release one server-owned local SSH forward' },
       { method: 'POST', path: '/_pwdev/remote-brokers/:id/stop', summary: 'Release the forward and stop its remote broker' },

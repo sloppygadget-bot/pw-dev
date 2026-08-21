@@ -14,6 +14,7 @@ import { validateProfileName } from './profiles.js';
 const DEFAULT_BROKER_PORT = 18080;
 const DEFAULT_PROFILE = 'default';
 const DEFAULT_SSH_CONTROL_PERSIST = '24h';
+const SHUTDOWN_GRACE_MS = 1_000;
 
 export async function main(argv) {
   const options = parseArgs(argv);
@@ -103,7 +104,7 @@ export async function main(argv) {
     shuttingDown = true;
     if (signal) log(`Received ${signal}; shutting down.`);
     if (server) {
-      await new Promise((resolve) => server.close(resolve));
+      await closeHttpServer(server, SHUTDOWN_GRACE_MS);
     }
     await browserManager.stopAll();
     proxyForwardManager.stopAll();
@@ -201,6 +202,23 @@ export async function main(argv) {
       }
     });
   }
+}
+
+function closeHttpServer(server, graceMs) {
+  return new Promise((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    const forceClose = setTimeout(() => server.closeAllConnections?.(), graceMs);
+    forceClose.unref?.();
+    server.closeIdleConnections?.();
+    server.close((error) => {
+      clearTimeout(forceClose);
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 export function parseArgs(argv) {

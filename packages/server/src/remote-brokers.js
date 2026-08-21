@@ -1,10 +1,12 @@
-import { spawnSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdirSync, unlinkSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 
 const DEFAULT_REMOTE_REPOSITORY = 'https://github.com/sloppygadget-bot/pw-dev.git';
 const DEFAULT_REMOTE_WORKTREE = '.pw-dev/pw-dev';
@@ -14,7 +16,10 @@ const LOCAL_PORT_END = 18089;
 const RECONNECT_INITIAL_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 const HEALTH_CHECK_INTERVAL_MS = 10_000;
-const SSH_CONTROL_PERSIST = '24h';
+const SSH_COMMAND_TIMEOUT_MS = 30_000;
+const SSH_BOOTSTRAP_TIMEOUT_MS = 300_000;
+const FORWARD_STOP_GRACE_MS = 1_000;
+const LOCAL_PORT_RELEASE_TIMEOUT_MS = 2_000;
 const REPOSITORY_ROOT = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)));
 
 const REMOTE_BOOTSTRAP_SCRIPT = String.raw`set -eu
@@ -82,6 +87,15 @@ probe() {
   ' "$remote_port"
 }
 
+port_available() {
+  node -e '
+    const net = require("net");
+    const server = net.createServer();
+    server.once("error", () => process.exit(1));
+    server.listen(Number(process.argv[1]), "127.0.0.1", () => server.close(() => process.exit(0)));
+  ' "$remote_port"
+}
+
 pid_file="$worktree/.pw-dev-broker-$remote_port.pid"
 stop_managed_broker() {
   if [ ! -s "$pid_file" ]; then
@@ -140,20 +154,34 @@ if [ "$current_revision" != "$desired_revision" ]; then
 fi
 
 if ! probe; then
+  # A failed HTTP probe does not prove that the old process released its TCP
+  # listener. Stop a verifiably managed process before replacing it, and never
+  # overwrite its PID file with the PID of a replacement that cannot bind.
+  if [ -s "$pid_file" ]; then
+    stop_managed_broker
+  elif ! port_available; then
+    echo "remote port $remote_port is occupied by an unmanaged or unidentifiable process" >&2
+    exit 3
+  fi
   log="$worktree/.pw-dev-broker-$remote_port.log"
+  pending_pid_file="$pid_file.pending.$$"
   nohup node "$worktree/packages/cdp-broker/bin/pw-cdp-broker.js" \
     --standby --host 127.0.0.1 --port "$remote_port" >"$log" 2>&1 &
-  echo "$!" >"$pid_file"
+  broker_pid=$!
+  echo "$broker_pid" >"$pending_pid_file"
   started=true
   attempts=0
   while ! probe; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 30 ]; then
+      kill -TERM "$broker_pid" 2>/dev/null || true
+      rm -f "$pending_pid_file"
       echo "remote broker did not become ready; see $log" >&2
       exit 1
     fi
     sleep 1
   done
+  mv "$pending_pid_file" "$pid_file"
 fi
 
 printf 'worktree=%s\nremotePort=%s\nrevision=%s\nupdated=%s\nstarted=%s\n' "$worktree" "$remote_port" "$current_revision" "$updated" "$started"
@@ -201,33 +229,144 @@ rm -f "$pid_file"
 printf 'stopped=true\n'
 `;
 
+// Windows OpenSSH normally launches cmd.exe, so the Windows implementation is
+// sent as an encoded PowerShell command instead of relying on a POSIX shell.
+// The JSON payload is embedded as base64, keeping user-provided paths and URLs
+// out of the remote command line's quoting rules.
+const REMOTE_WINDOWS_BOOTSTRAP_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$worktree = [string]$pwDevPayload.worktree
+$remotePort = [int]$pwDevPayload.remotePort
+if (![IO.Path]::IsPathRooted($worktree)) { $worktree = Join-Path $HOME $worktree }
+if ($remotePort -lt 1 -or $remotePort -gt 65535) { throw 'remote broker port must be between 1 and 65535' }
+if (!(Get-Command node -ErrorAction SilentlyContinue)) { throw 'remote broker requires Node.js 18+' }
+$nodeMajor = [int]((& node -p "process.versions.node.split('.')[0]").Trim())
+if ($nodeMajor -lt 18) { throw 'remote broker requires Node.js 18+' }
+$broker = Join-Path $worktree 'packages\cdp-broker\bin\pw-cdp-broker.js'
+if (!(Test-Path -LiteralPath $broker)) { throw "remote pw-dev broker source was not copied: $broker" }
+$pidFile = Join-Path $worktree ".pw-dev-broker-$remotePort.pid"
+
+function Test-PwDevBroker {
+  & node -e 'const http=require("http");const r=http.get("http://127.0.0.1:"+process.argv[1]+"/_broker/status",x=>{x.resume();x.on("end",()=>process.exit(x.statusCode>=200&&x.statusCode<300?0:1))});r.on("error",()=>process.exit(1));r.setTimeout(1000,()=>r.destroy())' "$remotePort"
+  return $LASTEXITCODE -eq 0
+}
+
+function Stop-ManagedBroker {
+  if (!(Test-Path -LiteralPath $pidFile)) { throw "remote port $remotePort is unhealthy and has no pw-dev-managed pid file" }
+  $managedPidText = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+  $managedPid = [int]$managedPidText
+  $managed = Get-CimInstance Win32_Process -Filter "ProcessId = $managedPid" -ErrorAction SilentlyContinue
+  if ($managed) {
+    if (([string]$managed.CommandLine).IndexOf($broker, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "pid $managedPid is not the pw-dev broker in $worktree" }
+    Stop-Process -Id $managedPid -ErrorAction Stop
+    try { Wait-Process -Id $managedPid -Timeout 10 -ErrorAction Stop } catch { Stop-Process -Id $managedPid -Force -ErrorAction SilentlyContinue }
+  }
+  Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+}
+
+$started = $false
+if (!(Test-PwDevBroker)) {
+  if (Test-Path -LiteralPath $pidFile) { Stop-ManagedBroker }
+  $listener = $null
+  try {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $remotePort)
+    $listener.Start()
+  } catch {
+    throw "remote port $remotePort is occupied by an unmanaged or unidentifiable process"
+  } finally {
+    if ($listener) { $listener.Stop() }
+  }
+  $log = Join-Path $worktree ".pw-dev-broker-$remotePort.log"
+  $errorLog = Join-Path $worktree ".pw-dev-broker-$remotePort.error.log"
+  $brokerArgument = '"' + $broker.Replace('"', '\"') + '"'
+  $process = Start-Process -FilePath (Get-Command node).Source -ArgumentList @($brokerArgument, '--standby', '--host', '127.0.0.1', '--port', "$remotePort") -RedirectStandardOutput $log -RedirectStandardError $errorLog -WindowStyle Hidden -PassThru
+  $pendingPidFile = "$pidFile.pending.$PID"
+  Set-Content -LiteralPath $pendingPidFile -Value $process.Id -NoNewline
+  $ready = $false
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    if (Test-PwDevBroker) { $ready = $true; break }
+    Start-Sleep -Milliseconds 100
+  }
+  if (!$ready) {
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $pendingPidFile -Force -ErrorAction SilentlyContinue
+    throw "remote broker did not become ready; see $errorLog"
+  }
+  Move-Item -LiteralPath $pendingPidFile -Destination $pidFile -Force
+  $started = $true
+}
+Write-Output "started=$($started.ToString().ToLowerInvariant())"
+$managedPidText = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+$managedPid = [int]$managedPidText
+$managed = Get-CimInstance Win32_Process -Filter "ProcessId = $managedPid" -ErrorAction SilentlyContinue
+if (!$managed -or ([string]$managed.CommandLine).IndexOf($broker, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+  throw "pid $managedPid is not the pw-dev broker in $worktree"
+}
+# Keep the OpenSSH channel alive. Windows terminates remotely started child
+# processes with their session, so this foreground owner is intentional.
+Wait-Process -Id $managedPid
+`;
+
+const REMOTE_WINDOWS_STOP_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$worktree = [string]$pwDevPayload.worktree
+$remotePort = [int]$pwDevPayload.remotePort
+if (![IO.Path]::IsPathRooted($worktree)) { $worktree = Join-Path $HOME $worktree }
+$broker = Join-Path $worktree 'packages\cdp-broker\bin\pw-cdp-broker.js'
+$pidFile = Join-Path $worktree ".pw-dev-broker-$remotePort.pid"
+if (!(Test-Path -LiteralPath $pidFile)) { throw "no pw-dev-managed remote broker pid file: $pidFile" }
+$managedPidText = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+$managedPid = [int]$managedPidText
+$managed = Get-CimInstance Win32_Process -Filter "ProcessId = $managedPid" -ErrorAction SilentlyContinue
+if ($managed) {
+  if (([string]$managed.CommandLine).IndexOf($broker, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "pid $managedPid is not the pw-dev broker in $worktree" }
+  Stop-Process -Id $managedPid -ErrorAction Stop
+  try { Wait-Process -Id $managedPid -Timeout 10 -ErrorAction Stop } catch { Stop-Process -Id $managedPid -Force -ErrorAction SilentlyContinue }
+}
+Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+Write-Output 'stopped=true'
+`;
+
+const REMOTE_WINDOWS_PREPARE_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$worktree = [string]$pwDevPayload.worktree
+if (![IO.Path]::IsPathRooted($worktree)) { $worktree = Join-Path $HOME $worktree }
+New-Item -ItemType Directory -Force -Path (Join-Path $worktree 'packages') | Out-Null
+`;
+
 /**
  * Create the server-owned manager for remote brokers exposed through local SSH
  * forwards. Remote broker processes are deliberately not stopped on release:
  * they may serve another local forward or survive a pw-dev server restart.
  *
  * @param {{
- *   spawnSyncImpl?: typeof spawnSync,
+ *   spawnImpl?: typeof spawn,
+ *   runCommandImpl?: (command: string, args: string[], options?: Record<string, unknown>) => Promise<{ status: number | null, stdout?: string, stderr?: string, error?: Error }>,
  *   probe?: (brokerUrl: string) => Promise<void>,
  *   findLocalPort?: (start: number, end: number) => Promise<number>,
+ *   isLocalPortAvailable?: (port: number) => Promise<boolean>,
  *   now?: () => string,
  *   reconnectInitialDelayMs?: number,
  *   reconnectMaxDelayMs?: number,
  *   healthCheckIntervalMs?: number,
+ *   forwardStopGraceMs?: number,
+ *   localPortReleaseTimeoutMs?: number,
  *   localRevision?: string,
- *   controlPath?: string,
  * }=} options
  */
 export function createRemoteBrokerManager(options = {}) {
-  const spawnSyncImpl = options.spawnSyncImpl ?? spawnSync;
+  const spawnImpl = options.spawnImpl ?? spawn;
+  const runCommandImpl = options.runCommandImpl ?? ((command, args, commandOptions) => runCommand({ spawnImpl, command, args, ...commandOptions }));
   const probe = options.probe ?? probeBroker;
   const findLocalPort = options.findLocalPort ?? findAvailableLocalPort;
+  const isLocalPortAvailable = options.isLocalPortAvailable ?? canListen;
   const now = options.now ?? (() => new Date().toISOString());
   const reconnectInitialDelayMs = options.reconnectInitialDelayMs ?? RECONNECT_INITIAL_DELAY_MS;
   const reconnectMaxDelayMs = options.reconnectMaxDelayMs ?? RECONNECT_MAX_DELAY_MS;
   const healthCheckIntervalMs = options.healthCheckIntervalMs ?? HEALTH_CHECK_INTERVAL_MS;
+  const forwardStopGraceMs = options.forwardStopGraceMs ?? FORWARD_STOP_GRACE_MS;
+  const localPortReleaseTimeoutMs = options.localPortReleaseTimeoutMs ?? LOCAL_PORT_RELEASE_TIMEOUT_MS;
   const localRevision = options.localRevision ?? resolveLocalRevision();
-  const controlPath = options.controlPath ?? prepareSshControlPath();
   const records = new Map();
 
   return {
@@ -249,17 +388,15 @@ export function createRemoteBrokerManager(options = {}) {
         createdAt: now(),
         status: 'connecting',
         reconnectAttempts: 0,
-        controlPath,
+        controlPath: prepareSshControlPath(request.id, request.target),
         released: false,
+        generation: 0,
       };
       records.set(record.id, record);
       try {
-        await connect(record);
+        await connectSerialized(record);
       } catch (error) {
-        record.released = true;
-        clearTimeout(record.retryTimer);
-        clearInterval(record.healthTimer);
-        record.child?.kill?.('SIGTERM');
+        await releaseRecord(record);
         records.delete(record.id);
         throw error;
       }
@@ -270,7 +407,7 @@ export function createRemoteBrokerManager(options = {}) {
       const record = records.get(id);
       if (!record) return false;
       records.delete(id);
-      releaseRecord(record);
+      await releaseRecord(record);
       return true;
     },
 
@@ -278,8 +415,14 @@ export function createRemoteBrokerManager(options = {}) {
       const record = records.get(id);
       if (!record) return false;
       records.delete(id);
-      releaseRecord(record);
-      runRemoteStop({ spawnSyncImpl, ...record });
+      record.released = true;
+      clearTimeout(record.retryTimer);
+      clearTimeout(record.healthTimer);
+      try {
+        await runRemoteStop({ runCommandImpl, ...record });
+      } finally {
+        await releaseRecord(record);
+      }
       return true;
     },
 
@@ -290,22 +433,62 @@ export function createRemoteBrokerManager(options = {}) {
     },
   };
 
-  async function connect(record) {
+  function connectSerialized(record) {
+    if (record.connectPromise) return record.connectPromise;
+    const controller = new AbortController();
+    record.connectController = controller;
+    record.connectPromise = connect(record, controller.signal).finally(() => {
+      delete record.connectPromise;
+      if (record.connectController === controller) delete record.connectController;
+    });
+    return record.connectPromise;
+  }
+
+  async function connect(record, signal) {
     if (record.released) return;
     record.status = record.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
-    ensureSshControlMaster({ spawnSyncImpl, target: record.target, controlPath: record.controlPath, identityFile: record.identityFile });
-    const bootstrap = runRemoteBootstrap({ spawnSyncImpl, ...record });
-    if (bootstrap.revision) record.remoteRevision = bootstrap.revision;
-    if (bootstrap.updated !== undefined) record.remoteUpdated = bootstrap.updated === 'true';
-    requestSshLocalForward({ spawnSyncImpl, ...record });
+    await stopForward(record);
+    if (!await isLocalPortAvailable(record.localPort)) {
+      throw httpError(502, `Local broker port ${record.localPort} is still occupied after the previous SSH forward stopped`);
+    }
+    startForward(record);
     try {
-      await waitForForward({ probe, brokerUrl: record.brokerUrl });
+      await Promise.race([
+        waitForSshMaster({ runCommandImpl, signal, ...record }),
+        forwardExitError(record),
+      ]);
+      if (record.released) {
+        await stopForward(record);
+        return;
+      }
+      if (record.platform === 'auto') {
+        record.platform = await detectRemotePlatform({ runCommandImpl, signal, target: record.target, identityFile: record.identityFile, controlPath: record.controlPath });
+      }
+      if (record.platform === 'windows' && !record.windowsSourceCopied) {
+        await copyWindowsBrokerSource({ runCommandImpl, signal, ...record });
+        record.windowsSourceCopied = true;
+      }
+      let bootstrap = {};
+      if (record.platform === 'windows') {
+        await stopRemoteChild(record);
+        startWindowsRemoteChild(record);
+      } else {
+        bootstrap = await runRemoteBootstrap({ runCommandImpl, signal, ...record });
+      }
+      if (bootstrap.revision) record.remoteRevision = bootstrap.revision;
+      if (bootstrap.updated !== undefined) record.remoteUpdated = bootstrap.updated === 'true';
+      await Promise.race([
+        waitForForward({ probe, brokerUrl: record.brokerUrl }),
+        forwardExitError(record),
+        ...(record.remoteExit ? [remoteExitError(record)] : []),
+      ]);
     } catch (error) {
-      cancelSshLocalForward({ spawnSyncImpl, ...record, ignoreFailure: true });
+      await stopRemoteChild(record);
+      await stopForward(record);
       throw error;
     }
     if (record.released) {
-      cancelSshLocalForward({ spawnSyncImpl, ...record, ignoreFailure: true });
+      await stopForward(record);
       return;
     }
     record.status = 'ready';
@@ -314,8 +497,94 @@ export function createRemoteBrokerManager(options = {}) {
     startHealthCheck(record);
   }
 
+  function startForward(record) {
+    removeControlSocket(record.controlPath);
+    const generation = ++record.generation;
+    const child = spawnImpl('ssh', buildSshLocalForwardArgs(record), {
+      stdio: ['inherit', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+    const exit = deferred();
+    let stderr = '';
+    child.stderr?.on?.('data', (chunk) => {
+      stderr = `${stderr}${chunk}`.slice(-8_192);
+    });
+    child.once('error', (error) => exit.resolve({ code: null, signal: null, stderr: error.message }));
+    child.once('exit', (code, signal) => exit.resolve({ code, signal, stderr: stderr.trim() }));
+    record.forwardChild = child;
+    record.forwardExit = exit;
+    exit.promise.then(({ code, signal, stderr: detail }) => {
+      if (record.released || record.generation !== generation || record.forwardChild !== child) return;
+      record.forwardChild = undefined;
+      beginReconnect(record, `SSH local forward exited: code=${code} signal=${signal}${detail ? `: ${detail}` : ''}`);
+    });
+  }
+
+  function forwardExitError(record) {
+    return record.forwardExit.promise.then(({ code, signal, stderr }) => {
+      throw httpError(502, `SSH local forward exited before becoming ready: code=${code} signal=${signal}${stderr ? `: ${stderr}` : ''}`);
+    });
+  }
+
+  function startWindowsRemoteChild(record) {
+    const child = spawnImpl('ssh', buildSshRemoteBrokerBootstrapArgs({ ...record, platform: 'windows' }), {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+    const exit = deferred();
+    let stderr = '';
+    child.stderr?.on?.('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-8_192); });
+    child.once('error', (error) => exit.resolve({ code: null, signal: null, stderr: error.message }));
+    child.once('exit', (code, signal) => exit.resolve({ code, signal, stderr: stderr.trim() }));
+    record.remoteChild = child;
+    record.remoteExit = exit;
+  }
+
+  function remoteExitError(record) {
+    return record.remoteExit.promise.then(({ code, signal, stderr }) => {
+      throw httpError(502, `Windows remote broker SSH process exited before readiness: code=${code} signal=${signal}${stderr ? `: ${stderr}` : ''}`);
+    });
+  }
+
+  async function stopRemoteChild(record) {
+    const child = record.remoteChild;
+    const exit = record.remoteExit;
+    record.remoteChild = undefined;
+    record.remoteExit = undefined;
+    if (child) await stopChild(child, forwardStopGraceMs, exit?.promise);
+  }
+
+  async function stopForward(record) {
+    const child = record.forwardChild;
+    const exit = record.forwardExit;
+    record.generation += 1;
+    record.forwardChild = undefined;
+    record.forwardExit = undefined;
+    if (child) await stopChild(child, forwardStopGraceMs, exit?.promise);
+    removeControlSocket(record.controlPath);
+    if (!await waitForLocalPortAvailable(record.localPort, isLocalPortAvailable, localPortReleaseTimeoutMs)) {
+      throw httpError(502, `SSH local forward did not release local port ${record.localPort}`);
+    }
+  }
+
+  function beginReconnect(record, message) {
+    if (record.released || record.recoveryPromise) return;
+    record.status = 'reconnecting';
+    record.lastError = message;
+    clearTimeout(record.healthTimer);
+    record.healthTimer = undefined;
+    record.recoveryPromise = stopForward(record)
+      .catch((error) => {
+        record.lastError = error?.message || message;
+      })
+      .finally(() => {
+        delete record.recoveryPromise;
+        scheduleReconnect(record);
+      });
+  }
+
   function scheduleReconnect(record) {
-    if (record.released || record.retryTimer) return;
+    if (record.released || record.retryTimer || record.connectPromise) return;
     const delayMs = Math.min(
       reconnectInitialDelayMs * (2 ** record.reconnectAttempts),
       reconnectMaxDelayMs
@@ -325,7 +594,7 @@ export function createRemoteBrokerManager(options = {}) {
       record.retryTimer = undefined;
       if (record.released) return;
       try {
-        await connect(record);
+        await connectSerialized(record);
       } catch (error) {
         record.status = 'reconnecting';
         record.lastError = error?.message || 'SSH reconnection failed';
@@ -336,30 +605,30 @@ export function createRemoteBrokerManager(options = {}) {
   }
 
   function startHealthCheck(record) {
-    clearInterval(record.healthTimer);
-    let checking = false;
-    record.healthTimer = setInterval(async () => {
-      if (checking || record.released) return;
-      checking = true;
+    clearTimeout(record.healthTimer);
+    record.healthTimer = setTimeout(async () => {
+      record.healthTimer = undefined;
+      if (record.released || record.status !== 'ready') return;
       try {
         await probe(record.brokerUrl);
       } catch (error) {
-        record.status = 'reconnecting';
-        record.lastError = `Remote broker health check failed: ${error?.message || 'unreachable'}`;
-        cancelSshLocalForward({ spawnSyncImpl, ...record, ignoreFailure: true });
-        scheduleReconnect(record);
-      } finally {
-        checking = false;
+        beginReconnect(record, `Remote broker health check failed: ${error?.message || 'unreachable'}`);
+        return;
       }
+      startHealthCheck(record);
     }, healthCheckIntervalMs);
     record.healthTimer.unref?.();
   }
 
-  function releaseRecord(record) {
+  async function releaseRecord(record) {
     record.released = true;
     clearTimeout(record.retryTimer);
-    clearInterval(record.healthTimer);
-    cancelSshLocalForward({ spawnSyncImpl, ...record, ignoreFailure: true });
+    clearTimeout(record.healthTimer);
+    record.connectController?.abort();
+    await record.recoveryPromise?.catch?.(() => undefined);
+    if (record.connectPromise) await settlesWithin(record.connectPromise, forwardStopGraceMs + 1_000);
+    await stopRemoteChild(record);
+    await stopForward(record);
   }
 }
 
@@ -367,25 +636,36 @@ export function createRemoteBrokerManager(options = {}) {
  * Build the non-interactive remote setup command. Arguments are passed to
  * remote `sh -s` positionally, never interpolated into shell source.
  */
-export function buildSshRemoteBrokerBootstrapArgs({ target, repository, worktree, remotePort, revision, controlPath }) {
+export function buildSshRemoteBrokerBootstrapArgs({ target, repository, worktree, remotePort, revision, identityFile, controlPath, platform = 'linux' }) {
+  if (platform === 'windows') {
+    return buildSshWindowsCommandArgs({ target, identityFile, controlPath, script: REMOTE_WINDOWS_BOOTSTRAP_SCRIPT, payload: { worktree, remotePort } });
+  }
   return [
-    ...(controlPath ? ['-o', `ControlPath=${controlPath}`] : []),
+    ...sshCommandConnectionArgs({ identityFile, controlPath }),
     '--', target, 'sh', '-s', '--', repository, worktree, String(remotePort), revision,
   ];
 }
 
-export function buildSshRemoteBrokerStopArgs({ target, worktree, remotePort, controlPath }) {
+export function buildSshRemoteBrokerStopArgs({ target, worktree, remotePort, identityFile, controlPath, platform = 'linux' }) {
+  if (platform === 'windows') {
+    return buildSshWindowsCommandArgs({ target, identityFile, controlPath, script: REMOTE_WINDOWS_STOP_SCRIPT, payload: { worktree, remotePort } });
+  }
   return [
-    ...(controlPath ? ['-o', `ControlPath=${controlPath}`] : []),
+    ...sshCommandConnectionArgs({ identityFile, controlPath }),
     '--', target, 'sh', '-s', '--', worktree, String(remotePort),
   ];
 }
 
 /** Build the local-only SSH forward from a remote broker to localhost. */
-export function buildSshLocalForwardArgs({ target, localPort, remotePort, controlPath }) {
+export function buildSshLocalForwardArgs({ target, localPort, remotePort, identityFile, controlPath }) {
   return [
-    '-O', 'forward',
-    ...(controlPath ? ['-o', `ControlPath=${controlPath}`] : []),
+    '-N',
+    ...(controlPath ? ['-o', 'ControlMaster=yes', '-o', 'ControlPersist=no', '-o', `ControlPath=${controlPath}`] : []),
+    '-o', 'ExitOnForwardFailure=yes',
+    '-o', 'ConnectTimeout=10',
+    '-o', 'ServerAliveInterval=15',
+    '-o', 'ServerAliveCountMax=2',
+    ...sshIdentityArgs(identityFile),
     '-L', `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`,
     '--',
     target,
@@ -402,16 +682,16 @@ export function buildSshLocalForwardCancelArgs({ target, localPort, remotePort, 
   ];
 }
 
-function runRemoteBootstrap({ spawnSyncImpl, target, repository, worktree, remotePort, revision, controlPath }) {
-  const result = spawnSyncImpl(
+async function runRemoteBootstrap({ runCommandImpl, signal, target, repository, worktree, remotePort, revision, identityFile, controlPath, platform }) {
+  const result = await runCommandImpl(
     'ssh',
-    buildSshRemoteBrokerBootstrapArgs({ target, repository, worktree, remotePort, revision, controlPath }),
+    buildSshRemoteBrokerBootstrapArgs({ target, repository, worktree, remotePort, revision, identityFile, controlPath, platform }),
     {
       input: REMOTE_BOOTSTRAP_SCRIPT,
-      encoding: 'utf8',
+      signal,
       // A first-time Node download through NVM can take longer than ordinary
       // broker startup, especially on a fresh remote host.
-      timeout: 300_000,
+      timeoutMs: SSH_BOOTSTRAP_TIMEOUT_MS,
     }
   );
   if (result.error) throw httpError(502, `SSH setup failed: ${result.error.message}`);
@@ -422,14 +702,37 @@ function runRemoteBootstrap({ spawnSyncImpl, target, repository, worktree, remot
   return parseKeyValueOutput(result.stdout);
 }
 
-function runRemoteStop({ spawnSyncImpl, target, worktree, remotePort, controlPath }) {
-  const result = spawnSyncImpl(
+async function copyWindowsBrokerSource({ runCommandImpl, signal, target, worktree, identityFile, controlPath }) {
+  const prepared = await runCommandImpl('ssh', buildSshWindowsCommandArgs({
+    target,
+    identityFile,
+    controlPath,
+    script: REMOTE_WINDOWS_PREPARE_SCRIPT,
+    payload: { worktree },
+  }), { timeoutMs: SSH_COMMAND_TIMEOUT_MS, signal });
+  if (prepared.error || prepared.status !== 0) {
+    const detail = String(prepared.error?.message || prepared.stderr || prepared.stdout || '').trim();
+    throw httpError(502, `Windows source-copy preparation failed${detail ? `: ${detail}` : ''}`);
+  }
+  const result = await runCommandImpl('scp', [
+    '-r', '-p',
+    ...sshCommandConnectionArgs({ identityFile, controlPath }),
+    path.join(REPOSITORY_ROOT, 'packages', 'cdp-broker'),
+    `${target}:${worktree.replaceAll('\\', '/')}/packages`,
+  ], { timeoutMs: SSH_BOOTSTRAP_TIMEOUT_MS, signal });
+  if (result.error || result.status !== 0) {
+    const detail = String(result.error?.message || result.stderr || result.stdout || '').trim();
+    throw httpError(502, `Windows source copy failed${detail ? `: ${detail}` : ''}`);
+  }
+}
+
+async function runRemoteStop({ runCommandImpl, target, worktree, remotePort, identityFile, controlPath, platform }) {
+  const result = await runCommandImpl(
     'ssh',
-    buildSshRemoteBrokerStopArgs({ target, worktree, remotePort, controlPath }),
+    buildSshRemoteBrokerStopArgs({ target, worktree, remotePort, identityFile, controlPath, platform }),
     {
-      input: REMOTE_STOP_SCRIPT,
-      encoding: 'utf8',
-      timeout: 30_000,
+      ...(platform === 'windows' ? {} : { input: REMOTE_STOP_SCRIPT }),
+      timeoutMs: SSH_COMMAND_TIMEOUT_MS,
     }
   );
   if (result.error) throw httpError(502, `SSH remote broker stop failed: ${result.error.message}`);
@@ -437,30 +740,6 @@ function runRemoteStop({ spawnSyncImpl, target, worktree, remotePort, controlPat
     const detail = String(result.stderr || result.stdout || '').trim();
     throw httpError(result.status === 3 ? 409 : 502, `Remote broker stop failed${detail ? `: ${detail}` : ''}`);
   }
-}
-
-function requestSshLocalForward({ spawnSyncImpl, target, localPort, remotePort, controlPath }) {
-  const result = spawnSyncImpl(
-    'ssh',
-    buildSshLocalForwardArgs({ target, localPort, remotePort, controlPath }),
-    { encoding: 'utf8', timeout: 30_000 }
-  );
-  if (result.error) throw httpError(502, `SSH local forward failed: ${result.error.message}`);
-  if (result.status !== 0) {
-    const detail = String(result.stderr || result.stdout || '').trim();
-    throw httpError(502, `SSH local forward failed${detail ? `: ${detail}` : ''}`);
-  }
-}
-
-function cancelSshLocalForward({ spawnSyncImpl, target, localPort, remotePort, controlPath, ignoreFailure = false }) {
-  const result = spawnSyncImpl(
-    'ssh',
-    buildSshLocalForwardCancelArgs({ target, localPort, remotePort, controlPath }),
-    { encoding: 'utf8', timeout: 30_000 }
-  );
-  if (ignoreFailure || result.status === 0) return;
-  const detail = String(result.stderr || result.stdout || '').trim();
-  throw httpError(502, `SSH local forward release failed${detail ? `: ${detail}` : ''}`);
 }
 
 function validateProvisionRequest(raw, localRevision) {
@@ -492,10 +771,17 @@ function validateProvisionRequest(raw, localRevision) {
       ? requiredRevision(localRevision)
       : requiredRevision(raw.revision),
     ...(raw.identityFile ? { identityFile: requiredString(raw.identityFile, 'identityFile') } : {}),
+    platform: optionalPlatform(raw.platform),
     remotePort,
     localPort,
     connectionDirection: 'outward',
   };
+}
+
+function optionalPlatform(value) {
+  if (value === undefined) return 'auto';
+  if (value === 'auto' || value === 'linux' || value === 'windows') return value;
+  throw httpError(400, 'platform must be "auto", "linux", or "windows"');
 }
 
 function requiredRevision(value) {
@@ -537,30 +823,66 @@ function resolveLocalRevision() {
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
-function prepareSshControlPath() {
+function prepareSshControlPath(id, target) {
   const controlDir = path.join(os.homedir(), '.pw-dev', 'ssh');
   mkdirSync(controlDir, { recursive: true, mode: 0o700 });
-  return path.join(controlDir, '%C');
+  const digest = createHash('sha256').update(`${id}\0${target}`).digest('hex').slice(0, 16);
+  return path.join(controlDir, `remote-${process.pid}-${digest}.sock`);
 }
 
-function ensureSshControlMaster({ spawnSyncImpl, target, controlPath, identityFile }) {
-  const result = spawnSyncImpl('ssh', [
-    '-o', 'ControlMaster=auto',
-    '-o', `ControlPersist=${SSH_CONTROL_PERSIST}`,
-    '-o', `ControlPath=${controlPath}`,
-    '-o', 'ConnectTimeout=10',
-    '-o', 'ServerAliveInterval=15',
-    '-o', 'ServerAliveCountMax=2',
-    ...(identityFile ? ['-i', identityFile, '-o', 'IdentitiesOnly=yes'] : []),
-    '-N',
-    '-f',
-    '--',
-    target,
-  ], {
-    stdio: 'inherit',
-  });
-  if (result.error) throw httpError(502, `SSH control master failed: ${result.error.message}`);
-  if (result.status !== 0) throw httpError(502, `SSH control master exited with status ${result.status}`);
+function removeControlSocket(controlPath) {
+  if (!controlPath) return;
+  try {
+    unlinkSync(controlPath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+async function detectRemotePlatform({ runCommandImpl, signal, target, identityFile, controlPath }) {
+  const options = { timeoutMs: 15_000, signal };
+  const linux = await runCommandImpl('ssh', [
+    ...sshCommandConnectionArgs({ identityFile, controlPath }), '--', target, 'uname', '-s',
+  ], options);
+  if (linux.status === 0 && /linux|darwin|freebsd|openbsd|netbsd/i.test(String(linux.stdout))) return 'linux';
+  const windows = await runCommandImpl('ssh', [
+    // `ver` is a cmd.exe built-in. Sending it directly avoids OpenSSH's
+    // Windows command-line re-quoting of `cmd /c ver`.
+    ...sshCommandConnectionArgs({ identityFile, controlPath }), '--', target, 'ver',
+  ], options);
+  if (windows.status === 0 && /windows/i.test(String(windows.stdout))) return 'windows';
+  const detail = String(windows.stderr || windows.stdout || linux.stderr || linux.stdout || '').trim();
+  throw httpError(502, `Unable to detect remote platform${detail ? `: ${detail}` : ''}; set platform to "linux" or "windows"`);
+}
+
+function buildWindowsPowerShellCommand(script, payload) {
+  const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
+  const source = `$pwDevPayload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPayload}')) | ConvertFrom-Json\n${script}`;
+  // Windows' legacy command line is limited to 8,191 characters. Compress the
+  // UTF-16 script before wrapping it in -EncodedCommand so OpenSSH can invoke
+  // even the full bootstrap without exceeding that limit.
+  const compressed = gzipSync(Buffer.from(source, 'utf16le')).toString('base64');
+  const launcher = `$bytes=[Convert]::FromBase64String('${compressed}');$input=New-Object IO.MemoryStream(,$bytes);$gzip=New-Object IO.Compression.GzipStream($input,[IO.Compression.CompressionMode]::Decompress);$reader=New-Object IO.StreamReader($gzip,[Text.Encoding]::Unicode);Invoke-Expression $reader.ReadToEnd()`;
+  return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ${launcher}`;
+}
+
+function buildSshWindowsCommandArgs({ target, identityFile, controlPath, script, payload }) {
+  return [
+    ...sshCommandConnectionArgs({ identityFile, controlPath }),
+    '--', target,
+    buildWindowsPowerShellCommand(script, payload),
+  ];
+}
+
+function sshIdentityArgs(identityFile) {
+  return identityFile ? ['-i', identityFile, '-o', 'IdentitiesOnly=yes'] : [];
+}
+
+function sshCommandConnectionArgs({ identityFile, controlPath }) {
+  return [
+    ...(controlPath ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`] : []),
+    ...sshIdentityArgs(identityFile),
+  ];
 }
 
 function parseKeyValueOutput(output) {
@@ -570,6 +892,22 @@ function parseKeyValueOutput(output) {
     if (index > 0) values[line.slice(0, index)] = line.slice(index + 1);
   }
   return values;
+}
+
+async function waitForSshMaster({ runCommandImpl, signal, target, controlPath, identityFile }) {
+  let lastResult;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (signal?.aborted) throw abortError('SSH connection setup aborted');
+    lastResult = await runCommandImpl('ssh', [
+      '-O', 'check',
+      ...sshCommandConnectionArgs({ identityFile, controlPath }),
+      '--', target,
+    ], { timeoutMs: 1_000, signal });
+    if (lastResult.status === 0) return;
+    await delay(250);
+  }
+  const detail = String(lastResult?.error?.message || lastResult?.stderr || lastResult?.stdout || '').trim();
+  throw httpError(502, `SSH forwarding connection did not become ready${detail ? `: ${detail}` : ''}`);
 }
 
 async function waitForForward({ probe, brokerUrl }) {
@@ -582,6 +920,102 @@ async function waitForForward({ probe, brokerUrl }) {
     }
   }
   throw httpError(502, `Remote broker is not reachable through ${brokerUrl}`);
+}
+
+async function waitForLocalPortAvailable(port, check, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await check(port)) return true;
+    await delay(25);
+  } while (Date.now() < deadline);
+  return false;
+}
+
+function isChildRunning(child) {
+  return Boolean(child && child.exitCode === null && child.signalCode === null && !child.killed);
+}
+
+async function stopChild(child, graceMs, exitPromise) {
+  if (!isChildRunning(child)) return;
+  const exited = exitPromise ?? new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGTERM');
+  if (await settlesWithin(exited, graceMs)) return;
+  child.kill('SIGKILL');
+  await settlesWithin(exited, Math.max(100, graceMs));
+}
+
+async function settlesWithin(promise, timeoutMs) {
+  return Promise.race([
+    Promise.resolve(promise).then(() => true, () => true),
+    delay(timeoutMs).then(() => false),
+  ]);
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function runCommand({ spawnImpl, command, args, input, timeoutMs = SSH_COMMAND_TIMEOUT_MS, signal }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    let deadline;
+    let forceKill;
+    let terminalError;
+    let abortCommand;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(forceKill);
+      if (abortCommand) signal?.removeEventListener('abort', abortCommand);
+      resolve({ stdout, stderr, ...result });
+    };
+    let child;
+    try {
+      child = spawnImpl(command, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({ status: null, error });
+      return;
+    }
+    child.stdout?.on?.('data', (chunk) => { stdout += chunk; });
+    child.stderr?.on?.('data', (chunk) => { stderr += chunk; });
+    child.once('error', (error) => finish({ status: null, error }));
+    child.once('close', (status, signal) => finish({ status, signal, ...(terminalError ? { error: terminalError } : {}) }));
+    const terminate = (error) => {
+      if (terminalError) return;
+      terminalError = error;
+      child.kill?.('SIGTERM');
+      forceKill = setTimeout(() => {
+        child.kill?.('SIGKILL');
+        finish({ status: null, error: terminalError });
+      }, 1_000);
+      forceKill.unref?.();
+    };
+    deadline = setTimeout(() => {
+      const error = new Error(`${command} timed out after ${timeoutMs}ms`);
+      error.code = 'ETIMEDOUT';
+      terminate(error);
+    }, timeoutMs);
+    deadline.unref?.();
+    abortCommand = () => terminate(abortError(`${command} aborted`));
+    if (signal?.aborted) abortCommand();
+    else signal?.addEventListener('abort', abortCommand, { once: true });
+    if (input === undefined) child.stdin?.end?.();
+    else child.stdin?.end?.(input);
+  });
+}
+
+function abortError(message) {
+  const error = new Error(message);
+  error.code = 'ABORT_ERR';
+  return error;
 }
 
 function probeBroker(brokerUrl) {
@@ -614,7 +1048,7 @@ function canListen(port) {
   });
 }
 
-function publicRecord({ child, retryTimer, healthTimer, released, controlPath, ...record }) {
+function publicRecord({ forwardChild, forwardExit, remoteChild, remoteExit, retryTimer, healthTimer, recoveryPromise, connectPromise, connectController, released, generation, windowsSourceCopied, controlPath, ...record }) {
   return record;
 }
 

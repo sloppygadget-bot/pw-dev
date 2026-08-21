@@ -46,32 +46,41 @@ export function buildChromeArgs({
   return args;
 }
 
-export function findChromeExecutable(explicitPath) {
-  if (explicitPath && fs.existsSync(explicitPath)) return explicitPath;
+export function findChromeExecutable(explicitPath, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const existsSync = options.existsSync ?? fs.existsSync;
+  if (explicitPath && existsSync(explicitPath)) return explicitPath;
 
-  const names = process.platform === 'darwin' ? MAC_EXECUTABLES : LINUX_EXECUTABLES;
-  for (const candidate of names) {
-    if (path.isAbsolute(candidate)) {
-      if (fs.existsSync(candidate)) return candidate;
-      continue;
-    }
-    const resolved = spawnSync('which', [candidate], { encoding: 'utf8' });
-    if (resolved.status === 0 && resolved.stdout.trim()) {
-      return resolved.stdout.trim().split(/\r?\n/)[0];
+  if (platform !== 'win32') {
+    const names = platform === 'darwin' ? MAC_EXECUTABLES : LINUX_EXECUTABLES;
+    for (const candidate of names) {
+      if (path.isAbsolute(candidate)) {
+        if (existsSync(candidate)) return candidate;
+        continue;
+      }
+      const resolved = spawnSync('which', [candidate], { encoding: 'utf8' });
+      if (resolved.status === 0 && resolved.stdout.trim()) {
+        return resolved.stdout.trim().split(/\r?\n/)[0];
+      }
     }
   }
 
-  if (process.platform === 'win32') {
-    const local = process.env.LOCALAPPDATA;
-    const programFiles = process.env.PROGRAMFILES;
-    const programFilesX86 = process.env['PROGRAMFILES(X86)'];
+  if (platform === 'win32') {
+    const local = env.LOCALAPPDATA;
+    const programFiles = env.PROGRAMFILES;
+    const programFilesX86 = env['PROGRAMFILES(X86)'];
+    const join = path.win32.join;
     const windowsCandidates = [
-      local && path.join(local, 'Google\\Chrome\\Application\\chrome.exe'),
-      programFiles && path.join(programFiles, 'Google\\Chrome\\Application\\chrome.exe'),
-      programFilesX86 && path.join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
+      local && join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      programFiles && join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      programFilesX86 && join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      local && join(local, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      programFiles && join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      programFilesX86 && join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     ].filter(Boolean);
     for (const candidate of windowsCandidates) {
-      if (fs.existsSync(candidate)) return candidate;
+      if (existsSync(candidate)) return candidate;
     }
   }
 
@@ -104,7 +113,12 @@ export async function waitForChrome({
 
   while (Date.now() < deadline) {
     try {
-      await httpGetJson({ host, port, path: '/json/version' });
+      await httpGetJson({
+        host,
+        port,
+        path: '/json/version',
+        timeoutMs: Math.max(1, Math.min(1000, deadline - Date.now())),
+      });
       return;
     } catch (error) {
       lastError = error;
@@ -122,7 +136,7 @@ export function brokerHome() {
   return path.join(os.homedir(), '.pw-cdp-broker');
 }
 
-function httpGetJson({ host, port, path: requestPath }) {
+function httpGetJson({ host, port, path: requestPath, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const request = http.request(
       {
@@ -150,6 +164,9 @@ function httpGetJson({ host, port, path: requestPath }) {
         });
       }
     );
+    request.setTimeout(timeoutMs, () => {
+      request.destroy(new Error(`HTTP request timed out after ${timeoutMs}ms`));
+    });
     request.once('error', reject);
     request.end();
   });

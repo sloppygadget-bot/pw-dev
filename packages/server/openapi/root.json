@@ -12,7 +12,7 @@
     { "id": "apps", "url": "/_pwdev/openapi/apps.json", "whenToUse": "List, register, or inspect apps." },
     { "id": "browserConfigs", "url": "/_pwdev/openapi/browser-configs.json", "whenToUse": "Create or inspect reusable Chrome launch configuration." },
     { "id": "browsers", "url": "/_pwdev/openapi/browsers.json", "whenToUse": "Create, reuse, start, stop, or destroy a browser." },
-    { "id": "remoteBrokers", "url": "/_pwdev/openapi/remote-brokers.json", "whenToUse": "Provision a remote Linux broker over SSH and expose it through a server-owned local forward." },
+    { "id": "remoteBrokers", "url": "/_pwdev/openapi/remote-brokers.json", "whenToUse": "Provision a remote Linux or Windows broker over SSH and expose it through a server-owned local forward." },
     { "id": "sshAssets", "url": "/_pwdev/openapi/ssh-assets.json", "whenToUse": "Manage remote hosts and redacted, server-stored SSH key assets." },
     { "id": "sessions", "url": "/_pwdev/openapi/sessions.json", "whenToUse": "Inspect or stop a live browser session." },
     { "id": "proxies", "url": "/_pwdev/openapi/proxies.json", "whenToUse": "Register proxy metadata or read captured proxy traffic." }

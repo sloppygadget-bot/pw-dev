@@ -43,10 +43,11 @@ Use `--broker-url` only when the broker runs somewhere else. If the default or
 configured broker is not reachable, `GET /_pwdev/status` reports
 `reachable: false` and browser lifecycle routes return `503`.
 
-## Remote Linux Brokers
+## Remote Brokers
 
-The server can provision a broker on a Linux SSH peer and keep a local forward
-healthy. Store a key and remote host first; key reads return only metadata and
+The server can provision a broker on a Linux or Windows SSH peer and keep a local forward
+healthy. It auto-detects the remote OS over SSH; pass `platform: "linux"` or
+`platform: "windows"` only when auto-detection is unavailable. Store a key and remote host first; key reads return only metadata and
 the private key is written owner-only under `.pw-dev/ssh-keys/`.
 
 ```bash
@@ -62,20 +63,27 @@ reused. An update stops and restarts only the pw-dev-managed broker, and a
 dirty checkout or unmanaged running broker fails safely instead of being
 overwritten.
 
-Remote setup requires Node 18+. When the default `node` is older, pw-dev
+Remote setup requires Node 18+. Linux provisioning also requires Git; when the default `node` is older, pw-dev
 loads `~/.nvm/nvm.sh`; if NVM is absent, it installs pinned NVM
 `v0.40.6` with the official installer (without editing shell profiles), then
-installs and selects Node 18 for the broker process.
+installs and selects Node 18 for the broker process. Windows hosts must already
+have Node 18+ available in the OpenSSH user's PATH. pw-dev copies the local
+`packages/cdp-broker` source over SCP, records and verifies its PID, and keeps
+the broker owned by a foreground SSH channel; it does not run Git, install a
+service, or create a scheduled task on the Windows host. Releasing the record
+or restarting the pw-dev server stops that Windows broker.
 
 The response contains `remoteBroker.brokerUrl`, such as
 `http://127.0.0.1:18083`. This is a loopback-only SSH forward; it selects an
 available local port from `18080` through `18089` unless `localPort` is
 supplied. Use it as a browser config's advanced `brokerUrl` override.
 
-The server sends SSH keepalives and actively probes `/_broker/status`. A
+Each remote-broker record owns an isolated SSH forwarding process. The server
+sends SSH keepalives and actively probes `/_broker/status`. A
 powered-off host, network failure, or zombie/half-open forward moves the
-record to `reconnecting` and retries with backoff until it recovers or is
-explicitly released:
+record to `reconnecting`; the old forwarding process is terminated, its local
+port is verified free, and retries continue with backoff until recovery or
+explicit release. SSH recovery never blocks the server event loop:
 
 ```bash
 curl http://127.0.0.1:9696/_pwdev/remote-brokers
@@ -90,13 +98,14 @@ loopback-only port on the pw-dev server. Thus `localPort: 18081` and
 Manage the durable assets with `POST/GET/DELETE /_pwdev/ssh-keys` and
 `POST/GET/DELETE /_pwdev/remote-hosts`. Posting a private key with an existing
 key ID rotates it in place; remote hosts retain their key reference. Re-provision
-or reconnect a remote broker after rotation so its SSH control master uses it.
+or reconnect a remote broker after rotation so its replacement forwarding process uses it.
 
-`disconnect` (or `DELETE /_pwdev/remote-brokers/:id`) releases only the local
-forward. `stop` releases it and sends `SIGTERM` only when the remote pid file
-verifies that the process is the pw-dev-managed broker. The server uses the
-stored key file only for the SSH control master; private-key content is never
-returned by the API or GUI.
+`disconnect` (or `DELETE /_pwdev/remote-brokers/:id`) releases the local
+forward; Linux brokers remain available remotely, while the foreground Windows
+broker exits with its owned SSH channel. `stop` releases the forward and
+terminates the remote process only when its PID file verifies that the process
+is the pw-dev-managed broker. The server passes the stored key file to every
+SSH and SCP process; private-key content is never returned by the API or GUI.
 
 The app registry persists in `<worktree>/.pw-dev/apps.json` by default. Pass
 `--app-registry-file <file>` to place it elsewhere. Browser sessions are

@@ -50,6 +50,29 @@ test('rewrites debugger urls under an instance-scoped broker path', () => {
   );
 });
 
+test('returns a bounded error when Chrome accepts but never responds', async () => {
+  const chrome = http.createServer(() => {});
+  const chromeListener = await listen(chrome);
+  const server = createBrokerServer({
+    chromeRequestTimeoutMs: 50,
+    browserManager: {
+      activeInstance: () => ({ chromeHost: '127.0.0.1', chromePort: chromeListener.port }),
+    },
+  });
+  const broker = await listen(server);
+  try {
+    const startedAt = Date.now();
+    const response = await requestJson({ port: broker.port, method: 'GET', path: '/json/version' });
+    assert.equal(response.statusCode, 504);
+    assert.match(response.body.error, /timed out after 50ms/);
+    assert.ok(Date.now() - startedAt < 1_000);
+  } finally {
+    await broker.close();
+    chrome.closeAllConnections?.();
+    await chromeListener.close();
+  }
+});
+
 test('start control route returns an instance-scoped CDP URL', async () => {
   const starts = [];
   const server = createBrokerServer({

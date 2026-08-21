@@ -5,8 +5,9 @@ import path from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 
 const BROKER_PACKAGE_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+const CHROME_HTTP_TIMEOUT_MS = 10_000;
 
-export function createBrokerServer({ browserManager, proxyForwardManager, networkManager, topology } = {}) {
+export function createBrokerServer({ browserManager, proxyForwardManager, networkManager, topology, chromeRequestTimeoutMs = CHROME_HTTP_TIMEOUT_MS } = {}) {
   const brokerTopology = normalizeBrokerTopology(topology);
   const server = http.createServer(async (req, res) => {
     try {
@@ -38,9 +39,9 @@ export function createBrokerServer({ browserManager, proxyForwardManager, networ
       }
 
       const route = resolveCdpRoute({ url: req.url, browserManager });
-      await proxyHttpRequest({ req, res, route });
+      await proxyHttpRequest({ req, res, route, timeoutMs: chromeRequestTimeoutMs });
     } catch (error) {
-      writeError(res, error);
+      if (!res.destroyed) writeError(res, error);
     }
   });
 
@@ -351,10 +352,11 @@ function rewriteWebSocketUrl(rawUrl, brokerBaseUrl) {
   return source.toString();
 }
 
-async function proxyHttpRequest({ req, res, route }) {
+async function proxyHttpRequest({ req, res, route, timeoutMs }) {
   const body = await requestChrome({
     req,
     route,
+    timeoutMs,
   });
 
   const contentType = body.headers['content-type'] || '';
@@ -395,8 +397,17 @@ async function proxyHttpRequest({ req, res, route }) {
   res.end(responseBody);
 }
 
-function requestChrome({ req, route }) {
+function requestChrome({ req, route, timeoutMs = CHROME_HTTP_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let deadline;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      req.off('aborted', abortUpstream);
+      callback(value);
+    };
     const headers = { ...req.headers, host: `${route.chromeHost}:${route.chromePort}` };
     const request = http.request(
       {
@@ -410,7 +421,7 @@ function requestChrome({ req, route }) {
         const chunks = [];
         response.on('data', (chunk) => chunks.push(chunk));
         response.on('end', () => {
-          resolve({
+          finish(resolve, {
             statusCode: response.statusCode || 502,
             headers: response.headers,
             buffer: Buffer.concat(chunks),
@@ -418,7 +429,20 @@ function requestChrome({ req, route }) {
         });
       }
     );
-    request.once('error', reject);
+    const abortUpstream = () => {
+      const error = new Error('Client disconnected before the Chrome response completed');
+      error.code = 'ABORT_ERR';
+      request.destroy(error);
+    };
+    deadline = setTimeout(() => {
+      const error = new Error(`Chrome request timed out after ${timeoutMs}ms`);
+      error.code = 'ETIMEDOUT';
+      error.statusCode = 504;
+      request.destroy(error);
+    }, timeoutMs);
+    deadline.unref?.();
+    req.once('aborted', abortUpstream);
+    request.once('error', (error) => finish(reject, error));
     req.pipe(request);
   });
 }

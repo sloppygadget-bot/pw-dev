@@ -3,7 +3,7 @@
   "info": {
     "title": "pw-dev remote broker API",
     "version": "1.0.0",
-    "description": "Provision a pw-dev CDP broker on a remote Linux host through SSH, then expose its loopback-only port through a local forward owned by this server. The remote checkout defaults to ~/.pw-dev/pw-dev and the local forward automatically selects an available port in 18080-18089."
+    "description": "Provision a pw-dev CDP broker on a remote Linux or Windows host through SSH, then expose its loopback-only port through a local forward owned by this server. Platform defaults to auto-detection. The remote checkout defaults to ~/.pw-dev/pw-dev and the local forward automatically selects an available port in 18080-18089."
   },
   "servers": [{ "url": "/" }],
   "paths": {
@@ -31,7 +31,8 @@
                   "worktree": { "type": "string", "default": ".pw-dev/pw-dev", "description": "Absolute remote path or path relative to the remote user's home directory." },
                   "revision": { "type": "string", "description": "Git revision to run remotely. Defaults to the local pw-dev server checkout's current HEAD." },
                   "remotePort": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 18080 },
-                  "localPort": { "type": "integer", "minimum": 18080, "maximum": 18089, "description": "Optional local forward port; otherwise choose an available port in this range." }
+                  "localPort": { "type": "integer", "minimum": 18080, "maximum": 18089, "description": "Optional local forward port; otherwise choose an available port in this range." },
+                  "platform": { "type": "string", "enum": ["auto", "linux", "windows"], "default": "auto", "description": "Remote operating system. Defaults to SSH-based detection; use an explicit value only when detection is unavailable." }
                 }
               }
             }
@@ -48,7 +49,7 @@
       "delete": {
         "operationId": "releaseRemoteBroker",
         "summary": "Release a server-owned local SSH forward",
-        "description": "Stops only the local SSH forward. It intentionally leaves the remote broker process and checkout in place.",
+        "description": "Stops the owned local SSH forward. Linux remote broker processes and checkouts remain in place; the foreground Windows broker exits with its SSH channel.",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "responses": { "200": { "description": "Forward released." }, "404": { "description": "Unknown remote broker id." } }
       }
@@ -57,7 +58,7 @@
       "post": {
         "operationId": "disconnectRemoteBroker",
         "summary": "Release a server-owned local SSH forward",
-        "description": "Alias for DELETE. It stops the local forward only and does not stop the remote broker.",
+        "description": "Alias for DELETE. Linux remote brokers remain running; the foreground Windows broker exits with its owned SSH channel.",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "responses": { "200": { "description": "Forward released." }, "404": { "description": "Unknown remote broker id." } }
       }
