@@ -65,6 +65,36 @@ test('monitor retries a navigation-context race without rejecting', async () => 
   assert.equal(connection.refreshPromise, undefined);
 });
 
+test('monitor preview uses a short timeout and coalesces concurrent captures', async () => {
+  const hub = new BrowserMonitorHub({ pwDevUrl: 'http://127.0.0.1:9696' });
+  const captures = [];
+  let finishCapture;
+  const connection = {
+    browserId: 'preview-coalescing',
+    browser: { isConnected: () => true },
+    page: {
+      isClosed: () => false,
+      screenshot: (options) => {
+        captures.push(options);
+        return new Promise((resolve) => { finishCapture = resolve; });
+      },
+    },
+    subscribers: new Set(),
+    bindingName: '__pwdevMonitor_preview_coalescing',
+  };
+  hub.connections.set(connection.browserId, connection);
+
+  const first = hub.preview(connection.browserId);
+  const second = hub.preview(connection.browserId);
+  await Promise.resolve();
+
+  assert.equal(captures.length, 1);
+  assert.deepEqual(captures[0], { type: 'jpeg', quality: 60, scale: 'css', timeout: 2_000 });
+  finishCapture(Buffer.from('preview'));
+  assert.deepEqual(await Promise.all([first, second]), [Buffer.from('preview'), Buffer.from('preview')]);
+  assert.equal(hub.previewPromises.has(connection.browserId), false);
+});
+
 test('gui serves static app and read-only config', async () => {
   const server = await startPwDevGuiServer({
     port: 0,
@@ -130,7 +160,8 @@ test('gui serves static app and read-only config', async () => {
     const monitorSource = await fs.readFile(new URL('../src/monitor.js', import.meta.url), 'utf8');
     assert.match(monitorSource, /browserRecord\.body\?\.browser\?\.runtime/);
     assert.match(monitorSource, /browserRecord\.body\?\.browser\?\.sessions\?\.\[0\]/);
-    assert.match(monitorSource, /async preview\(browserId\)/);
+    assert.match(monitorSource, /preview\(browserId\)/);
+    assert.match(monitorSource, /async capturePreview\(browserId\)/);
     const monitorStyle = await get(`${server.origin}/monitor.css`);
     assert.equal(monitorStyle.statusCode, 200);
     assert.match(monitorStyle.body, /mirror-frame/);
@@ -189,6 +220,8 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /preview\.className = 'browser-preview'/);
     assert.match(appScript.body, /function refreshBrowserPreviews/);
     assert.match(appScript.body, /URL\.createObjectURL\(await response\.blob\(\)\)/);
+    assert.doesNotMatch(appScript.body, /setInterval\(\(\) => void refresh\(\)/);
+    assert.match(appScript.body, /renderBrowsers\(snapshot\.browsers\);[\s\S]*?void refreshBrowserPreviews\(snapshot\.browsers\)/);
     assert.match(appScript.body, /openBrowserMonitor\(browser\)/);
     assert.match(appScript.body, /scroll\.className = 'table-scroll'/);
     const styles = await get(`${server.origin}/styles.css`);
@@ -389,6 +422,7 @@ test('gui snapshot collects from server, broker, and proxy manager', async () =>
     assert.equal(snapshot.body.broker.status.body.state, 'active');
     assert.equal(snapshot.body.broker.status.body.instanceCount, 1);
     assert.equal(snapshot.body.proxyManager.status.body.proxies[0].id, 'proxy-main');
+    assert.equal(pwdev.requests.includes('/_pwdev/networks'), false);
   } finally {
     await gui.close();
     await pwdev.close();
@@ -571,7 +605,9 @@ test('gui snapshot discovers ready brokers from the localhost scan range', async
 });
 
 function startJsonServer(routes) {
+  const requests = [];
   const server = http.createServer((req, res) => {
+    requests.push(req.url);
     const payload = routes[req.url];
     if (!payload) {
       writeJson(res, 404, { ok: false, error: 'not found' });
@@ -587,6 +623,7 @@ function startJsonServer(routes) {
       const address = server.address();
       resolve({
         origin: `http://127.0.0.1:${address.port}`,
+        requests,
         close: () => new Promise((closeResolve, closeReject) => {
           server.close((error) => error ? closeReject(error) : closeResolve());
         }),

@@ -8,6 +8,7 @@ const MAX_PATH_LENGTH = 80;
 const ALLOWED_ACTIONS = new Set(['click', 'focus', 'highlight', 'scrollIntoView']);
 const NAVIGATION_RETRY_DELAY_MS = 25;
 const MAX_NAVIGATION_RETRIES = 3;
+const PREVIEW_TIMEOUT_MS = 2_000;
 
 /**
  * Keeps one Playwright/CDP observer per monitored browser session. The GUI
@@ -19,6 +20,8 @@ export class BrowserMonitorHub {
     this.pwDevUrl = pwDevUrl;
     /** @type {Map<string, MonitorConnection>} */
     this.connections = new Map();
+    /** @type {Map<string, Promise<Buffer>>} */
+    this.previewPromises = new Map();
   }
 
   async stream(browserId, req, res) {
@@ -79,15 +82,31 @@ export class BrowserMonitorHub {
     return { ok: true, action, path, result };
   }
 
-  async preview(browserId) {
+  preview(browserId) {
+    const existing = this.previewPromises.get(browserId);
+    if (existing) return existing;
+    const capture = this.capturePreview(browserId).finally(() => {
+      if (this.previewPromises.get(browserId) === capture) this.previewPromises.delete(browserId);
+    });
+    this.previewPromises.set(browserId, capture);
+    return capture;
+  }
+
+  async capturePreview(browserId) {
     const connection = await this.ensureConnection(browserId);
     if (connection.page.isClosed()) throw httpError(409, 'Browser session has no page to monitor');
-    return connection.page.screenshot({ type: 'jpeg', quality: 60, scale: 'css' });
+    return connection.page.screenshot({
+      type: 'jpeg',
+      quality: 60,
+      scale: 'css',
+      timeout: PREVIEW_TIMEOUT_MS,
+    });
   }
 
   async close() {
     const connections = [...this.connections.values()];
     this.connections.clear();
+    this.previewPromises.clear();
     await Promise.all(connections.map(async (connection) => {
       for (const subscriber of connection.subscribers) subscriber.end();
       connection.subscribers.clear();

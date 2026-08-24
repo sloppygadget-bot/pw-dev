@@ -1,7 +1,7 @@
 const state = {
   timer: undefined,
   intervalMs: 5000,
-  refreshGeneration: 0,
+  refreshPromise: undefined,
   pwDevUrl: '',
   currentView: 'browsers',
   last: undefined,
@@ -144,10 +144,14 @@ async function init() {
 }
 
 function schedule() {
-  if (state.timer) clearInterval(state.timer);
+  if (state.timer) clearTimeout(state.timer);
   state.timer = undefined;
   if (state.intervalMs > 0) {
-    state.timer = setInterval(() => void refresh(), state.intervalMs);
+    state.timer = setTimeout(async () => {
+      state.timer = undefined;
+      await refresh();
+      schedule();
+    }, state.intervalMs);
   }
 }
 
@@ -213,11 +217,17 @@ function showNetwork(networkId) {
 }
 
 async function refresh() {
+  if (state.refreshPromise) return state.refreshPromise;
+  state.refreshPromise = performRefresh().finally(() => {
+    state.refreshPromise = undefined;
+  });
+  return state.refreshPromise;
+}
+
+async function performRefresh() {
   els.refresh.disabled = true;
-  const generation = ++state.refreshGeneration;
   try {
     const snapshot = normalizeSnapshot(await fetchJson('/api/snapshot'));
-    if (generation !== state.refreshGeneration) return;
     state.last = snapshot;
     await render(snapshot);
   } finally {
@@ -231,7 +241,6 @@ function normalizeSnapshot(raw) {
   const serverBrowserConfigs = raw.server.browserConfigs;
   const serverSessions = raw.server.sessions;
   const proxies = raw.server.proxies;
-  const serverNetworks = raw.server.networks;
   const sshKeys = raw.server.sshKeys;
   const remoteHosts = raw.server.remoteHosts;
   const brokerStatusFetch = raw.broker.status;
@@ -263,9 +272,7 @@ function normalizeSnapshot(raw) {
   });
   const networkList = brokerNetworks.ok && brokerNetworks.body?.networks
     ? brokerNetworks.body.networks
-    : serverNetworks.ok && serverNetworks.body?.networks
-      ? serverNetworks.body.networks
-      : brokerStatus?.networks ?? [];
+    : brokerStatus?.networks ?? [];
   const proxyForwards = brokerForwards.ok && brokerForwards.body?.forwards
     ? brokerForwards.body.forwards
     : brokerStatus?.proxyForwards ?? [];
@@ -297,7 +304,7 @@ function normalizeSnapshot(raw) {
     sessions,
     browsers: browserList,
     relationships,
-    errors: [status, apps, serverBrowserConfigs, serverSessions, proxies, serverNetworks, sshKeys, remoteHosts, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
+    errors: [status, apps, serverBrowserConfigs, serverSessions, proxies, sshKeys, remoteHosts, brokerStatusFetch, brokerNetworks, brokerForwards, proxyStatus, ...brokerEntries.map((entry) => entry.fetch)].filter((item) => !item.ok),
     updatedAt: new Date(raw.collectedAt),
   };
 }
@@ -437,7 +444,6 @@ async function render(snapshot) {
   setCount('remote-hosts', snapshot.remoteHosts.length);
   setCount('ssh-keys', snapshot.sshKeys.length);
 
-  await refreshBrowserPreviews(snapshot.browsers);
   renderBrowsers(snapshot.browsers);
   renderApps(snapshot.apps, snapshot.relationships, snapshot.browsers);
   renderBroker(snapshot);
@@ -446,6 +452,9 @@ async function render(snapshot) {
   renderProxies(snapshot.proxies, snapshot.relationships, snapshot.browsers, snapshot.apps, snapshot.sessions);
   renderCards(els.remoteHosts, snapshot.remoteHosts.map((host) => ({ title: host.name ?? host.id, subtitle: host.id, rows: { Target: host.target, 'SSH key': host.sshKeyId } })));
   renderCards(els.sshKeys, snapshot.sshKeys.map((key) => ({ title: key.name ?? key.id, subtitle: key.id, rows: { Fingerprint: key.fingerprint, Updated: formatDate(key.updatedAt) } })));
+  void refreshBrowserPreviews(snapshot.browsers).then(() => {
+    if (state.last === snapshot) renderBrowsers(snapshot.browsers);
+  });
 }
 
 function openBrowserEditor(browser) {
