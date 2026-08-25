@@ -27,8 +27,8 @@ export class BrowserMonitorHub {
   async stream(browserId, req, res) {
     const connection = await this.ensureConnection(browserId);
     // A monitor tab may attach to a connection that has remained alive while
-    // the browser navigated elsewhere. Refresh before sending the cached
-    // snapshot so a newly opened or refreshed tab never starts with stale DOM.
+    // the browser navigated elsewhere. Refresh before sending the cached page
+    // metadata so a newly opened tab never starts with stale dimensions.
     await this.refresh(connection);
     res.writeHead(200, {
       'cache-control': 'no-store',
@@ -38,7 +38,7 @@ export class BrowserMonitorHub {
     });
     connection.subscribers.add(res);
     this.writeEvent(res, { type: 'connected', browserId });
-    this.writeEvent(res, connection.lastSnapshot ?? { type: 'state', status: 'connecting', browserId });
+    this.writeEvent(res, connection.lastPageState ?? { type: 'state', status: 'connecting', browserId });
     const keepAlive = setInterval(() => {
       if (!res.destroyed) res.write(': keep-alive\n\n');
     }, 15_000);
@@ -134,7 +134,7 @@ export class BrowserMonitorHub {
     try {
       playwright = require('playwright');
     } catch (error) {
-      throw httpError(503, `Live DOM monitor requires Playwright: ${error.message}`);
+      throw httpError(503, `Live screenshot monitor requires Playwright: ${error.message}`);
     }
     const browser = await playwright.chromium.connectOverCDP(session.cdpUrl);
     const page = browser.contexts().flatMap((context) => context.pages())[0];
@@ -148,7 +148,7 @@ export class BrowserMonitorHub {
       browser,
       page,
       subscribers: new Set(),
-      lastSnapshot: undefined,
+      lastPageState: undefined,
       bindingName: `__pwdevMonitor_${browserId.replace(/[^A-Za-z0-9_$]/g, '_')}_${Date.now()}`,
     };
     this.connections.set(browserId, connection);
@@ -185,8 +185,9 @@ export class BrowserMonitorHub {
     while (connection.refreshRequested && this.isConnectionActive(connection)) {
       connection.refreshRequested = false;
       try {
-        await this.attachPageObserver(connection);
-        await this.emitSnapshot(connection);
+        const pageState = await this.attachPageObserver(connection);
+        connection.lastPageState = { type: 'page', browserId: connection.browserId, ...pageState };
+        this.broadcast(connection, connection.lastPageState);
         retries = 0;
       } catch (error) {
         if (isTransientNavigationError(error) && retries < MAX_NAVIGATION_RETRIES) {
@@ -217,52 +218,11 @@ export class BrowserMonitorHub {
     } catch (error) {
       if (!String(error?.message).includes('has been already registered')) throw error;
     }
-    await connection.page.evaluate(({ bindingName }) => {
+    return connection.page.evaluate(({ bindingName }) => {
       window.__pwdevMonitorCleanup?.();
-      const pathOf = (node) => {
-        const path = [];
-        while (node && node !== document.documentElement) {
-          const parent = node.parentNode;
-          if (!parent) break;
-          path.unshift(Array.prototype.indexOf.call(parent.childNodes, node));
-          node = parent;
-        }
-        return path;
-      };
-      const styles = () => [...document.styleSheets].map((sheet) => {
-        let text = '';
-        try { text = [...sheet.cssRules].map((rule) => rule.cssText).join('\n'); } catch { /* cross-origin sheet */ }
-        return { href: sheet.href, text };
-      }).filter((sheet) => sheet.href || sheet.text);
       const send = (event) => {
         try { window[bindingName](event); } catch { /* monitor disconnected */ }
       };
-      let pending = [];
-      let flushTimer;
-      const flush = () => {
-        flushTimer = undefined;
-        const patches = new Map();
-        for (const record of pending.splice(0)) {
-          const target = record.type === 'characterData' ? record.target.parentElement : record.target;
-          if (!(target instanceof Element)) continue;
-          const path = pathOf(target);
-          patches.set(JSON.stringify(path), {
-            path,
-            mode: record.type === 'childList' ? 'innerHTML' : 'outerHTML',
-            html: record.type === 'childList' ? target.innerHTML : target.outerHTML,
-          });
-        }
-        if (patches.size) send({ type: 'patches', patches: [...patches.values()] });
-        if (pending.length) flushTimer = setTimeout(flush, 50);
-      };
-      const observer = new MutationObserver((records) => {
-        pending.push(...records);
-        if (!flushTimer) flushTimer = setTimeout(flush, 50);
-        if (records.some((record) => record.target === document.head || record.target.parentNode === document.head)) {
-          send({ type: 'styles', styles: styles() });
-        }
-      });
-      observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
       const viewport = () => send({
         type: 'viewport',
         viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
@@ -280,35 +240,19 @@ export class BrowserMonitorHub {
       addEventListener('resize', viewport, { passive: true });
       addEventListener('click', click, true);
       window.__pwdevMonitorCleanup = () => {
-        observer.disconnect();
         removeEventListener('scroll', viewport);
         removeEventListener('resize', viewport);
         removeEventListener('click', click, true);
-        if (flushTimer) clearTimeout(flushTimer);
       };
       viewport();
-      send({ type: 'styles', styles: styles() });
+      return {
+        url: location.href,
+        title: document.title,
+        viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+        scroll: { x: scrollX, y: scrollY },
+        capturedAt: new Date().toISOString(),
+      };
     }, { bindingName: connection.bindingName });
-  }
-
-  async emitSnapshot(connection) {
-    if (connection.page.isClosed()) return;
-    const snapshot = await connection.page.evaluate(() => ({
-      type: 'snapshot',
-      url: location.href,
-      title: document.title,
-      html: document.documentElement.outerHTML,
-      styles: [...document.styleSheets].map((sheet) => {
-        let text = '';
-        try { text = [...sheet.cssRules].map((rule) => rule.cssText).join('\n'); } catch { /* cross-origin sheet */ }
-        return { href: sheet.href, text };
-      }).filter((sheet) => sheet.href || sheet.text),
-      viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
-      scroll: { x: scrollX, y: scrollY },
-      capturedAt: new Date().toISOString(),
-    }));
-    connection.lastSnapshot = snapshot;
-    this.broadcast(connection, snapshot);
   }
 
   handlePageEvent(connection, event) {
@@ -376,4 +320,4 @@ function fetchJson(rawUrl) {
   });
 }
 
-/** @typedef {{ browserId: string, sessionId?: string, browser: any, page: any, subscribers: Set<import('node:http').ServerResponse>, lastSnapshot?: Record<string, unknown>, bindingName: string, refreshRequested?: boolean, refreshPromise?: Promise<void> }} MonitorConnection */
+/** @typedef {{ browserId: string, sessionId?: string, browser: any, page: any, subscribers: Set<import('node:http').ServerResponse>, lastPageState?: Record<string, unknown>, bindingName: string, refreshRequested?: boolean, refreshPromise?: Promise<void> }} MonitorConnection */

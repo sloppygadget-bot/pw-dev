@@ -755,6 +755,10 @@ function renderBrowserDiagram(root, browsers) {
   for (const browser of browsers) {
     const card = document.createElement('article');
     card.className = 'browser-diagram card';
+    const content = document.createElement('div');
+    content.className = 'browser-diagram-content';
+    const details = document.createElement('div');
+    details.className = 'browser-diagram-details';
     const heading = document.createElement('div');
     heading.className = 'browser-diagram-title';
     const titleInfo = document.createElement('div');
@@ -782,14 +786,13 @@ function renderBrowserDiagram(root, browsers) {
     const occupancyLabel = document.createElement('div');
     occupancyLabel.className = 'browser-occupancy';
     occupancyLabel.textContent = `occupancy: ${formatBrowserOccupancy(browser)}`;
-    titleInfo.append(titleGroup, occupancyLabel);
     const controls = document.createElement('div');
     controls.className = 'browser-diagram-controls';
     controls.append(createActionButtons(browserActions(browser).actions));
-    heading.append(titleInfo, controls);
-    card.append(heading);
-    const flow = document.createElement('div');
-    flow.className = 'browser-flow';
+    titleGroup.append(controls);
+    titleInfo.append(titleGroup, occupancyLabel);
+    heading.append(titleInfo);
+    details.append(heading);
     const flowColumn = document.createElement('div');
     flowColumn.className = 'browser-flow-column';
     const nodes = [
@@ -818,7 +821,7 @@ function renderBrowserDiagram(root, browsers) {
         flowColumn.append(arrow);
       }
     }
-    flow.append(flowColumn);
+    details.append(flowColumn);
     const preview = document.createElement('section');
     preview.className = 'browser-preview';
     const previewUrl = state.previewUrls.get(browser.id);
@@ -842,8 +845,8 @@ function renderBrowserDiagram(root, browsers) {
       preview.classList.add('empty');
       preview.textContent = browser.sessionId ? 'Loading preview…' : 'Start the browser to load a preview.';
     }
-    flow.append(preview);
-    card.append(flow);
+    content.append(details, preview);
+    card.append(content);
     root.append(card);
   }
 }

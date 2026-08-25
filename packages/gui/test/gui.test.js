@@ -28,7 +28,7 @@ test('resolveStaticPath keeps gui static requests under root', () => {
   assert.equal(resolveStaticPath('/tmp/gui', '/../secret'), '/tmp/gui/secret');
 });
 
-test('monitor retries a navigation-context race without rejecting', async () => {
+test('monitor keeps click telemetry attached across a navigation-context race without serializing DOM', async () => {
   const hub = new BrowserMonitorHub({ pwDevUrl: 'http://127.0.0.1:9696' });
   let evaluations = 0;
   const page = {
@@ -37,16 +37,7 @@ test('monitor retries a navigation-context race without rejecting', async () => 
     evaluate: async () => {
       evaluations += 1;
       if (evaluations === 1) throw new Error('Execution context was destroyed, most likely because of a navigation');
-      return {
-        type: 'snapshot',
-        url: 'https://example.test/after-navigation',
-        title: 'After navigation',
-        html: '<html></html>',
-        styles: [],
-        viewport: { width: 1280, height: 720, devicePixelRatio: 1 },
-        scroll: { x: 0, y: 0 },
-        capturedAt: '2026-08-12T00:00:00.000Z',
-      };
+      return undefined;
     },
   };
   const connection = {
@@ -60,8 +51,9 @@ test('monitor retries a navigation-context race without rejecting', async () => 
 
   await hub.refresh(connection);
 
-  assert.equal(evaluations, 3, 'the observer injection should retry, then capture a snapshot');
-  assert.equal(connection.lastSnapshot?.url, 'https://example.test/after-navigation');
+  assert.equal(evaluations, 2, 'the lightweight click observer should retry without collecting a DOM snapshot');
+  assert.equal(connection.lastSnapshot, undefined);
+  assert.deepEqual(connection.lastPageState, { type: 'page', browserId: 'navigation-race' });
   assert.equal(connection.refreshPromise, undefined);
 });
 
@@ -93,6 +85,26 @@ test('monitor preview uses a short timeout and coalesces concurrent captures', a
   finishCapture(Buffer.from('preview'));
   assert.deepEqual(await Promise.all([first, second]), [Buffer.from('preview'), Buffer.from('preview')]);
   assert.equal(hub.previewPromises.has(connection.browserId), false);
+});
+
+test('monitor relays real browser click coordinates to its event subscribers', () => {
+  const hub = new BrowserMonitorHub({ pwDevUrl: 'http://127.0.0.1:9696' });
+  const events = [];
+  const connection = {
+    browserId: 'click-indicator',
+    subscribers: new Set([{ destroyed: false, write: (value) => events.push(value) }]),
+  };
+
+  hub.handlePageEvent(connection, {
+    type: 'click',
+    x: 320,
+    y: 180,
+    viewport: { width: 1280, height: 720 },
+  });
+
+  assert.deepEqual(events, [
+    'data: {"type":"click","x":320,"y":180,"viewport":{"width":1280,"height":720},"browserId":"click-indicator"}\n\n',
+  ]);
 });
 
 test('gui serves static app and read-only config', async () => {
@@ -141,30 +153,34 @@ test('gui serves static app and read-only config', async () => {
     const monitor = await get(`${server.origin}/monitor/example-browser`);
     assert.equal(monitor.statusCode, 200);
     assert.doesNotMatch(monitor.body, /<h2>Live DOM mirror<\/h2>/);
-    assert.match(monitor.body, /id="toggle-sidebar"/);
-    assert.match(monitor.body, /aria-label="Hide inspector"/);
-    assert.match(monitor.body, /class="drawer-icon"/);
-    assert.match(monitor.body, /id="close-sidebar"[^>]*aria-label="Close inspector"/);
+    assert.match(monitor.body, /<title>pw-dev screenshot monitor<\/title>/);
+    assert.match(monitor.body, /id="mirror-image"/);
+    assert.doesNotMatch(monitor.body, /id="mirror-frame"/);
     assert.match(monitor.body, /id="nav-target-url"/);
-    assert.match(monitor.body, /id="mirror-tools"|class="mirror-tools"/);
     assert.match(monitor.body, /id="mirror-click-marker"/);
+    assert.match(monitor.body, /id="refresh-screenshot"/);
     const monitorScript = await get(`${server.origin}/monitor.js`);
     assert.equal(monitorScript.statusCode, 200);
     assert.match(monitorScript.body, /EventSource/);
-    assert.match(monitorScript.body, /about:blank/);
-    assert.match(monitorScript.body, /Rendering DOM snapshot/);
-    assert.match(monitorScript.body, /showClickMarker/);
-    assert.match(monitorScript.body, /updateTargetUrl/);
-    assert.match(monitorScript.body, /setSidebarOpen/);
+    assert.match(monitorScript.body, /refreshScreenshot/);
+    assert.match(monitorScript.body, /\/api\/monitor\/\$\{encodeURIComponent\(browserId\)\}\/preview/);
+    assert.match(monitorScript.body, /placeClickMarker/);
+    assert.doesNotMatch(monitorScript.body, /sanitizeHtml/);
+    assert.doesNotMatch(monitorScript.body, /Rendering DOM snapshot/);
+    assert.match(monitorScript.body, /click\.x \* scale/);
+    assert.match(monitorScript.body, /image\.getBoundingClientRect/);
     assert.match(monitorScript.body, /pageMeta\.title = meta/);
     const monitorSource = await fs.readFile(new URL('../src/monitor.js', import.meta.url), 'utf8');
     assert.match(monitorSource, /browserRecord\.body\?\.browser\?\.runtime/);
     assert.match(monitorSource, /browserRecord\.body\?\.browser\?\.sessions\?\.\[0\]/);
     assert.match(monitorSource, /preview\(browserId\)/);
     assert.match(monitorSource, /async capturePreview\(browserId\)/);
+    assert.match(monitorSource, /Live screenshot monitor requires Playwright/);
+    assert.doesNotMatch(monitorSource, /MutationObserver/);
     const monitorStyle = await get(`${server.origin}/monitor.css`);
     assert.equal(monitorStyle.statusCode, 200);
-    assert.match(monitorStyle.body, /mirror-frame/);
+    assert.match(monitorStyle.body, /mirror-image/);
+    assert.match(monitorStyle.body, /object-fit: contain/);
     assert.match(monitorStyle.body, /max-width: min\(45vw, 560px\)/);
     assert.match(monitorStyle.body, /\.mirror-head #page-meta/);
 
@@ -214,9 +230,15 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /browserConfigLabel\.className = 'browser-config-title-link entity-link mono'/);
     assert.doesNotMatch(appScript.body, /spawned from/);
     assert.match(appScript.body, /controls\.className = 'browser-diagram-controls'/);
+    assert.match(appScript.body, /titleGroup\.append\(controls\);/);
+    assert.match(appScript.body, /heading\.append\(titleInfo\);/);
+    assert.doesNotMatch(appScript.body, /heading\.append\(titleInfo, controls\);/);
     assert.match(appScript.body, /occupancyLabel\.className = 'browser-occupancy'/);
     assert.match(appScript.body, /titleInfo\.append\(titleGroup, occupancyLabel\)/);
     assert.match(appScript.body, /flowColumn\.className = 'browser-flow-column'/);
+    assert.match(appScript.body, /content\.className = 'browser-diagram-content'/);
+    assert.match(appScript.body, /details\.className = 'browser-diagram-details'/);
+    assert.match(appScript.body, /content\.append\(details, preview\);/);
     assert.match(appScript.body, /preview\.className = 'browser-preview'/);
     assert.match(appScript.body, /function refreshBrowserPreviews/);
     assert.match(appScript.body, /URL\.createObjectURL\(await response\.blob\(\)\)/);
@@ -236,7 +258,12 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /padding: 8px 14px/);
     assert.match(styles.body, /\.browser-diagram-title/);
     assert.match(styles.body, /\.browser-diagram-controls/);
+    assert.match(styles.body, /\.browser-diagram-content/);
+    assert.match(styles.body, /grid-template-columns: minmax\(0, 1fr\) minmax\(380px, 48%\)/);
     assert.match(styles.body, /\.browser-preview/);
+    assert.match(styles.body, /align-self: stretch/);
+    assert.match(styles.body, /min-height: 300px/);
+    assert.match(styles.body, /\.browser-preview img[\s\S]*?height: 100%/);
     assert.doesNotMatch(styles.body, /\.browser-preview-head/);
     assert.match(styles.body, /max-width: 100%/);
     assert.match(styles.body, /width: max-content/);

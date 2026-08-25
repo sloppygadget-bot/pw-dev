@@ -63,11 +63,6 @@ h2 { font-size: 15px; }
 .monitor-nav { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; gap: 14px; min-width: 0; }
 .target-nav { display: flex; flex: 0 1 min(45vw, 560px); flex-direction: column; align-items: flex-end; min-width: 0; max-width: min(45vw, 560px); }
 .target-nav a { display: block; width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.drawer-toggle { width: 34px; padding: 0; border-color: #56616c; background: #252b31; color: #fff; font-size: 18px; line-height: 1; }
-.drawer-toggle:hover { border-color: #a9bac8; background: #303841; }
-.drawer-icon { display: block; width: 18px; height: 18px; margin: auto; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; transition: transform .2s ease; }
-.drawer-toggle[data-open="false"] .drawer-icon { transform: scaleX(-1); }
-.drawer-close { width: 30px; padding: 0; font-size: 20px; line-height: 1; }
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -105,9 +100,6 @@ h2 { font-size: 15px; }
 .panel-head.compact { align-items: center; padding: 11px 13px; }
 .mirror-head { min-height: 48px; align-items: center; }
 .mirror-head #page-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mirror-tools { display: flex; flex-direction: column; gap: 10px; padding: 13px; }
-.mirror-tools label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 12px; }
-.mirror-tools input { width: 100%; }
 .mirror-frame-wrap {
   position: relative;
   min-height: 620px;
@@ -115,9 +107,11 @@ h2 { font-size: 15px; }
   background: #e9edf1;
   padding: 14px;
 }
-#mirror-frame {
+#mirror-image {
   width: 100%;
   height: 100%;
+  display: block;
+  object-fit: contain;
   border: 1px solid #aeb7c0;
   background: #fff;
 }
@@ -155,51 +149,6 @@ h2 { font-size: 15px; }
   color: var(--muted);
   font-size: 12px;
 }
-.monitor-sidebar {
-  position: fixed;
-  z-index: 15;
-  top: 52px;
-  right: 0;
-  bottom: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  width: min(380px, calc(100vw - 24px));
-  min-width: 0;
-  padding: 22px 16px 16px;
-  overflow-y: auto;
-  background: rgba(244, 246, 248, .94);
-  box-shadow: -8px 0 24px rgba(21, 23, 25, .18);
-  transform: translateX(100%);
-  transition: transform .22s ease;
-  pointer-events: none;
-}
-.monitor-sidebar.open { transform: translateX(0); pointer-events: auto; }
-.tools-panel { flex: 0 0 auto; }
-.monitor-sidebar .panel { width: 100%; }
-.selected-label { margin: 12px 13px 8px; color: var(--blue); font-weight: 700; }
-pre {
-  margin: 0 13px;
-  padding: 10px;
-  max-height: 220px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  background: #f1f4f7;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-.inspector > .muted { padding: 13px; }
-.inspector-actions { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 13px 13px; }
-.inspector-actions button { font-size: 12px; }
-.state-list { display: grid; grid-template-columns: 92px minmax(0, 1fr); margin: 0; padding: 10px 13px 13px; gap: 6px 10px; }
-.state-list dt { color: var(--muted); }
-.state-list dd { margin: 0; overflow-wrap: anywhere; }
-.state-list dd, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-.activity-panel { min-height: 160px; }
-.activity-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 10px 13px 13px 30px; color: var(--muted); font-size: 12px; }
-.activity-list li { overflow-wrap: anywhere; }
 
 @media (max-width: 900px) {
   .target-nav { max-width: 35vw; }
@@ -211,7 +160,6 @@ pre {
   .monitor-nav { width: 100%; justify-content: space-between; flex-wrap: wrap; }
   .target-nav { align-items: flex-start; max-width: 100%; order: 3; width: 100%; }
   .monitor-layout { padding: 8px; }
-  .monitor-sidebar { top: 108px; width: min(380px, calc(100vw - 12px)); padding: 14px 8px 8px; }
   .mirror-frame-wrap { height: 70vh; min-height: 420px; padding: 8px; }
   .panel-head { flex-direction: column; }
 }
