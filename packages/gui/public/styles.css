@@ -527,8 +527,8 @@ body.modal-open { overflow: hidden; }
 .browser-diagram h3 { margin: 0; }
 .browser-config-separator { color: var(--muted); }
 .browser-config-title-link { font-size: 13px; }
-.browser-diagram-controls { display: flex; margin-left: auto; }
-.browser-diagram-controls .table-actions { justify-content: flex-end; }
+.browser-diagram-controls { display: flex; margin-bottom: 12px; }
+.browser-diagram-controls .table-actions { justify-content: flex-start; }
 .browser-occupancy { color: var(--muted); font-size: 13px; }
 
 .browser-diagram-content {

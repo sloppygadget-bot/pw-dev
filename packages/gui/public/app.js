@@ -789,9 +789,8 @@ function renderBrowserDiagram(root, browsers) {
     const controls = document.createElement('div');
     controls.className = 'browser-diagram-controls';
     controls.append(createActionButtons(browserActions(browser).actions));
-    titleGroup.append(controls);
     titleInfo.append(titleGroup, occupancyLabel);
-    heading.append(titleInfo);
+    heading.append(controls, titleInfo);
     details.append(heading);
     const flowColumn = document.createElement('div');
     flowColumn.className = 'browser-flow-column';

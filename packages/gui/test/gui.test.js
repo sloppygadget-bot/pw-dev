@@ -230,9 +230,9 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /browserConfigLabel\.className = 'browser-config-title-link entity-link mono'/);
     assert.doesNotMatch(appScript.body, /spawned from/);
     assert.match(appScript.body, /controls\.className = 'browser-diagram-controls'/);
-    assert.match(appScript.body, /titleGroup\.append\(controls\);/);
-    assert.match(appScript.body, /heading\.append\(titleInfo\);/);
-    assert.doesNotMatch(appScript.body, /heading\.append\(titleInfo, controls\);/);
+    assert.match(appScript.body, /heading\.append\(controls, titleInfo\);/);
+    assert.doesNotMatch(appScript.body, /titleGroup\.append\(controls\);/);
+    assert.doesNotMatch(appScript.body, /heading\.append\(titleInfo\);/);
     assert.match(appScript.body, /occupancyLabel\.className = 'browser-occupancy'/);
     assert.match(appScript.body, /titleInfo\.append\(titleGroup, occupancyLabel\)/);
     assert.match(appScript.body, /flowColumn\.className = 'browser-flow-column'/);
@@ -258,6 +258,7 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /padding: 8px 14px/);
     assert.match(styles.body, /\.browser-diagram-title/);
     assert.match(styles.body, /\.browser-diagram-controls/);
+    assert.match(styles.body, /margin-bottom: 12px/);
     assert.match(styles.body, /\.browser-diagram-content/);
     assert.match(styles.body, /grid-template-columns: minmax\(0, 1fr\) minmax\(380px, 48%\)/);
     assert.match(styles.body, /\.browser-preview/);
