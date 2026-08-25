@@ -46,7 +46,8 @@ node_major() {
   node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || true
 }
 
-if [ "$(node_major)" -lt 18 ] 2>/dev/null; then
+current_major=$(node_major)
+if [ -z "$current_major" ] || [ "$current_major" -lt 18 ] 2>/dev/null; then
   nvm_dir=$(printenv NVM_DIR 2>/dev/null || true)
   user_home=$(getent passwd "$(id -un)" 2>/dev/null | awk -F: 'NR == 1 { print $6 }')
   if [ -z "$user_home" ]; then user_home="$HOME"; fi
@@ -70,7 +71,8 @@ if [ "$(node_major)" -lt 18 ] 2>/dev/null; then
   set -u
 fi
 
-if [ "$(node_major)" -lt 18 ] 2>/dev/null; then
+current_major=$(node_major)
+if [ -z "$current_major" ] || [ "$current_major" -lt 18 ] 2>/dev/null; then
   echo "remote broker requires Node.js 18+" >&2
   exit 2
 fi

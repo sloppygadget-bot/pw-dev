@@ -116,6 +116,17 @@ test('builds remote commands and an isolated loopback-only SSH forward', () => {
   );
 });
 
+test('Linux bootstrap provisions Node when node is absent from PATH', async () => {
+  const { manager, commands } = createLinuxHarness();
+
+  await manager.provision({ id: 'node-bootstrap', target: 'agent@linux-box' });
+
+  const bootstrap = commands.find(({ options }) => options?.input)?.options.input;
+  assert.match(bootstrap, /current_major=\$\(node_major\)\nif \[ -z "\$current_major" \] \|\| \[ "\$current_major" -lt 18 \] 2>\/dev\/null; then/);
+  assert.equal(bootstrap.match(/current_major=\$\(node_major\)/g)?.length, 2);
+  await manager.remove('node-bootstrap');
+});
+
 test('provisions, lists, and releases one owned SSH forward child', async () => {
   const { manager, commands, forwards } = createLinuxHarness({
     now: () => '2026-08-09T00:00:00.000Z',
