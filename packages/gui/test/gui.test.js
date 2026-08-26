@@ -216,6 +216,9 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /function saveBrowserConfig/);
     assert.match(appScript.body, /browserConfigIgnoreSslErrors\.checked = browserConfig\?\.ignoreSslErrors \?\? true/);
     assert.match(appScript.body, /function browserConfigActions/);
+    assert.match(appScript.body, /function brokerForBrowserConfig\(browserConfig, brokers\)/);
+    assert.match(appScript.body, /\['Browser config', 'Target', 'Broker', 'Profile', 'Used By', 'Active sessions', 'Actions'\]/);
+    assert.match(appScript.body, /browserConfig\.brokerUrl\s*\?\? brokers\.find/);
     assert.match(appScript.body, /function saveProxy/);
     assert.match(appScript.body, /function proxyActions/);
     assert.match(appScript.body, /label: 'Monitor'/);

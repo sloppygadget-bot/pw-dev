@@ -459,7 +459,7 @@ async function render(snapshot) {
   renderBrowsers(snapshot.browsers);
   renderApps(snapshot.apps, snapshot.relationships, snapshot.browsers);
   renderBroker(snapshot);
-  renderBrowserConfigs(snapshot.browserConfigs, snapshot.sessions, snapshot.browsers);
+  renderBrowserConfigs(snapshot.browserConfigs, snapshot.sessions, snapshot.browsers, snapshot.brokers);
   renderSessions(snapshot.sessions, snapshot.relationships, snapshot.browsers);
   renderProxies(snapshot.proxies, snapshot.relationships, snapshot.browsers, snapshot.apps, snapshot.sessions);
   renderCards(els.remoteHosts, snapshot.remoteHosts.map((host) => ({ title: host.name ?? host.id, subtitle: host.id, rows: { Target: host.target, 'SSH key': host.sshKeyId } })));
@@ -934,20 +934,28 @@ function renderBroker(snapshot) {
   }));
 }
 
-function renderBrowserConfigs(browserConfigs, sessions, browsers) {
-  renderTable(els.browserConfigs, ['Browser config', 'Target', 'Profile', 'Used By', 'Active sessions', 'Actions'], browserConfigs.map((browserConfig) => {
+function renderBrowserConfigs(browserConfigs, sessions, browsers, brokers) {
+  renderTable(els.browserConfigs, ['Browser config', 'Target', 'Broker', 'Profile', 'Used By', 'Active sessions', 'Actions'], browserConfigs.map((browserConfig) => {
     const relatedSessions = sessions.filter((session) => session.browserConfigId === browserConfig.id);
     const activeSessions = relatedSessions.map((session) => formatBrowserSession(session));
     const usage = browserConfigUsage(browserConfig, browsers, sessions);
     return [
       browserConfig.name ?? browserConfig.id,
       browserConfig.targetUrl,
+      brokerForBrowserConfig(browserConfig, brokers),
       browserConfig.profile ?? browserConfig.id,
       usedBy(browsers, 'browserConfigId', browserConfig.id),
       activeSessions.join(' · ') || 'None',
       browserConfigActions(browserConfig, usage),
     ];
   }), { rowKeys: browserConfigs.map((browserConfig) => browserConfig.id), rowKeyAttribute: 'browserConfigId' });
+}
+
+function brokerForBrowserConfig(browserConfig, brokers) {
+  return browserConfig.brokerUrl
+    ?? brokers.find((broker) => !broker.discovered)?.url
+    ?? brokers[0]?.url
+    ?? 'Default broker';
 }
 
 function browserConfigUsage(browserConfig, browsers, sessions) {
