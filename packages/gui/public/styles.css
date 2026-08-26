@@ -220,6 +220,11 @@ main {
   grid-template-columns: 190px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+  transition: grid-template-columns 160ms ease;
+}
+
+.layout.nav-collapsed {
+  grid-template-columns: 52px minmax(0, 1fr);
 }
 
 .nav {
@@ -231,13 +236,52 @@ main {
   top: 90px;
 }
 
+.nav-toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.nav-toggle:hover,
+.nav-toggle:focus-visible {
+  background: var(--surface-2);
+}
+
+.nav-toggle-icon {
+  font-size: 12px;
+}
+
+.nav-links {
+  display: grid;
+}
+
+.nav-collapsed .nav {
+  padding: 8px;
+}
+
+.nav-collapsed .nav-toggle {
+  justify-content: center;
+  padding: 0;
+}
+
+.nav-collapsed .nav-toggle-label,
+.nav-collapsed .nav-links {
+  display: none;
+}
+
 .nav-group {
   display: grid;
   gap: 4px;
   margin-top: 16px;
 }
 
-.nav > .nav-item + .nav-group {
+.nav-links > .nav-item + .nav-group {
   margin-top: 24px;
 }
 
@@ -293,6 +337,7 @@ main {
 
 .content {
   min-width: 0;
+  container-type: inline-size;
 }
 
 .view {
@@ -509,7 +554,14 @@ body.modal-open { overflow: hidden; }
 
 .browsers-diagram {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+@container (max-width: 980px) {
+  .browsers-diagram {
+    grid-template-columns: 1fr;
+  }
 }
 
 .browser-diagram-title {
@@ -537,6 +589,20 @@ body.modal-open { overflow: hidden; }
   align-items: stretch;
   gap: 24px;
   min-width: 0;
+}
+
+.browser-diagram {
+  container-type: inline-size;
+}
+
+@container (max-width: 680px) {
+  .browser-diagram-content {
+    grid-template-columns: 1fr;
+  }
+
+  .browser-preview {
+    min-height: 240px;
+  }
 }
 
 .browser-diagram-details { display: flex; min-width: 0; flex-direction: column; }
@@ -815,10 +881,33 @@ body.modal-open { overflow: hidden; }
     grid-template-columns: 1fr;
   }
 
+  .layout.nav-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .nav {
     position: static;
-    display: grid;
+  }
+
+  .nav-links {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .nav-toggle {
+    display: none;
+  }
+
+  .nav-collapsed .nav {
+    padding: 8px;
+  }
+
+  .nav-collapsed .nav-links {
+    display: grid;
+  }
+
+  .nav-links > .nav-item + .nav-group {
+    margin-top: 0;
   }
 
   .section-title,

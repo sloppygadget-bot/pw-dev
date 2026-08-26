@@ -4,6 +4,7 @@ const state = {
   refreshPromise: undefined,
   pwDevUrl: '',
   currentView: 'browsers',
+  navCollapsed: false,
   last: undefined,
   browserView: 'diagram',
   previewUrls: new Map(),
@@ -16,6 +17,8 @@ const state = {
 const els = {
   interval: document.querySelector('#interval'),
   refresh: document.querySelector('#refresh'),
+  layout: document.querySelector('.layout'),
+  navToggle: document.querySelector('#nav-toggle'),
   serverState: document.querySelector('#server-state'),
   brokerCard: document.querySelector('#broker-card'),
   brokerState: document.querySelector('#broker-state'),
@@ -98,6 +101,7 @@ for (const button of document.querySelectorAll('.nav-item')) {
   button.addEventListener('click', () => showView(button.dataset.view));
 }
 
+els.navToggle.addEventListener('click', () => setNavCollapsed(!state.navCollapsed));
 els.refresh.addEventListener('click', () => void refresh());
 els.brokerCard.addEventListener('click', () => showView('broker'));
 els.newBrowser.addEventListener('click', () => openBrowserEditor());
@@ -153,6 +157,14 @@ function schedule() {
       schedule();
     }, state.intervalMs);
   }
+}
+
+function setNavCollapsed(collapsed) {
+  state.navCollapsed = collapsed;
+  els.layout.classList.toggle('nav-collapsed', collapsed);
+  els.navToggle.setAttribute('aria-expanded', String(!collapsed));
+  els.navToggle.querySelector('.nav-toggle-label').textContent = collapsed ? 'Expand menu' : 'Collapse menu';
+  els.navToggle.querySelector('.nav-toggle-icon').textContent = collapsed ? '▶' : '◀';
 }
 
 function showView(view) {

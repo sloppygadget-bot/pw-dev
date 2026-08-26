@@ -133,6 +133,8 @@ test('gui serves static app and read-only config', async () => {
     assert.match(index.body, /id="browser-config-editor"/);
     assert.match(index.body, /id="browser-config-ignore-ssl-errors"[^>]*checked/);
     assert.match(index.body, /id="markdown-modal"/);
+    assert.match(index.body, /id="nav-toggle"[^>]*aria-expanded="true"[^>]*aria-controls="entity-navigation"/);
+    assert.match(index.body, /id="entity-navigation" class="nav-links"/);
     assert.match(index.body, /<details class="nav-group" data-nav-group="assets">/);
     assert.match(index.body, /<details class="nav-group" data-nav-group="runtime">/);
     assert.doesNotMatch(index.body, /data-nav-group="assets" open/);
@@ -192,6 +194,8 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /const sessionId = browser\.sessionId \?\? session\?\.sessionId/);
     assert.match(appScript.body, /Used By/);
     assert.match(appScript.body, /function showApp/);
+    assert.match(appScript.body, /function setNavCollapsed\(collapsed\)/);
+    assert.match(appScript.body, /classList\.toggle\('nav-collapsed', collapsed\)/);
     assert.match(appScript.body, /function showProxy/);
     assert.match(appScript.body, /function showBrowserConfig/);
     assert.match(appScript.body, /function showSession/);
@@ -249,6 +253,8 @@ test('gui serves static app and read-only config', async () => {
     const styles = await get(`${server.origin}/styles.css`);
     assert.equal(styles.statusCode, 200);
     assert.match(styles.body, /\.browser-node\.session\.inactive/);
+    assert.match(styles.body, /\.layout\.nav-collapsed/);
+    assert.match(styles.body, /\.nav-collapsed \.nav-links/);
     assert.match(styles.body, /border-style: dotted/);
     assert.match(styles.body, /flex-direction: column/);
     assert.match(styles.body, /align-items: flex-start/);
@@ -261,6 +267,9 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /margin-bottom: 12px/);
     assert.match(styles.body, /\.browser-diagram-content/);
     assert.match(styles.body, /grid-template-columns: minmax\(0, 1fr\) minmax\(380px, 48%\)/);
+    assert.match(styles.body, /\.browsers-diagram[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+    assert.match(styles.body, /@container \(max-width: 980px\)[\s\S]*?\.browsers-diagram[\s\S]*?grid-template-columns: 1fr/);
+    assert.match(styles.body, /@container \(max-width: 680px\)[\s\S]*?\.browser-diagram-content[\s\S]*?grid-template-columns: 1fr/);
     assert.match(styles.body, /\.browser-preview/);
     assert.match(styles.body, /align-self: stretch/);
     assert.match(styles.body, /min-height: 300px/);

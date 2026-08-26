@@ -49,6 +49,11 @@
 
       <section class="layout">
         <aside class="nav" aria-label="Entity counts">
+          <button id="nav-toggle" class="nav-toggle" type="button" aria-expanded="true" aria-controls="entity-navigation">
+            <span class="nav-toggle-label">Collapse menu</span>
+            <span class="nav-toggle-icon" aria-hidden="true">◀</span>
+          </button>
+          <div id="entity-navigation" class="nav-links">
           <button class="nav-item active" data-view="browsers" type="button">
             <span>Browsers</span><b id="count-browsers">0</b>
           </button>
@@ -79,6 +84,7 @@
               <span>Brokers</span><b id="count-broker">0</b>
             </button>
           </details>
+          </div>
         </aside>
 
         <div class="content">
