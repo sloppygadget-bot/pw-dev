@@ -211,6 +211,8 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /function proxyGuiLink/);
     assert.match(appScript.body, /function saveBrowser/);
     assert.match(appScript.body, /function browserActions/);
+    assert.match(appScript.body, /label: 'Delete',\s*disabled: deleteBlocked/);
+    assert.doesNotMatch(appScript.body, /label: 'Delete browser',\s*disabled: deleteBlocked/);
     assert.match(appScript.body, /function saveBrowserConfig/);
     assert.match(appScript.body, /browserConfigIgnoreSslErrors\.checked = browserConfig\?\.ignoreSslErrors \?\? true/);
     assert.match(appScript.body, /function browserConfigActions/);
@@ -263,10 +265,11 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /text-align: center/);
     assert.match(styles.body, /padding: 8px 14px/);
     assert.match(styles.body, /\.browser-diagram-title/);
-    assert.match(styles.body, /\.browser-diagram-controls/);
-    assert.match(styles.body, /margin-bottom: 12px/);
+    assert.match(styles.body, /\.browser-diagram-title \{\s*margin-bottom: 8px/);
+    assert.match(styles.body, /\.browser-diagram-controls \{ display: flex; margin-bottom: 8px; \}/);
     assert.match(styles.body, /\.browser-diagram-content/);
-    assert.match(styles.body, /grid-template-columns: minmax\(0, 1fr\) minmax\(380px, 48%\)/);
+    assert.match(styles.body, /grid-template-columns: minmax\(240px, 34%\) minmax\(0, 1fr\)/);
+    assert.match(styles.body, /\.browser-diagram-content[\s\S]*?gap: 12px/);
     assert.match(styles.body, /\.browsers-diagram[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
     assert.match(styles.body, /@container \(max-width: 980px\)[\s\S]*?\.browsers-diagram[\s\S]*?grid-template-columns: 1fr/);
     assert.match(styles.body, /@container \(max-width: 680px\)[\s\S]*?\.browser-diagram-content[\s\S]*?grid-template-columns: 1fr/);

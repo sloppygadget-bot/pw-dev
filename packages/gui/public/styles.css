@@ -565,7 +565,7 @@ body.modal-open { overflow: hidden; }
 }
 
 .browser-diagram-title {
-  margin-bottom: 16px;
+  margin-bottom: 8px;
 }
 
 .browser-diagram-name {
@@ -579,15 +579,15 @@ body.modal-open { overflow: hidden; }
 .browser-diagram h3 { margin: 0; }
 .browser-config-separator { color: var(--muted); }
 .browser-config-title-link { font-size: 13px; }
-.browser-diagram-controls { display: flex; margin-bottom: 12px; }
+.browser-diagram-controls { display: flex; margin-bottom: 8px; }
 .browser-diagram-controls .table-actions { justify-content: flex-start; }
 .browser-occupancy { color: var(--muted); font-size: 13px; }
 
 .browser-diagram-content {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(380px, 48%);
+  grid-template-columns: minmax(240px, 34%) minmax(0, 1fr);
   align-items: stretch;
-  gap: 24px;
+  gap: 12px;
   min-width: 0;
 }
 

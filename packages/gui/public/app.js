@@ -673,7 +673,7 @@ function browserActions(browser) {
       ? { label: 'Stop', onClick: () => stopBrowser(browser) }
       : { label: 'Start', onClick: () => startBrowser(browser) },
     {
-      label: 'Delete browser',
+      label: 'Delete',
       disabled: deleteBlocked,
       title: deleteBlocked
         ? `Cannot delete: occupied by ${agentLease.owner}${agentLease.taskId ? `, task ${agentLease.taskId}` : ''}`
