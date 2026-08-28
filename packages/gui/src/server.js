@@ -36,7 +36,7 @@ export async function startPwDevGuiServer(options = {}) {
   const brokerUrl = normalizeHttpUrl(options.brokerUrl ?? DEFAULT_BROKER_URL, 'brokerUrl');
   const proxyManagerUrl = normalizeHttpUrl(options.proxyManagerUrl ?? DEFAULT_PROXY_MANAGER_URL, 'proxyManagerUrl');
   const brokerDiscovery = normalizeBrokerDiscovery(options.brokerDiscovery, options.brokerDiscoveryPorts);
-  const monitorHub = new BrowserMonitorHub({ pwDevUrl });
+  const monitorHub = options.monitorHub ?? new BrowserMonitorHub({ pwDevUrl });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -55,12 +55,12 @@ export async function startPwDevGuiServer(options = {}) {
       }
       const monitorEvents = /^\/api\/monitor\/([^/]+)\/events$/.exec(requestUrl.pathname);
       if (monitorEvents) {
-        await monitorHub.stream(decodePathSegment(monitorEvents[1]), req, res);
+        await monitorHub.stream(decodePathSegment(monitorEvents[1]), requestUrl.searchParams.get('pageId') ?? undefined, req, res);
         return;
       }
       const monitorPreview = /^\/api\/monitor\/([^/]+)\/preview$/.exec(requestUrl.pathname);
       if (monitorPreview) {
-        const image = await monitorHub.preview(decodePathSegment(monitorPreview[1]));
+        const image = await monitorHub.preview(decodePathSegment(monitorPreview[1]), requestUrl.searchParams.get('pageId') ?? undefined);
         res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'image/jpeg' });
         res.end(image);
         return;
@@ -72,7 +72,7 @@ export async function startPwDevGuiServer(options = {}) {
           return;
         }
         const payload = await readJsonRequest(req);
-        writeJson(res, 200, await monitorHub.action(decodePathSegment(monitorAction[1]), payload));
+        writeJson(res, 200, await monitorHub.action(decodePathSegment(monitorAction[1]), requestUrl.searchParams.get('pageId') ?? undefined, payload));
         return;
       }
       const monitorPage = /^\/monitor\/([^/]+)$/.exec(requestUrl.pathname);

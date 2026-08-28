@@ -8,6 +8,8 @@ const state = {
   last: undefined,
   browserView: 'diagram',
   previewUrls: new Map(),
+  previewPages: new Map(),
+  previewPageIds: new Map(),
   markdownModalText: '',
   editingBrowserId: undefined,
   editingBrowserConfigId: undefined,
@@ -683,8 +685,9 @@ function browserActions(browser) {
   ]);
 }
 
-function openBrowserMonitor(browser) {
-  window.open(`/monitor/${encodeURIComponent(browser.id)}`, '_blank', 'noopener,noreferrer');
+function openBrowserMonitor(browser, pageId = state.previewPageIds.get(browser.id)) {
+  const query = pageId ? `?pageId=${encodeURIComponent(pageId)}` : '';
+  window.open(`/monitor/${encodeURIComponent(browser.id)}${query}`, '_blank', 'noopener,noreferrer');
 }
 
 async function refreshBrowserPreviews(browsers) {
@@ -693,10 +696,22 @@ async function refreshBrowserPreviews(browsers) {
     if (activeIds.has(browserId)) continue;
     URL.revokeObjectURL(url);
     state.previewUrls.delete(browserId);
+    state.previewPages.delete(browserId);
+    state.previewPageIds.delete(browserId);
   }
   await Promise.all(browsers.filter((browser) => browser.sessionId).map(async (browser) => {
     try {
-      const response = await fetch(`/api/monitor/${encodeURIComponent(browser.id)}/preview`, { cache: 'no-store' });
+      const pageResponse = await fetch(`/api/pwdev/sessions/${encodeURIComponent(browser.sessionId)}/pages`, { cache: 'no-store' });
+      if (pageResponse.ok) {
+        const body = await pageResponse.json();
+        const pages = Array.isArray(body.pages) ? body.pages : [];
+        state.previewPages.set(browser.id, pages);
+        const selectedPageId = state.previewPageIds.get(browser.id);
+        if (!pages.some((page) => page.id === selectedPageId)) state.previewPageIds.set(browser.id, pages[0]?.id);
+      }
+      const pageId = state.previewPageIds.get(browser.id);
+      const query = pageId ? `?pageId=${encodeURIComponent(pageId)}` : '';
+      const response = await fetch(`/api/monitor/${encodeURIComponent(browser.id)}/preview${query}`, { cache: 'no-store' });
       if (!response.ok) return;
       const url = URL.createObjectURL(await response.blob());
       const previous = state.previewUrls.get(browser.id);
@@ -706,6 +721,53 @@ async function refreshBrowserPreviews(browsers) {
       // Keep the previous preview when a transient monitor capture fails.
     }
   }));
+}
+
+async function selectBrowserPreviewPage(browser, pageId) {
+  if (state.previewPageIds.get(browser.id) === pageId) return;
+  state.previewPageIds.set(browser.id, pageId);
+  await refreshBrowserPreviews([browser]);
+  if (state.last) renderBrowsers(state.last.browsers);
+}
+
+function renderBrowserPreviewTabs(browser) {
+  const pages = state.previewPages.get(browser.id) ?? [];
+  const selectedPageId = state.previewPageIds.get(browser.id);
+  if (pages.length < 2) return undefined;
+  const tabs = document.createElement('div');
+  tabs.className = 'browser-preview-pages';
+  tabs.setAttribute('aria-label', 'Session pages');
+  const visiblePages = pages.slice(0, 3);
+  const selectedPage = pages.find((page) => page.id === selectedPageId);
+  if (selectedPage && !visiblePages.includes(selectedPage) && visiblePages.length === 3) visiblePages[2] = selectedPage;
+  const visibleIds = new Set(visiblePages.map((page) => page.id));
+  for (const page of visiblePages) {
+    const index = pages.indexOf(page);
+    const dot = document.createElement('button');
+    dot.type = 'button';
+    dot.className = `browser-preview-dot${page.id === selectedPageId ? ' selected' : ''}${page.lease ? ' leased' : ''}`;
+    dot.title = `${page.title || '(untitled)'} · ${page.url}${page.lease ? ` · leased by ${page.lease.owner}` : ' · available'}`;
+    dot.setAttribute('aria-label', `Preview tab ${index + 1}: ${page.title || page.url}`);
+    dot.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void selectBrowserPreviewPage(browser, page.id);
+    });
+    tabs.append(dot);
+  }
+  const hiddenPages = pages.filter((page) => !visibleIds.has(page.id));
+  if (hiddenPages.length) {
+    const picker = document.createElement('select');
+    picker.className = 'browser-preview-picker';
+    picker.setAttribute('aria-label', 'Choose another session tab');
+    picker.append(new Option(`+${hiddenPages.length} tabs`, ''));
+    for (const page of hiddenPages) picker.append(new Option(`${page.lease ? '🔒 ' : ''}${page.title || page.url || '(untitled)'}`, page.id));
+    picker.addEventListener('change', (event) => {
+      event.stopPropagation();
+      if (picker.value) void selectBrowserPreviewPage(browser, picker.value);
+    });
+    tabs.append(picker);
+  }
+  return tabs;
 }
 
 function actionGroup(actions) {
@@ -837,12 +899,13 @@ function renderBrowserDiagram(root, browsers) {
     preview.className = 'browser-preview';
     const previewUrl = state.previewUrls.get(browser.id);
     if (browser.sessionId && previewUrl) {
-      preview.classList.add('enabled');
-      preview.tabIndex = 0;
-      preview.title = 'Open browser monitor';
-      preview.setAttribute('role', 'button');
-      preview.addEventListener('click', () => openBrowserMonitor(browser));
-      preview.addEventListener('keydown', (event) => {
+      const previewMedia = document.createElement('div');
+      previewMedia.className = 'browser-preview-media enabled';
+      previewMedia.tabIndex = 0;
+      previewMedia.title = 'Open browser monitor';
+      previewMedia.setAttribute('role', 'button');
+      previewMedia.addEventListener('click', () => openBrowserMonitor(browser));
+      previewMedia.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           openBrowserMonitor(browser);
@@ -851,7 +914,10 @@ function renderBrowserDiagram(root, browsers) {
       const image = document.createElement('img');
       image.alt = `Latest browser preview for ${browser.name ?? browser.id}`;
       image.src = previewUrl;
-      preview.append(image);
+      previewMedia.append(image);
+      preview.append(previewMedia);
+      const tabs = renderBrowserPreviewTabs(browser);
+      if (tabs) preview.append(tabs);
     } else {
       preview.classList.add('empty');
       preview.textContent = browser.sessionId ? 'Loading preview…' : 'Start the browser to load a preview.';

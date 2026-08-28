@@ -13,8 +13,17 @@
     "/_pwdev/sessions/{id}": {
       "get": { "operationId": "getSession", "summary": "Get one live session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Live session and related app metadata" }, "404": { "description": "Unknown session" } } }
     },
+    "/_pwdev/sessions/{id}/pages": {
+      "get": { "operationId": "listSessionPages", "summary": "List live page targets", "description": "Returns the session's live CDP page targets and any cooperative page lease. Target WebSocket URLs are intentionally omitted; clients attach through the session cdpUrl.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Live page inventory and lease state" }, "404": { "description": "Unknown session" } } }
+    },
+    "/_pwdev/sessions/{id}/pages/{pageId}/leases": {
+      "post": { "operationId": "claimSessionPage", "summary": "Claim one page target", "description": "Creates a short-lived cooperative lock for page-specific automation. A live claim by another owner returns 409. Raw CDP clients are not technically prevented from accessing the page and must honor this lease.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "pageId", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeaseClaim" } } } }, "responses": { "200": { "description": "Claimed page and lease" }, "404": { "description": "Unknown session or page" }, "409": { "description": "Page is leased by another owner" } } }
+    },
+    "/_pwdev/sessions/{id}/pages/{pageId}/leases/{leaseId}": {
+      "delete": { "operationId": "releaseSessionPage", "summary": "Release one page target", "description": "Releases the cooperative page lock without closing the tab or browser session.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "pageId", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "leaseId", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Page lease released" }, "404": { "description": "Unknown session" }, "409": { "description": "Missing or invalid page lease" } } }
+    },
     "/_pwdev/sessions/{id}/stop": {
-      "post": { "operationId": "stopSession", "description": "Stop the browser session without deleting its durable browser, browser config, or proxy profile.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Stopped session" } } }
+      "post": { "operationId": "stopSession", "description": "Stop the browser session without deleting its durable browser, browser config, or proxy profile. Set force only for outage recovery: it discards the transient local record without contacting the broker or proxy manager, so the remote processes may remain alive.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StopOptions" } } } }, "responses": { "200": { "description": "Stopped session or forcibly discarded local session state" } } }
     },
     "/_pwdev/sessions/{id}/claim": {
       "post": { "operationId": "claimSession", "summary": "Claim a live session", "description": "Claims an unleased session for one agent. A live claim by another owner returns 409.", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeaseClaim" } } } }, "responses": { "200": { "description": "Claimed session" }, "409": { "description": "Session is leased by another owner" } } }
@@ -28,6 +37,10 @@
   },
   "components": {
     "schemas": {
+      "StopOptions": {
+        "type": "object",
+        "properties": { "force": { "type": "boolean", "default": false, "description": "Skip broker and proxy-manager calls and discard only transient local session state." } }
+      },
       "LeaseClaim": {
         "type": "object",
         "required": ["owner"],

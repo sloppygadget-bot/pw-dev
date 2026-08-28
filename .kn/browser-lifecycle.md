@@ -33,6 +33,18 @@ multiple named sessions under one browser.
 - Provenance: EXTRACTED/INFERRED
 - Sources: `packages/server/src/index.js:1747-1802`, `packages/server/test/server.test.js:580-608`, `e2e/pw-dev.e2e.test.js:141-157`
 
+## Multiple pages, targeted automation
+
+One live session may expose several browser pages. The pages endpoint reports
+stable CDP target IDs, not Playwright array positions. Agents must match that
+ID to the intended Playwright page and acquire its short-lived cooperative
+lease before a page-specific mutation. Releasing the page lease leaves both
+the tab and the session running; a closed tab or expired lease is reconciled
+away automatically.
+
+- Provenance: EXTRACTED
+- Sources: `packages/server/openapi/sessions.json`, `packages/server/src/index.js:1063-1094`, `packages/server/src/index.js:1623-1693`, `packages/server/test/server.test.js`
+
 ## Agent lease is separate from Chrome
 
 A session may carry a short-lived lease for the Playwright agent. Claim,
@@ -42,6 +54,18 @@ session after expiry. Session stop remains the explicit Chrome cleanup action.
 
 - Provenance: EXTRACTED
 - Sources: `packages/server/openapi/sessions.json`, `packages/server/src/index.js:231-249`, `packages/server/test/server.test.js:521-578`
+
+## Forced local session recovery
+
+When an outage makes a session's recorded broker URL unreachable, either
+browser-stop or session-stop may receive `{ "force": true }`. Forced stop skips
+broker and proxy-manager calls, removes only the transient local session, and
+returns the durable browser to ready state. The old Chrome or proxy may remain
+alive remotely, so this is an explicit recovery operation rather than ordinary
+teardown.
+
+- Provenance: EXTRACTED
+- Sources: `packages/server/src/index.js`, `packages/server/openapi/browsers.json`, `packages/server/openapi/sessions.json`
 
 ## Proxy pool behavior
 

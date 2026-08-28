@@ -55,3 +55,19 @@ through lease expiry; only ownership changes.
 
 - Provenance: EXTRACTED
 - Sources: `packages/server/openapi/sessions.json`, `packages/server/test/server.test.js:521-578`
+
+## 6. Inspect and automate one tab in a shared browser
+
+Claim the live session, list its pages, and match the intended Playwright page
+to its returned CDP target ID. Claim that page before navigation, clicking, or
+other page-specific work; release the page lease, then the session lease, when
+finished. For live observation, the monitor and dashboard thumbnail show the
+selected page's screenshot, tab indicators, lease state, and an overflow
+picker when more than three pages are open.
+
+Acceptance checks: switching an indicator changes the selected preview; the
+full monitor preserves that page selection; an occupied page is visibly marked;
+temporary monitor tabs do not replace or close user tabs.
+
+- Provenance: EXTRACTED/INFERRED
+- Sources: `packages/server/openapi/sessions.json`, `packages/server/instructions/agent.md`, `packages/gui/src/monitor.js`, `packages/gui/public/monitor.js`, `packages/gui/public/app.js`, `packages/gui/test/gui.test.js`

@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -10,7 +11,21 @@ import { startPwDevServer } from '../packages/server/src/index.js';
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace']);
-const SKIPPED_DIRECTORIES = new Set(['.agent', '.git', 'node_modules']);
+const SKIPPED_DIRECTORIES = new Set(['.agent', '.claude', '.git', '.playwright', '.playwright-cli', 'node_modules']);
+const KNOWLEDGE_SYNC_RULES = [
+  {
+    description: 'session page inventory and leases',
+    matches: (file) => file === 'packages/server/openapi/sessions.json'
+      || file === 'packages/server/src/index.js'
+      || file === 'packages/server/instructions/agent.md',
+    notes: ['.kn/system.md', '.kn/browser-lifecycle.md', '.kn/journeys.md'],
+  },
+  {
+    description: 'live multi-page monitoring',
+    matches: (file) => /^packages\/gui\/(?:src\/monitor\.js|src\/server\.js|public\/monitor\.(?:js|html|css)|public\/app\.js|public\/styles\.css)$/.test(file),
+    notes: ['.kn/journeys.md'],
+  },
+];
 const errors = [];
 
 function reportError(message) {
@@ -174,6 +189,46 @@ function validateKnowledgeTerminology(files) {
   }
 }
 
+function validateKnowledgeSourcePaths(files) {
+  const noteFiles = files.filter((filePath) => path.relative(REPO_ROOT, filePath).startsWith(`.kn${path.sep}`) && filePath.endsWith('.md'));
+  for (const filePath of noteFiles) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    for (const match of source.matchAll(/`((?:AGENTS\.md|e2e\/|packages\/|docs\/|graphify-out\/)[^`\s,:)]*)(?::\d+(?:-\d+)?)?`/g)) {
+      const citedPath = match[1];
+      if (!fs.existsSync(path.join(REPO_ROOT, citedPath))) {
+        reportError(`${relative(filePath)}: cited knowledge source is missing ${citedPath}`);
+      }
+    }
+  }
+  return noteFiles.length;
+}
+
+function changedFilesSinceBase() {
+  const base = process.env.KB_BASE_SHA;
+  if (!base || /^0+$/.test(base)) return [];
+  try {
+    const mergeBase = execFileSync('git', ['merge-base', base, 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
+    return execFileSync('git', ['diff', '--name-only', `${mergeBase}..HEAD`], { cwd: REPO_ROOT, encoding: 'utf8' })
+      .split('\n')
+      .filter(Boolean);
+  } catch (error) {
+    reportError(`cannot compare knowledge changes against KB_BASE_SHA (${error.message})`);
+    return [];
+  }
+}
+
+function validateKnowledgeChangeCoverage() {
+  const changed = changedFilesSinceBase();
+  for (const rule of KNOWLEDGE_SYNC_RULES) {
+    const affected = changed.filter(rule.matches);
+    if (!affected.length) continue;
+    const missingNotes = rule.notes.filter((note) => !changed.includes(note));
+    if (missingNotes.length) {
+      reportError(`${rule.description} changed (${affected.join(', ')}) without updating ${missingNotes.join(', ')}`);
+    }
+  }
+}
+
 function openApiOperations(documents) {
   const operations = [];
   const seen = new Set();
@@ -239,8 +294,10 @@ const files = walk(REPO_ROOT);
 const openApiCount = validateOpenApiFiles(files);
 const templateCount = validateInstructionTemplates();
 const markdownCount = validateMarkdownLinks(files);
+const knowledgeNoteCount = validateKnowledgeSourcePaths(files);
 validateDocumentedNpmScripts(files);
 validateKnowledgeTerminology(files);
+validateKnowledgeChangeCoverage();
 await validateLiveKnowledge();
 
 if (errors.length) {
@@ -248,5 +305,5 @@ if (errors.length) {
   for (const error of errors) console.error(`- ${error}`);
   process.exitCode = 1;
 } else {
-  console.log(`Knowledge base checks passed (${openApiCount} OpenAPI documents, ${templateCount} templates, ${markdownCount} Markdown files).`);
+  console.log(`Knowledge base checks passed (${openApiCount} OpenAPI documents, ${templateCount} templates, ${markdownCount} Markdown files, ${knowledgeNoteCount} knowledge notes).`);
 }

@@ -107,6 +107,16 @@ another live owner returns `409`; inspect `GET /_pwdev/browsers/:id` to see
 `POST /_pwdev/sessions/:id/release` and `{ "leaseId": "..." }` when the script
 ends, then clear the heartbeat timer.
 
+When agents share a browser session but work on separate tabs, first call
+`GET /_pwdev/sessions/:id/pages`. Select the Playwright page by matching its
+CDP target ID to the returned `page.id`; do not fall back to `pages()[0]` when
+a page ID was supplied. Before mutating that tab, claim it with
+`POST /_pwdev/sessions/:id/pages/:pageId/leases` and an owner payload. Release
+the returned lease with
+`DELETE /_pwdev/sessions/:id/pages/:pageId/leases/:leaseId`. This is a
+cooperative lock for pw-dev-aware clients, not a browser security boundary;
+raw CDP clients still have session-wide access.
+
 For parallel work, create multiple browsers that reference the same browser
 config. Each browser owns at most one transient session. When a browser has
 `proxyIds`, it selects and reserves the first available proxy. The session
@@ -123,6 +133,11 @@ the server removes a session when broker status no longer reports its instance.
 Stop with `POST /_pwdev/browsers/:id/stop` or
 `POST /_pwdev/sessions/:id/stop`. Detach Playwright with `browser.close()` when
 automation ends; that disconnects the client without stopping the instance.
+If an unreachable broker makes normal stop return `503`, retry either stop route
+with JSON `{ "force": true }`. Forced stop is local-only: it removes the transient
+session and makes its durable browser ready without contacting the broker or
+proxy manager. Use it only for outage recovery because the remote Chrome or
+proxy process may still be running and must be reconciled separately.
 
 For a remote SSH broker, when the selected `proxyId` resolves to a proxy URL,
 pw-dev asks the broker to create or reuse the required mapping. Do not create

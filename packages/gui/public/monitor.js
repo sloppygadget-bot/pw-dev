@@ -1,5 +1,7 @@
 const browserId = decodeURIComponent(location.pathname.split('/')[2] || '');
-const eventSource = new EventSource(`/api/monitor/${encodeURIComponent(browserId)}/events`);
+let pageId = new URLSearchParams(location.search).get('pageId');
+const monitorUrl = (suffix) => `/api/monitor/${encodeURIComponent(browserId)}/${suffix}${pageId ? `?pageId=${encodeURIComponent(pageId)}` : ''}`;
+const eventSource = new EventSource(monitorUrl('events'));
 const image = document.querySelector('#mirror-image');
 const imageWrap = document.querySelector('#mirror-frame-wrap');
 const empty = document.querySelector('#mirror-empty');
@@ -10,6 +12,8 @@ const subtitle = document.querySelector('#monitor-subtitle');
 const pageMeta = document.querySelector('#page-meta');
 const navTargetUrl = document.querySelector('#nav-target-url');
 const refreshButton = document.querySelector('#refresh-screenshot');
+const pageDots = document.querySelector('#page-dots');
+const pageSummary = document.querySelector('#page-summary');
 const SCREENSHOT_INTERVAL_MS = 1_000;
 const state = {
   previewUrl: undefined,
@@ -43,9 +47,18 @@ window.addEventListener('beforeunload', () => {
 void refreshScreenshot();
 
 function handleEvent(event) {
-  if (event.type === 'connected') {
-    setStatus('Live', 'good');
-    subtitle.textContent = `Session ${event.sessionId ?? 'live'}`;
+  if (event.type === 'connected' || event.type === 'pages') {
+    if (event.type === 'connected') {
+      setStatus('Live', 'good');
+      subtitle.textContent = `Session ${event.sessionId ?? 'live'}`;
+    }
+    if (event.pageId && event.pageId !== pageId) {
+      pageId = event.pageId;
+      const next = new URL(location.href);
+      next.searchParams.set('pageId', pageId);
+      history.replaceState(null, '', next);
+    }
+    renderPageDots(event.pages ?? [], event.pageId);
     return;
   }
   if (event.type === 'page' || event.type === 'viewport') {
@@ -86,7 +99,7 @@ async function refreshScreenshot() {
   state.refreshing = true;
   refreshButton.disabled = true;
   try {
-    const response = await fetch(`/api/monitor/${encodeURIComponent(browserId)}/preview`, { cache: 'no-store' });
+    const response = await fetch(monitorUrl('preview'), { cache: 'no-store' });
     if (!response.ok) throw new Error(`Screenshot capture failed: ${response.status}`);
     const nextUrl = URL.createObjectURL(await response.blob());
     const previousUrl = state.previewUrl;
@@ -104,6 +117,45 @@ async function refreshScreenshot() {
     refreshButton.disabled = false;
     state.refreshTimer = setTimeout(() => void refreshScreenshot(), SCREENSHOT_INTERVAL_MS);
   }
+}
+
+function renderPageDots(pages, selectedPageId) {
+  pageDots.replaceChildren();
+  const selectedPage = pages.find((page) => page.id === selectedPageId);
+  const visiblePages = pages.slice(0, 3);
+  if (selectedPage && !visiblePages.includes(selectedPage) && visiblePages.length === 3) visiblePages[2] = selectedPage;
+  const visibleIds = new Set(visiblePages.map((page) => page.id));
+  for (const page of visiblePages) {
+    const index = pages.indexOf(page);
+    const dot = document.createElement('button');
+    dot.type = 'button';
+    dot.className = `page-dot${page.id === selectedPageId ? ' selected' : ''}${page.lease ? ' leased' : ''}`;
+    dot.title = `${page.title || '(untitled)'} · ${page.url}${page.lease ? ` · leased by ${page.lease.owner}` : ' · available'}`;
+    dot.setAttribute('aria-label', `Monitor tab ${index + 1}: ${page.title || page.url}`);
+    dot.addEventListener('click', () => selectPage(page.id));
+    pageDots.append(dot);
+  }
+  const hiddenPages = pages.filter((page) => !visibleIds.has(page.id));
+  if (hiddenPages.length) {
+    const picker = document.createElement('select');
+    picker.className = 'page-picker';
+    picker.setAttribute('aria-label', 'Choose another session tab');
+    picker.append(new Option(`+${hiddenPages.length} tabs`, ''));
+    for (const page of hiddenPages) picker.append(new Option(`${page.lease ? '🔒 ' : ''}${page.title || page.url || '(untitled)'}`, page.id));
+    picker.addEventListener('change', () => {
+      if (picker.value) selectPage(picker.value);
+    });
+    pageDots.append(picker);
+  }
+  pageSummary.textContent = selectedPage
+    ? `${selectedPage.title || '(untitled)'} · ${selectedPage.lease ? `Leased by ${selectedPage.lease.owner}` : 'Available'}`
+    : pages.length ? 'Selected tab is no longer available' : 'No open tabs';
+}
+
+function selectPage(nextPageId) {
+  const next = new URL(location.href);
+  next.searchParams.set('pageId', nextPageId);
+  location.assign(next);
 }
 
 function placeClickMarker(click) {

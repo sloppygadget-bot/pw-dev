@@ -333,6 +333,10 @@ Duplicate starts for the same browser return `409 Conflict`. End completed
 sessions explicitly with `POST /_pwdev/browsers/:id/stop`; app registrations,
 browser profiles, browser configs, and
 managed proxy profiles remain available for later work.
+If the session's broker is unreachable, send `{ "force": true }` to either the
+browser-stop or session-stop route to discard transient local state without
+waiting on the broker. This is outage recovery only: remote Chrome and proxy
+processes may remain alive until separately reconciled.
 
 ## Tests
 

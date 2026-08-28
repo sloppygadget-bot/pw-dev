@@ -55,14 +55,27 @@ session still stops Chrome, while releasing a lease only releases ownership.
 - Provenance: EXTRACTED
 - Sources: `packages/server/openapi/sessions.json`, `packages/server/src/index.js:231-249`, `packages/server/src/index.js:1512-1568`
 
+## Page inventory and cooperative page lease
+
+A live session can contain multiple CDP page targets. `GET
+/_pwdev/sessions/:id/pages` returns their IDs, titles, URLs, optional opener
+IDs, and any active cooperative page lease. Before an agent mutates a specific
+tab, it identifies the matching Playwright page by CDP target ID, claims that
+page, and releases the claim when finished. A page lease coordinates pw-dev
+clients only; raw CDP remains browser-wide and is not technically blocked.
+
+- Provenance: EXTRACTED
+- Sources: `packages/server/openapi/sessions.json`, `packages/server/src/index.js:1063-1094`, `packages/server/src/index.js:1623-1693`
+
 ## Operational implication
 
 An agent should discover live instructions first, create or reuse a browser
 config and durable browser, use only the server origin, attach to the returned
 CDP URL, and stop its session in cleanup. It should heartbeat a claimed lease
-while working and release or stop it in cleanup. Direct broker or
-proxy-manager ports are implementation details and are not part of the agent
-contract.
+while working and release or stop it in cleanup. For tab-specific work, it
+should enumerate pages, claim the intended target, and release that page claim
+before releasing the session lease. Direct broker or proxy-manager ports are
+implementation details and are not part of the agent contract.
 
 - Provenance: INFERRED from the documented workflow
 - Sources: `packages/server/instructions/agent.md`, `AGENTS.md`, `docs/server.md`

@@ -1,0 +1,4 @@
+interface:
+  display_name: "pw-dev Control Plane"
+  short_description: "Manage pw-dev browsers and proxies safely"
+  default_prompt: "Use $pw-dev-control-plane to inspect and manage the running pw-dev server."

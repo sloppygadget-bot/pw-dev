@@ -16,6 +16,15 @@ Refresh them after a meaningful lifecycle or API change. `graphify-out/` is the
 discovery/audit source; the implementation and OpenAPI files remain the source
 of truth for behavior.
 
+## Sync contract
+
+Keep a note synchronized when one of its cited lifecycle, OpenAPI, or monitor
+sources changes. Update the note's operational consequence and provenance with
+the code change; do not turn this directory into a line-by-line generated
+summary. CI validates cited source paths and, when a comparison base is
+available, requires the affected durable notes to change with their contract
+sources.
+
 ## Index
 
 - [system](system.md) — the control-plane model and ownership boundaries.

@@ -332,6 +332,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(client.body, /registerPwDevApp/);
     assert.match(client.body, /listPwDevSessions/);
     assert.match(client.body, /stopPwDevSession/);
+    assert.match(client.body, /stopPwDevSession\(\{ serverUrl = .* sessionId, force = false \}/);
+    assert.match(client.body, /stopPwDevBrowser\(\{ serverUrl = .* browserId, force = false \}/);
     assert.match(client.body, /createPwDevBrokerNetwork/);
     assert.doesNotMatch(client.body, /createPwDevNetwork/);
     assert.match(client.body, /loadPwDevManifest/);
@@ -363,6 +365,10 @@ test('server exposes a machine-readable API reference', async () => {
     assert.equal(api.body.entities.sessions.fields.includes('proxyId?'), true);
     assert.equal(api.body.entities.browsers.persistent, true);
     assert.equal(api.body.endpoints.some((endpoint) => endpoint.path === '/_pwdev/browsers/:id/start'), true);
+    assert.deepEqual(
+      api.body.endpoints.find((endpoint) => endpoint.path === '/_pwdev/browsers/:id/stop').body.optional,
+      ['force'],
+    );
     assert.deepEqual(api.body.details.resources, ['apps', 'browserConfigs', 'browsers', 'proxies', 'sessions']);
 
     const proxies = await getJson(`${server.origin}/_pwdev/api/proxies`);
@@ -371,6 +377,10 @@ test('server exposes a machine-readable API reference', async () => {
     const browsers = await getJson(`${server.origin}/_pwdev/openapi/browsers.json`);
     assert.equal(browsers.statusCode, 200);
     assert.ok(browsers.body.paths['/_pwdev/browsers/{id}/start']);
+    assert.equal(
+      browsers.body.paths['/_pwdev/browsers/{id}/stop'].post.requestBody.content['application/json'].schema.$ref,
+      '#/components/schemas/StopOptions',
+    );
     const appsDocument = await getJson(`${server.origin}/_pwdev/openapi/apps.json`);
     assert.equal(appsDocument.statusCode, 200);
     assert.ok(appsDocument.body.paths['/_pwdev/apps/{id}'].get);
@@ -379,6 +389,7 @@ test('server exposes a machine-readable API reference', async () => {
     const sessionsDocument = await getJson(`${server.origin}/_pwdev/openapi/sessions.json`);
     assert.equal(sessionsDocument.statusCode, 200);
     assert.ok(sessionsDocument.body.paths['/_pwdev/sessions/{id}'].get);
+    assert.equal(sessionsDocument.body.components.schemas.StopOptions.properties.force.type, 'boolean');
     const traffic = proxies.body.operations.find((operation) => operation.path === '/_pwdev/proxies/:id/traffic');
     assert.match(traffic.usage, /dumpCount/);
     assert.match(traffic.restrictions.join(' '), /mtype=1/);
@@ -663,6 +674,138 @@ test('browser sessions expose claim ownership and reclaim stale leases', async (
   } finally {
     await server.close();
     await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('session pages expose live targets and cooperative page leases', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const broker = await startMockBroker();
+  const server = await startPwDevServer({ root, port: 0, brokerUrl: broker.origin });
+  try {
+    await postJson(`${server.origin}/_pwdev/browser-configs`, { id: 'page-config', headless: true });
+    await postJson(`${server.origin}/_pwdev/browsers`, { id: 'page-browser', browserConfigId: 'page-config' });
+    const started = await postJson(`${server.origin}/_pwdev/browsers/page-browser/start`, {});
+    const sessionId = started.body.session.sessionId;
+
+    const inventory = await getJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages`);
+    assert.equal(inventory.statusCode, 200);
+    assert.deepEqual(inventory.body.pages.map((page) => page.id), ['page-a', 'page-b']);
+    assert.equal(inventory.body.pages[0].webSocketDebuggerUrl, undefined);
+
+    const claimed = await postJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages/page-b/leases`, {
+      owner: 'agent-a', taskId: 'tab-work', ttlMs: 5000,
+    });
+    assert.equal(claimed.statusCode, 200);
+    assert.match(claimed.body.lease.leaseId, /^pagelease_/);
+    assert.equal(claimed.body.page.lease.owner, 'agent-a');
+
+    const blocked = await postJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages/page-b/leases`, {
+      owner: 'agent-b', ttlMs: 5000,
+    });
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.body.lease.owner, 'agent-a');
+
+    const leasedInventory = await getJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages`);
+    assert.equal(leasedInventory.body.pages[1].lease.leaseId, claimed.body.lease.leaseId);
+
+    broker.setPages([{ id: 'page-a', type: 'page', title: 'Home', url: 'https://example.test/' }]);
+    const afterClose = await getJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages`);
+    assert.deepEqual(afterClose.body.pages.map((page) => page.id), ['page-a']);
+    broker.setPages([
+      { id: 'page-a', type: 'page', title: 'Home', url: 'https://example.test/' },
+      { id: 'page-b', type: 'page', title: 'New cart', url: 'https://example.test/cart' },
+    ]);
+    const afterReopen = await getJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages`);
+    assert.equal(afterReopen.body.pages[1].lease, undefined, 'closing a target must discard its stale lease');
+
+    const reclaimed = await postJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages/page-b/leases`, {
+      owner: 'agent-a', taskId: 'tab-work', ttlMs: 5000,
+    });
+    const released = await deleteJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages/page-b/leases/${reclaimed.body.lease.leaseId}`);
+    assert.equal(released.statusCode, 200);
+    assert.equal(released.body.released, true);
+    const availableInventory = await getJson(`${server.origin}/_pwdev/sessions/${sessionId}/pages`);
+    assert.equal(availableInventory.body.pages[1].lease, undefined);
+  } finally {
+    await server.close();
+    await broker.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('forced browser and session stops discard local state without contacting stalled dependencies', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-server-'));
+  const broker = await startMockBroker();
+  const manager = await startMockProxyManager({
+    proxies: [{
+      id: 'stalled-traffic',
+      kind: 'whistle',
+      proxyUrl: 'http://127.0.0.1:8899',
+      guiUrl: 'http://127.0.0.1:9800',
+      managed: true,
+      running: false,
+    }],
+  });
+  const server = await startPwDevServer({
+    root,
+    port: 0,
+    brokerUrl: broker.origin,
+    proxyManagerUrl: manager.origin,
+  });
+  try {
+    await postJson(`${server.origin}/_pwdev/proxies`, manager.proxies[0]);
+    await postJson(`${server.origin}/_pwdev/browser-configs`, { id: 'stalled-config' });
+    await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'force-browser-stop',
+      browserConfigId: 'stalled-config',
+      proxyId: 'stalled-traffic',
+    });
+    await postJson(`${server.origin}/_pwdev/browsers`, {
+      id: 'force-session-stop',
+      browserConfigId: 'stalled-config',
+    });
+    await postJson(`${server.origin}/_pwdev/browsers/force-browser-stop/start`, {});
+    await postJson(`${server.origin}/_pwdev/browsers/force-session-stop/start`, {});
+
+    const brokerRequestCount = broker.requests.length;
+    const managerRequestCount = manager.requests.length;
+    broker.stall();
+
+    const invalidStop = await postJson(`${server.origin}/_pwdev/browsers/force-browser-stop/stop`, { force: 'true' });
+    assert.equal(invalidStop.statusCode, 400);
+    assert.match(invalidStop.body.error, /force must be a boolean/);
+    assert.equal(broker.requests.length, brokerRequestCount);
+    assert.equal(manager.requests.length, managerRequestCount);
+
+    const startedAt = Date.now();
+    const browserStopped = await postJson(`${server.origin}/_pwdev/browsers/force-browser-stop/stop`, { force: true });
+    const sessionStopped = await postJson(`${server.origin}/_pwdev/sessions/force-session-stop__default/stop`, { force: true });
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.equal(browserStopped.statusCode, 200);
+    assert.equal(browserStopped.body.forced, true);
+    assert.equal(browserStopped.body.brokerStopSkipped, true);
+    assert.equal(browserStopped.body.proxyStopSkipped, true);
+    assert.equal(browserStopped.body.browser.status, 'ready');
+    assert.equal(sessionStopped.statusCode, 200);
+    assert.equal(sessionStopped.body.forced, true);
+    assert.equal(sessionStopped.body.brokerStopSkipped, true);
+    assert.equal(elapsedMs < 500, true, `forced teardown took ${elapsedMs}ms`);
+    assert.equal(broker.requests.length, brokerRequestCount);
+    assert.equal(manager.requests.length, managerRequestCount);
+
+    const sessions = await getJson(`${server.origin}/_pwdev/sessions`);
+    assert.deepEqual(sessions.body.sessions, []);
+    const browsers = await getJson(`${server.origin}/_pwdev/browsers`);
+    assert.deepEqual(browsers.body.browsers.map((browser) => [browser.id, browser.status]), [
+      ['force-browser-stop', 'ready'],
+      ['force-session-stop', 'ready'],
+    ]);
+  } finally {
+    await server.close();
+    await broker.close();
+    await manager.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -2050,6 +2193,11 @@ function startMockBroker({ topology } = {}) {
   const requests = [];
   const upgrades = [];
   const instances = new Map();
+  let pages = [
+    { id: 'page-a', type: 'page', title: 'Home', url: 'https://example.test/', webSocketDebuggerUrl: 'ws://private/page-a' },
+    { id: 'page-b', type: 'page', title: 'Cart', url: 'https://example.test/cart', openerId: 'page-a', webSocketDebuggerUrl: 'ws://private/page-b' },
+    { id: 'worker-a', type: 'service_worker', title: 'Worker', url: 'https://example.test/sw.js' },
+  ];
   let stalled = false;
   let origin;
   const server = http.createServer(async (req, res) => {
@@ -2089,6 +2237,11 @@ function startMockBroker({ topology } = {}) {
         Browser: 'MockChrome/1.0',
         webSocketDebuggerUrl: `ws://${new URL(origin).host}${req.url.replace(/\/json\/version$/, '/devtools/browser/mock')}`,
       });
+      return;
+    }
+
+    if (/^\/_broker\/instances\/[^/]+\/json\/list$/.test(req.url) && req.method === 'GET') {
+      writeTestJson(res, 200, pages);
       return;
     }
 
@@ -2144,6 +2297,7 @@ function startMockBroker({ topology } = {}) {
       origin,
       requests,
       upgrades,
+      setPages: (nextPages) => { pages = nextPages; },
       stall: () => { stalled = true; },
       crash: () => instances.clear(),
       close: () => new Promise((closeResolve, closeReject) => {

@@ -395,10 +395,35 @@ claim the still-running session. Inspect `GET /_pwdev/browsers/:id` for
 server's reconciled view of live broker instances; broker status remains the
 source of truth. Stop the browser or its session explicitly:
 
+For multiple agents sharing one session, list its live tabs with
+`GET /_pwdev/sessions/:id/pages`. Each `page.id` is the CDP target ID to use
+when selecting the Playwright page. Claim a specific tab with
+`POST /_pwdev/sessions/:id/pages/:pageId/leases` and the same
+`{ "owner", "agentId", "taskId", "ttlMs" }` shape. Release it with
+`DELETE /_pwdev/sessions/:id/pages/:pageId/leases/:leaseId`. Page leases are
+short-lived cooperative locks: pw-dev clients must honor them, but a raw CDP
+client can still access every tab in the browser. A tab close removes its
+lease during the next inventory reconciliation.
+
 ```bash
 curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop
 curl -X POST http://127.0.0.1:9696/_pwdev/sessions/checkout-tax__default/stop
 ```
+
+If a network outage leaves the session's recorded broker URL unreachable,
+normal stop returns `503` and preserves the record. Recover without restarting
+the server by forcing either stop route:
+
+```bash
+curl -X POST http://127.0.0.1:9696/_pwdev/browsers/checkout-tax/stop \
+  -H 'content-type: application/json' \
+  -d '{"force":true}'
+```
+
+Forced stop performs local cleanup only: it removes the transient session and
+marks the durable browser ready without contacting the broker or proxy manager.
+The unreachable Chrome or proxy may still be running, so use this only for
+outage recovery and reconcile those remote processes after connectivity returns.
 
 For parallel isolated instances, create multiple browsers that reference one
 browser config. pw-dev derives a separate persistent profile for each browser:

@@ -1,5 +1,260 @@
 {
-  "generated_at": "2026-08-02T07:05:02.002073+00:00",
-  "nodes": {},
+  "generated_at": "2026-08-26T16:44:59.855394+00:00",
+  "nodes": {
+    "packages_gui_public_app": {
+      "code_fingerprint": "67954b828be209cda8c15000b00512520fdce484a54ac70185ce5b7ed3080adb",
+      "label": "app.js",
+      "last": "2026-08-26T16:30:01.997442+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:30:01.997442+00:00",
+          "outcome": "useful",
+          "q": "Which GUI browser-diagram elements control thumbnail width, action-button spacing, and browser deletion?"
+        },
+        {
+          "date": "2026-08-26T16:15:45.674352+00:00",
+          "outcome": "useful",
+          "q": "Which browser diagram elements and styles control a responsive two-column browser-card grid?"
+        },
+        {
+          "date": "2026-08-26T16:09:07.750215+00:00",
+          "outcome": "useful",
+          "q": "Which GUI files implement the left navigation menu, view selection, layout styles, and their tests?"
+        }
+      ],
+      "score": 2.99871559,
+      "source_file": "packages/gui/public/app.js",
+      "status": "preferred",
+      "uses": 3
+    },
+    "packages_gui_public_app_browseractions": {
+      "code_fingerprint": "67954b828be209cda8c15000b00512520fdce484a54ac70185ce5b7ed3080adb",
+      "label": "browserActions()",
+      "last": "2026-08-26T16:30:01.997442+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:30:01.997442+00:00",
+          "outcome": "useful",
+          "q": "Which GUI browser-diagram elements control thumbnail width, action-button spacing, and browser deletion?"
+        }
+      ],
+      "score": 0.999759926,
+      "source_file": "packages/gui/public/app.js",
+      "status": "tentative",
+      "uses": 1
+    },
+    "packages_gui_public_app_renderbrowserdiagram": {
+      "code_fingerprint": "67954b828be209cda8c15000b00512520fdce484a54ac70185ce5b7ed3080adb",
+      "label": "renderBrowserDiagram()",
+      "last": "2026-08-26T16:30:01.997442+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:30:01.997442+00:00",
+          "outcome": "useful",
+          "q": "Which GUI browser-diagram elements control thumbnail width, action-button spacing, and browser deletion?"
+        },
+        {
+          "date": "2026-08-26T16:15:45.674352+00:00",
+          "outcome": "useful",
+          "q": "Which browser diagram elements and styles control a responsive two-column browser-card grid?"
+        }
+      ],
+      "score": 1.999290936,
+      "source_file": "packages/gui/public/app.js",
+      "status": "preferred",
+      "uses": 2
+    },
+    "packages_gui_public_app_renderbrowsers": {
+      "code_fingerprint": "67954b828be209cda8c15000b00512520fdce484a54ac70185ce5b7ed3080adb",
+      "label": "renderBrowsers()",
+      "last": "2026-08-26T16:15:45.674352+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:15:45.674352+00:00",
+          "outcome": "useful",
+          "q": "Which browser diagram elements and styles control a responsive two-column browser-card grid?"
+        }
+      ],
+      "score": 0.999531011,
+      "source_file": "packages/gui/public/app.js",
+      "status": "tentative",
+      "uses": 1
+    },
+    "packages_gui_public_app_showview": {
+      "code_fingerprint": "67954b828be209cda8c15000b00512520fdce484a54ac70185ce5b7ed3080adb",
+      "label": "showView()",
+      "last": "2026-08-26T16:09:07.750215+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:09:07.750215+00:00",
+          "outcome": "useful",
+          "q": "Which GUI files implement the left navigation menu, view selection, layout styles, and their tests?"
+        }
+      ],
+      "score": 0.999424654,
+      "source_file": "packages/gui/public/app.js",
+      "status": "tentative",
+      "uses": 1
+    },
+    "packages_gui_public_monitor_clickmarker": {
+      "code_fingerprint": "d4ebcb821cb5acb8b53368ecf6722c9f0131f44d83ef349549ecc8a8a15dd10c",
+      "label": "clickMarker",
+      "last": "2026-08-26T16:43:16.024460+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:43:16.024460+00:00",
+          "outcome": "useful",
+          "q": "How complex is coordinate mapping for adding mouse input to the JPEG monitor?"
+        },
+        {
+          "date": "2026-08-26T16:40:42.488214+00:00",
+          "outcome": "useful",
+          "q": "Can the current JPEG browser monitor relay mouse and keyboard input to a remote browser?"
+        }
+      ],
+      "score": 1.999903412,
+      "source_file": "packages/gui/public/monitor.js",
+      "status": "preferred",
+      "uses": 2
+    },
+    "packages_gui_public_monitor_handleevent": {
+      "code_fingerprint": "d4ebcb821cb5acb8b53368ecf6722c9f0131f44d83ef349549ecc8a8a15dd10c",
+      "label": "handleEvent()",
+      "last": "2026-08-26T16:43:16.024460+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:43:16.024460+00:00",
+          "outcome": "useful",
+          "q": "How complex is coordinate mapping for adding mouse input to the JPEG monitor?"
+        },
+        {
+          "date": "2026-08-26T16:40:42.488214+00:00",
+          "outcome": "useful",
+          "q": "Can the current JPEG browser monitor relay mouse and keyboard input to a remote browser?"
+        }
+      ],
+      "score": 1.999903412,
+      "source_file": "packages/gui/public/monitor.js",
+      "status": "preferred",
+      "uses": 2
+    },
+    "packages_gui_src_monitor_browsermonitorhub": {
+      "code_fingerprint": "2cac8564d594fb8b703e76c8b66d2e7dd3d562d83bf234eef768bb6bc0f87116",
+      "label": "BrowserMonitorHub",
+      "last": "2026-08-26T16:43:16.024460+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:43:16.024460+00:00",
+          "outcome": "useful",
+          "q": "How complex is coordinate mapping for adding mouse input to the JPEG monitor?"
+        },
+        {
+          "date": "2026-08-26T16:40:42.488214+00:00",
+          "outcome": "useful",
+          "q": "Can the current JPEG browser monitor relay mouse and keyboard input to a remote browser?"
+        }
+      ],
+      "score": 1.999903412,
+      "source_file": "packages/gui/src/monitor.js",
+      "status": "preferred",
+      "uses": 2
+    },
+    "packages_gui_test_gui_test": {
+      "code_fingerprint": "fa5c5c5530f8b46a79c42621cbe5dae32f7244dfc91194d0fbe9534c0116a37b",
+      "label": "gui.test.js",
+      "last": "2026-08-26T16:09:07.750215+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-26T16:09:07.750215+00:00",
+          "outcome": "useful",
+          "q": "Which GUI files implement the left navigation menu, view selection, layout styles, and their tests?"
+        }
+      ],
+      "score": 0.999424654,
+      "source_file": "packages/gui/test/gui.test.js",
+      "status": "tentative",
+      "uses": 1
+    },
+    "packages_server_src_index_controlplaneopenapicatalog": {
+      "code_fingerprint": "d3ca2042e24a7bb62c4caa5246eef4b894d2f67aa37affbe19a174e13c51dc9c",
+      "label": "controlPlaneOpenApiCatalog()",
+      "last": "2026-08-02T07:05:33.391373+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-02T07:05:33.391373+00:00",
+          "outcome": "useful",
+          "q": "Why does startPwDevServer() connect Server Registry to OpenAPI Catalog, File and JSON Utilities, HTTP Test Helpers, Proxy Manager, and Proxy Broker Bridge"
+        }
+      ],
+      "score": 0.569034099,
+      "source_file": "packages/server/src/index.js",
+      "status": "tentative",
+      "uses": 1
+    },
+    "packages_server_src_index_createappregistry": {
+      "code_fingerprint": "d3ca2042e24a7bb62c4caa5246eef4b894d2f67aa37affbe19a174e13c51dc9c",
+      "label": "createAppRegistry()",
+      "last": "2026-08-02T07:05:33.391373+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-02T07:05:33.391373+00:00",
+          "outcome": "useful",
+          "q": "Why does startPwDevServer() connect Server Registry to OpenAPI Catalog, File and JSON Utilities, HTTP Test Helpers, Proxy Manager, and Proxy Broker Bridge"
+        }
+      ],
+      "score": 0.569034099,
+      "source_file": "packages/server/src/index.js",
+      "status": "tentative",
+      "uses": 1
+    },
+    "packages_server_src_index_handlepwdevrequest": {
+      "code_fingerprint": "d3ca2042e24a7bb62c4caa5246eef4b894d2f67aa37affbe19a174e13c51dc9c",
+      "label": "handlePwDevRequest()",
+      "last": "2026-08-02T07:05:33.391373+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-02T07:05:33.391373+00:00",
+          "outcome": "useful",
+          "q": "Why does startPwDevServer() connect Server Registry to OpenAPI Catalog, File and JSON Utilities, HTTP Test Helpers, Proxy Manager, and Proxy Broker Bridge"
+        }
+      ],
+      "score": 0.569034099,
+      "source_file": "packages/server/src/index.js",
+      "status": "tentative",
+      "uses": 1
+    },
+    "packages_server_src_index_proxybrokerupgrade": {
+      "code_fingerprint": "d3ca2042e24a7bb62c4caa5246eef4b894d2f67aa37affbe19a174e13c51dc9c",
+      "label": "proxyBrokerUpgrade()",
+      "last": "2026-08-02T07:05:33.391373+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-02T07:05:33.391373+00:00",
+          "outcome": "useful",
+          "q": "Why does startPwDevServer() connect Server Registry to OpenAPI Catalog, File and JSON Utilities, HTTP Test Helpers, Proxy Manager, and Proxy Broker Bridge"
+        }
+      ],
+      "score": 0.569034099,
+      "source_file": "packages/server/src/index.js",
+      "status": "tentative",
+      "uses": 1
+    },
+    "packages_server_src_index_startpwdevserver": {
+      "code_fingerprint": "d3ca2042e24a7bb62c4caa5246eef4b894d2f67aa37affbe19a174e13c51dc9c",
+      "label": "startPwDevServer()",
+      "last": "2026-08-02T07:05:33.391373+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-02T07:05:33.391373+00:00",
+          "outcome": "useful",
+          "q": "Why does startPwDevServer() connect Server Registry to OpenAPI Catalog, File and JSON Utilities, HTTP Test Helpers, Proxy Manager, and Proxy Broker Bridge"
+        }
+      ],
+      "score": 0.569034099,
+      "source_file": "packages/server/src/index.js",
+      "status": "tentative",
+      "uses": 1
+    }
+  },
   "version": 1
 }

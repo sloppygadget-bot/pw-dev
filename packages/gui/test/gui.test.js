@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import test from 'node:test';
@@ -107,6 +108,73 @@ test('monitor relays real browser click coordinates to its event subscribers', (
   ]);
 });
 
+test('two-tab monitor resolves targets, routes actions, discovers popups, falls back, and cleans up', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'page-a', title: 'Home', url: 'https://shop.test/' },
+    { id: 'page-b', title: 'Birds', url: 'https://shop.test/birds' },
+  ]);
+  const fetchedUrls = [];
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async (cdpUrl) => {
+      assert.equal(cdpUrl, 'http://broker.test/session');
+      return browserDouble.browser;
+    },
+    fetchJson: async (rawUrl) => {
+      fetchedUrls.push(rawUrl);
+      if (rawUrl.endsWith('/_pwdev/browsers/shared-browser')) {
+        return { ok: true, statusCode: 200, body: { browser: { runtime: { sessionId: 'shared-session', cdpUrl: 'http://broker.test/session' } } } };
+      }
+      if (rawUrl.endsWith('/_pwdev/sessions/shared-session/pages')) {
+        return {
+          ok: true,
+          statusCode: 200,
+          body: { pages: browserDouble.livePages().map((page) => ({ id: page.id, title: page.titleValue, url: page.url(), ...(page.lease ? { lease: page.lease } : {}) })) },
+        };
+      }
+      return { ok: false, statusCode: 404, body: {} };
+    },
+  });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: hub });
+  try {
+    const selected = await hub.ensureConnection('shared-browser', 'page-b');
+    assert.equal(selected.pageId, 'page-b');
+    assert.equal(selected.page, browserDouble.page('page-b'));
+
+    const action = await postJson(`${gui.origin}/api/monitor/shared-browser/action?pageId=page-b`, { action: 'click', path: [1, 2] });
+    assert.equal(action.statusCode, 200);
+    assert.deepEqual(browserDouble.page('page-a').actions, []);
+    assert.deepEqual(browserDouble.page('page-b').actions, [{ action: 'click', path: [1, 2], behavior: undefined }]);
+
+    const req = new EventEmitter();
+    const res = new MonitorResponseDouble();
+    await hub.stream('shared-browser', 'page-b', req, res);
+    const connected = res.events().find((event) => event.type === 'connected');
+    assert.equal(connected.pageId, 'page-b');
+
+    browserDouble.open({ id: 'page-c', title: 'Bird popup', url: 'https://shop.test/birds/cockatiel', lease: { owner: 'popup-agent' } });
+    const withPopup = await hub.refreshPageInventory(selected);
+    assert.deepEqual(withPopup.map((page) => page.id), ['page-a', 'page-b', 'page-c']);
+    assert.equal(withPopup[2].lease.owner, 'popup-agent');
+
+    browserDouble.closePage('page-b');
+    const afterClose = await hub.refreshPageInventory(selected);
+    assert.deepEqual(afterClose.map((page) => page.id), ['page-a', 'page-c']);
+    assert.equal(selected.pageId, 'page-a');
+    assert.equal(selected.page, browserDouble.page('page-a'));
+    assert.equal(hub.connections.get('shared-browser:page-a'), selected);
+    assert.equal(hub.connections.has('shared-browser:page-b'), false);
+
+    req.emit('close');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(browserDouble.closeCalls, 1);
+    assert.equal(hub.connections.size, 0);
+    assert.equal(fetchedUrls.some((url) => url.endsWith('/_pwdev/sessions/shared-session/pages')), true);
+  } finally {
+    await gui.close();
+  }
+});
+
 test('gui serves static app and read-only config', async () => {
   const server = await startPwDevGuiServer({
     port: 0,
@@ -161,11 +229,12 @@ test('gui serves static app and read-only config', async () => {
     assert.match(monitor.body, /id="nav-target-url"/);
     assert.match(monitor.body, /id="mirror-click-marker"/);
     assert.match(monitor.body, /id="refresh-screenshot"/);
+    assert.match(monitor.body, /id="page-summary"/);
     const monitorScript = await get(`${server.origin}/monitor.js`);
     assert.equal(monitorScript.statusCode, 200);
     assert.match(monitorScript.body, /EventSource/);
     assert.match(monitorScript.body, /refreshScreenshot/);
-    assert.match(monitorScript.body, /\/api\/monitor\/\$\{encodeURIComponent\(browserId\)\}\/preview/);
+    assert.match(monitorScript.body, /monitorUrl\('preview'\)/);
     assert.match(monitorScript.body, /placeClickMarker/);
     assert.doesNotMatch(monitorScript.body, /sanitizeHtml/);
     assert.doesNotMatch(monitorScript.body, /Rendering DOM snapshot/);
@@ -175,8 +244,9 @@ test('gui serves static app and read-only config', async () => {
     const monitorSource = await fs.readFile(new URL('../src/monitor.js', import.meta.url), 'utf8');
     assert.match(monitorSource, /browserRecord\.body\?\.browser\?\.runtime/);
     assert.match(monitorSource, /browserRecord\.body\?\.browser\?\.sessions\?\.\[0\]/);
-    assert.match(monitorSource, /preview\(browserId\)/);
-    assert.match(monitorSource, /async capturePreview\(browserId\)/);
+    assert.match(monitorSource, /preview\(browserId, pageId\)/);
+    assert.match(monitorSource, /async capturePreview\(browserId, pageId\)/);
+    assert.match(monitorSource, /Target\.getTargetInfo/);
     assert.match(monitorSource, /Live screenshot monitor requires Playwright/);
     assert.doesNotMatch(monitorSource, /MutationObserver/);
     const monitorStyle = await get(`${server.origin}/monitor.css`);
@@ -250,6 +320,9 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /content\.append\(details, preview\);/);
     assert.match(appScript.body, /preview\.className = 'browser-preview'/);
     assert.match(appScript.body, /function refreshBrowserPreviews/);
+    assert.match(appScript.body, /function renderBrowserPreviewTabs/);
+    assert.match(appScript.body, /\/api\/pwdev\/sessions\/\$\{encodeURIComponent\(browser\.sessionId\)\}\/pages/);
+    assert.match(appScript.body, /browser-preview-dot/);
     assert.match(appScript.body, /URL\.createObjectURL\(await response\.blob\(\)\)/);
     assert.doesNotMatch(appScript.body, /setInterval\(\(\) => void refresh\(\)/);
     assert.match(appScript.body, /renderBrowsers\(snapshot\.browsers\);[\s\S]*?void refreshBrowserPreviews\(snapshot\.browsers\)/);
@@ -271,6 +344,8 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /\.browser-diagram-title \{\s*margin-bottom: 8px/);
     assert.match(styles.body, /\.browser-diagram-controls \{ display: flex; margin-bottom: 8px; \}/);
     assert.match(styles.body, /\.browser-diagram-content/);
+    assert.match(styles.body, /\.browser-preview-pages/);
+    assert.match(styles.body, /\.browser-preview-dot\.selected/);
     assert.match(styles.body, /grid-template-columns: minmax\(240px, 34%\) minmax\(0, 1fr\)/);
     assert.match(styles.body, /\.browser-diagram-content[\s\S]*?gap: 12px/);
     assert.match(styles.body, /\.browsers-diagram[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
@@ -646,6 +721,116 @@ test('gui snapshot discovers ready brokers from the localhost scan range', async
     await proxy.close();
   }
 });
+
+function createMonitorBrowserDouble(initialPages) {
+  const pages = [];
+  const browserEvents = new EventEmitter();
+  let connected = true;
+  let closeCalls = 0;
+  const context = {
+    pages: () => pages.filter((page) => !page.isClosed()),
+    newCDPSession: async (page) => ({
+      send: async (method) => {
+        assert.equal(method, 'Target.getTargetInfo');
+        return { targetInfo: { targetId: page.id } };
+      },
+      detach: async () => {},
+    }),
+  };
+  const makePage = ({ id, title, url, lease }) => {
+    const events = new EventEmitter();
+    const frame = {};
+    let closed = false;
+    return {
+      id,
+      titleValue: title,
+      lease,
+      actions: [],
+      context: () => context,
+      title: async () => title,
+      url: () => url,
+      isClosed: () => closed,
+      closeTarget: () => { closed = true; events.emit('close'); },
+      on: events.on.bind(events),
+      mainFrame: () => frame,
+      exposeFunction: async () => {},
+      evaluate: async (_callback, value) => {
+        if (value?.action) {
+          const page = pages.find((candidate) => candidate.id === id);
+          page.actions.push(value);
+          return { tagName: 'BUTTON', text: title };
+        }
+        return {
+          url,
+          title,
+          viewport: { width: 1280, height: 720, devicePixelRatio: 1 },
+          scroll: { x: 0, y: 0 },
+          capturedAt: '2026-08-27T00:00:00.000Z',
+        };
+      },
+      screenshot: async () => Buffer.from(id),
+    };
+  };
+  const double = {
+    browser: {
+      contexts: () => [context],
+      isConnected: () => connected,
+      on: browserEvents.on.bind(browserEvents),
+      close: async () => {
+        if (!connected) return;
+        closeCalls += 1;
+        connected = false;
+        browserEvents.emit('disconnected');
+      },
+    },
+    open(rawPage) {
+      const page = makePage(rawPage);
+      pages.push(page);
+      return page;
+    },
+    closePage(id) {
+      double.page(id).closeTarget();
+    },
+    page(id) {
+      return pages.find((page) => page.id === id);
+    },
+    livePages: () => context.pages(),
+    get closeCalls() { return closeCalls; },
+  };
+  for (const page of initialPages) double.open(page);
+  return double;
+}
+
+class MonitorResponseDouble extends EventEmitter {
+  constructor() {
+    super();
+    this.destroyed = false;
+    this.writableEnded = false;
+    this.chunks = [];
+  }
+
+  writeHead(statusCode, headers) {
+    this.statusCode = statusCode;
+    this.headers = headers;
+  }
+
+  write(chunk) {
+    this.chunks.push(String(chunk));
+    return true;
+  }
+
+  end() {
+    this.writableEnded = true;
+    this.emit('close');
+  }
+
+  events() {
+    return this.chunks
+      .flatMap((chunk) => chunk.split('\n\n'))
+      .filter((chunk) => chunk.startsWith('data: '))
+      .map((chunk) => JSON.parse(chunk.slice(6)));
+  }
+}
 
 function startJsonServer(routes) {
   const requests = [];

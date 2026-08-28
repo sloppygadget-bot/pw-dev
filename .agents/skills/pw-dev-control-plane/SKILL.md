@@ -63,6 +63,16 @@ deleting them. Stop occupied sessions before deleting their browser or proxy.
 Do not modify resources belonging to another agent unless the user explicitly
 includes them in scope.
 
+For precise tab-level work, discover the live inventory with
+`GET /_pwdev/sessions/:sessionId/pages` and use the returned CDP target
+`page.id`; never silently select the first Playwright page when the request
+identifies a page. Before a mutating operation, claim that target with
+`POST /_pwdev/sessions/:sessionId/pages/:pageId/leases`, including `owner` and
+any available `agentId` or `taskId`. Release the returned lease with
+`DELETE /_pwdev/sessions/:sessionId/pages/:pageId/leases/:leaseId` when done.
+Treat page leases as cooperative locks among pw-dev clients: raw CDP access is
+browser-wide and is not technically blocked by a lease.
+
 Use `/_pwdev/delegates` before managed-proxy lifecycle/ruleset operations and
 before advanced broker operations; follow the linked component OpenAPI.
 Use `/_pwdev/remote-brokers` for remote broker operations. For server-owned SSH

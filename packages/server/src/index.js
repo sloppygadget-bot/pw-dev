@@ -356,6 +356,7 @@ export async function startPwDevServer(options = {}) {
     persist: (registeredProxies) => persistProxies(proxyRegistryFile, registeredProxies),
   });
   const sessions = createSessionRegistry();
+  const pageLeases = new Map();
   const browserRegistryFile = path.resolve(options.browserRegistryFile ?? path.join(worktree, '.pw-dev', 'browsers.json'));
   const browsers = createBrowserRegistry(loadPersistedBrowsers(browserRegistryFile), {
     persist: (registeredBrowsers) => persistBrowsers(browserRegistryFile, registeredBrowsers),
@@ -371,7 +372,7 @@ export async function startPwDevServer(options = {}) {
     res.once('close', abortRequest);
     try {
       if (req.url?.startsWith('/_pwdev/')) {
-        await requestSignalStorage.run(controller.signal, () => handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager, signal: controller.signal }));
+        await requestSignalStorage.run(controller.signal, () => handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, pageLeases, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager: options.ensureProxyManager, signal: controller.signal }));
         return;
       }
       if (req.url === '/healthz' || req.url === '/health') {
@@ -454,6 +455,9 @@ export async function startPwDevServer(options = {}) {
  * - `POST /_pwdev/browsers/:id/stop`
  * - `GET /_pwdev/sessions`
  * - `GET /_pwdev/sessions/:id`
+ * - `GET /_pwdev/sessions/:id/pages`
+ * - `POST /_pwdev/sessions/:id/pages/:pageId/leases`
+ * - `DELETE /_pwdev/sessions/:id/pages/:pageId/leases/:leaseId`
  * - `POST /_pwdev/sessions/:id/stop`
  * - `POST /_pwdev/sessions/:id/claim`
  * - `POST /_pwdev/sessions/:id/heartbeat`
@@ -478,6 +482,7 @@ export async function startPwDevServer(options = {}) {
  *   proxies: PwDevProxyRegistry,
  *   browsers: PwDevBrowserRegistry,
  *   sessions: PwDevSessionRegistry,
+ *   pageLeases: Map<string, Record<string, unknown>>,
  *   broker: PwDevBrokerPairing,
  *   remoteBrokers: { list: () => unknown[], provision: (request: Record<string, unknown>) => Promise<unknown>, remove: (id: string) => Promise<boolean>, stop: (id: string) => Promise<boolean> },
  *   proxyManagerUrl: string,
@@ -485,7 +490,7 @@ export async function startPwDevServer(options = {}) {
  * }} options
  * @returns {Promise<void>}
  */
-export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager, signal }) {
+export async function handlePwDevRequest({ req, res, root, worktree, origin, startedAt, metadata, apps, browserConfigs, proxies, browsers, sessions, pageLeases = new Map(), broker, remoteBrokers, sshAssets, proxyManagerUrl, ensureProxyManager, signal }) {
   const requestUrl = new URL(req.url || '/', 'http://local');
   const serverUrl = origin ?? requestBaseUrl(req);
   const manifest = buildManifest({ root, worktree, origin: serverUrl, metadata });
@@ -558,7 +563,7 @@ export async function handlePwDevRequest({ req, res, root, worktree, origin, sta
   }
 
   if (requestUrl.pathname.startsWith('/_pwdev/sessions')) {
-    await handleSessionsRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody });
+    await handleSessionsRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, pageLeases, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody });
     return;
   }
 
@@ -1048,6 +1053,46 @@ function createSessionLease(input, now = new Date()) {
   };
 }
 
+function createPageLease(input, now = new Date()) {
+  return {
+    ...createSessionLease(input, now),
+    leaseId: `pagelease_${randomUUID()}`,
+  };
+}
+
+function pageLeaseKey(session, pageId) {
+  return `${session.browserInstanceId}\0${pageId}`;
+}
+
+function reconcilePageLeases(pageLeases, session, pages, now = Date.now()) {
+  const liveKeys = new Set(pages.map((page) => pageLeaseKey(session, page.id)));
+  for (const [key, lease] of pageLeases) {
+    if (!key.startsWith(`${session.browserInstanceId}\0`)) continue;
+    if (!liveKeys.has(key) || isSessionLeaseExpired(lease, now)) pageLeases.delete(key);
+  }
+}
+
+async function listSessionPages(session, pageLeases) {
+  const targets = await brokerJson(
+    session.brokerUrl,
+    `/_broker/instances/${encodeURIComponent(session.browserInstanceId)}/json/list`,
+  );
+  const pages = (Array.isArray(targets) ? targets : targets?.targets ?? [])
+    .filter((target) => target?.type === 'page' && typeof target.id === 'string')
+    .map((target) => ({
+      id: target.id,
+      type: 'page',
+      title: typeof target.title === 'string' ? target.title : '',
+      url: typeof target.url === 'string' ? target.url : '',
+      ...(typeof target.openerId === 'string' ? { openerPageId: target.openerId } : {}),
+    }));
+  reconcilePageLeases(pageLeases, session, pages);
+  return pages.map((page) => {
+    const lease = pageLeases.get(pageLeaseKey(session, page.id));
+    return lease ? { ...page, lease: { ...lease } } : page;
+  });
+}
+
 function refreshSessionLease(session, input, now = new Date()) {
   const lease = session.lease;
   if (!lease || lease.leaseId !== input.leaseId) {
@@ -1527,6 +1572,7 @@ async function reconcileAppBrowserSessionsBestEffort({ apps, sessions, broker, a
  *   browsers: PwDevBrowserRegistry,
  *   proxies: PwDevProxyRegistry,
  *   sessions: PwDevSessionRegistry,
+ *   pageLeases: Map<string, Record<string, unknown>>,
  *   broker: PwDevBrokerPairing,
  *   proxyManagerUrl: string,
  *   ensureProxyManager?: () => Promise<unknown>,
@@ -1535,7 +1581,7 @@ async function reconcileAppBrowserSessionsBestEffort({ apps, sessions, broker, a
  * }} options
  * @returns {Promise<void>}
  */
-async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody }) {
+async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, proxies, sessions, pageLeases, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody }) {
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
 
   if (pathParts.length === 2 && pathParts[0] === '_pwdev' && pathParts[1] === 'sessions') {
@@ -1571,6 +1617,80 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, pro
     }
     const app = apps.get(session.appId);
     writeJson(res, 200, { ok: true, session, app: app ? buildAppResponse(app, sessions) : undefined, serverUrl }, writeBody);
+    return;
+  }
+
+  if (pathParts.length === 4 && pathParts[3] === 'pages') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { allow: 'GET, HEAD' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    await reconcileSessionsBestEffort({ sessions, broker });
+    const session = sessions.get(sessionId);
+    if (!session) {
+      writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
+      return;
+    }
+    const pages = await listSessionPages(session, pageLeases);
+    writeJson(res, 200, { ok: true, sessionId, pages }, writeBody);
+    return;
+  }
+
+  if (pathParts.length === 6 && pathParts[3] === 'pages' && pathParts[5] === 'leases') {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    await reconcileSessionsBestEffort({ sessions, broker });
+    const session = sessions.get(sessionId);
+    if (!session) {
+      writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
+      return;
+    }
+    const pageId = decodeURIComponent(pathParts[4]);
+    const pages = await listSessionPages(session, pageLeases);
+    const page = pages.find((candidate) => candidate.id === pageId);
+    if (!page) {
+      writeJson(res, 404, { ok: false, error: `Unknown page in session ${sessionId}: ${pageId}` }, writeBody);
+      return;
+    }
+    const input = sessionLeaseInput(await readJsonBody(req));
+    const key = pageLeaseKey(session, pageId);
+    const current = pageLeases.get(key);
+    if (current && current.owner !== input.owner) {
+      writeJson(res, 409, { ok: false, error: `Page is leased by ${current.owner}`, lease: current }, writeBody);
+      return;
+    }
+    const lease = createPageLease(input);
+    if (current?.owner === input.owner) lease.leaseId = current.leaseId;
+    pageLeases.set(key, lease);
+    writeJson(res, 200, { ok: true, sessionId, page: { ...page, lease }, lease }, writeBody);
+    return;
+  }
+
+  if (pathParts.length === 7 && pathParts[3] === 'pages' && pathParts[5] === 'leases') {
+    if (req.method !== 'DELETE') {
+      res.writeHead(405, { allow: 'DELETE' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    const session = sessions.get(sessionId);
+    if (!session) {
+      writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
+      return;
+    }
+    const pageId = decodeURIComponent(pathParts[4]);
+    const leaseId = decodeURIComponent(pathParts[6]);
+    const key = pageLeaseKey(session, pageId);
+    const current = pageLeases.get(key);
+    if (!current || current.leaseId !== leaseId) {
+      writeJson(res, 409, { ok: false, error: 'Page lease is missing or does not belong to this client' }, writeBody);
+      return;
+    }
+    pageLeases.delete(key);
+    writeJson(res, 200, { ok: true, sessionId, pageId, leaseId, released: true }, writeBody);
     return;
   }
 
@@ -1630,30 +1750,42 @@ async function handleSessionsRequest({ req, res, requestUrl, apps, browsers, pro
       res.end('Method Not Allowed');
       return;
     }
-    await reconcileSessionsBestEffort({ sessions, broker });
+    const payload = await readJsonBody(req);
+    const force = payload.force === undefined ? false : requiredBoolean(payload.force, 'force');
+    if (!force) await reconcileSessionsBestEffort({ sessions, broker });
     reconcileSessionLeases(sessions);
     const session = sessions.get(sessionId);
     if (!session) {
       writeJson(res, 404, { ok: false, error: `Unknown session: ${sessionId}` }, writeBody);
       return;
     }
-    const stop = await brokerJson(session.brokerUrl, '/_broker/stop', {
-      method: 'POST',
-      body: { instanceId: session.browserInstanceId },
-    });
+    const stop = force
+      ? undefined
+      : await brokerJson(session.brokerUrl, '/_broker/stop', {
+        method: 'POST',
+        body: { instanceId: session.browserInstanceId },
+      });
     sessions.delete(sessionId);
+    for (const key of pageLeases.keys()) {
+      if (key.startsWith(`${session.browserInstanceId}\0`)) pageLeases.delete(key);
+    }
     if (session.browserId) browsers.update(session.browserId, { sessionId: undefined });
-    const proxyStop = await stopManagedProxyIfIdle({
-      proxyId: session.proxyId,
-      proxies,
-      sessions,
-      proxyManagerUrl,
-      ensureProxyManager,
-    });
+    const proxyStop = force
+      ? undefined
+      : await stopManagedProxyIfIdle({
+        proxyId: session.proxyId,
+        proxies,
+        sessions,
+        proxyManagerUrl,
+        ensureProxyManager,
+      });
     const app = apps.get(session.appId);
     writeJson(res, 200, {
       ok: true,
       session,
+      forced: force || undefined,
+      brokerStopSkipped: force || undefined,
+      proxyStopSkipped: (force && Boolean(session.proxyId)) || undefined,
       releasedProxyLease: session.proxyLease,
       app: app ? buildAppResponse(app, sessions) : undefined,
       stop,
@@ -1751,11 +1883,14 @@ function buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions
 }
 
 async function handleBrowsersRequest({ req, res, requestUrl, apps, browserConfigs, proxies, browsers, sessions, broker, proxyManagerUrl, ensureProxyManager, serverUrl, writeBody }) {
+  const parts = requestUrl.pathname.split('/').filter(Boolean);
+  const isStopRequest = parts.length === 4 && parts[3] === 'stop' && req.method === 'POST';
+  const stopPayload = isStopRequest ? await readJsonBody(req) : undefined;
+  const forceStop = stopPayload?.force === undefined ? false : requiredBoolean(stopPayload.force, 'force');
   // Managed proxies may have been created through the delegated proxy API.
   // Reconcile before validating browser references so the public browser API
   // sees those durable profiles without requiring a separate registry POST.
-  await reconcileManagedProxies({ apps, proxies, proxyManagerUrl });
-  const parts = requestUrl.pathname.split('/').filter(Boolean);
+  if (!forceStop) await reconcileManagedProxies({ apps, proxies, proxyManagerUrl });
   if (parts.length === 2) {
     if (req.method === 'GET' || req.method === 'HEAD') {
       await reconcileSessionsBestEffort({ sessions, broker });
@@ -1898,27 +2033,49 @@ async function handleBrowsersRequest({ req, res, requestUrl, apps, browserConfig
   if (parts.length === 4 && action === 'stop' && req.method === 'POST') {
     const session = browser.sessionId ? sessions.get(browser.sessionId) : undefined;
     if (session) {
-      const stop = await brokerJson(session.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: session.browserInstanceId } });
+      const stop = forceStop
+        ? undefined
+        : await brokerJson(session.brokerUrl, '/_broker/stop', { method: 'POST', body: { instanceId: session.browserInstanceId } });
       sessions.delete(session.sessionId);
       const updated = browsers.update(id, { sessionId: undefined });
-      const proxyStop = await stopManagedProxyIfIdle({
-        proxyId: session.proxyId,
+      const proxyStop = forceStop
+        ? undefined
+        : await stopManagedProxyIfIdle({
+          proxyId: session.proxyId,
+          proxies,
+          sessions,
+          proxyManagerUrl,
+          ensureProxyManager,
+        });
+      writeJson(res, 200, {
+        ok: true,
+        browser: buildBrowserResponse({ browser: updated, apps, browserConfigs, proxies, sessions }),
+        releasedSession: session.sessionId,
+        forced: forceStop || undefined,
+        brokerStopSkipped: forceStop || undefined,
+        proxyStopSkipped: (forceStop && Boolean(session.proxyId)) || undefined,
+        stop,
+        proxyStop,
+      }, writeBody);
+      return;
+    }
+    const proxyStop = forceStop
+      ? undefined
+      : await stopManagedProxyIfIdle({
+        proxyId: browser.proxyId,
         proxies,
         sessions,
         proxyManagerUrl,
         ensureProxyManager,
       });
-      writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser: updated, apps, browserConfigs, proxies, sessions }), releasedSession: session.sessionId, stop, proxyStop }, writeBody);
-      return;
-    }
-    const proxyStop = await stopManagedProxyIfIdle({
-      proxyId: browser.proxyId,
-      proxies,
-      sessions,
-      proxyManagerUrl,
-      ensureProxyManager,
-    });
-    writeJson(res, 200, { ok: true, browser: buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions }), alreadyStopped: true, proxyStop }, writeBody);
+    writeJson(res, 200, {
+      ok: true,
+      browser: buildBrowserResponse({ browser, apps, browserConfigs, proxies, sessions }),
+      alreadyStopped: true,
+      forced: forceStop || undefined,
+      proxyStopSkipped: (forceStop && Boolean(browser.proxyId)) || undefined,
+      proxyStop,
+    }, writeBody);
     return;
   }
   writeJson(res, 404, { ok: false, error: 'Unknown browser endpoint' }, writeBody);
@@ -3394,6 +3551,13 @@ function requiredPositiveInteger(value, name) {
   return value;
 }
 
+function requiredBoolean(value, name) {
+  if (typeof value !== 'boolean') {
+    throwValidationError(`${name} must be a boolean`);
+  }
+  return value;
+}
+
 function validateStringArray(value, name) {
   if (!Array.isArray(value)) {
     throwValidationError(`${name} must be an array of strings`);
@@ -3822,10 +3986,13 @@ function pwDevApi(serverUrl) {
       { method: 'GET|POST', path: '/_pwdev/browsers', summary: 'List or create reusable browsers', body: { required: ['id', 'browserConfigId'], optional: ['name', 'readme', 'appId', 'proxyId', 'proxyIds', 'profile'] } },
       { method: 'GET|DELETE', path: '/_pwdev/browsers/:id', summary: 'Inspect or destroy a browser' },
       { method: 'POST', path: '/_pwdev/browsers/:id/start', summary: 'Start the browser session using its derived profile and reserved proxy', body: { optional: ['lease: { owner, agentId?, taskId?, ttlMs? }'] } },
-      { method: 'POST', path: '/_pwdev/browsers/:id/stop', summary: 'Stop the browser session while preserving its profile and proxy reservation' },
+      { method: 'POST', path: '/_pwdev/browsers/:id/stop', summary: 'Stop the browser session while preserving its profile and proxy reservation', body: { optional: ['force'] } },
       { method: 'GET', path: '/_pwdev/sessions', summary: 'List live sessions' },
       { method: 'GET', path: '/_pwdev/sessions/:id', summary: 'Get live session' },
-      { method: 'POST', path: '/_pwdev/sessions/:id/stop', summary: 'Stop live session' },
+      { method: 'GET', path: '/_pwdev/sessions/:id/pages', summary: 'List live page targets and cooperative lease state' },
+      { method: 'POST', path: '/_pwdev/sessions/:id/pages/:pageId/leases', summary: 'Claim one page target', body: { required: ['owner'], optional: ['agentId', 'taskId', 'ttlMs'] } },
+      { method: 'DELETE', path: '/_pwdev/sessions/:id/pages/:pageId/leases/:leaseId', summary: 'Release one page target lease' },
+      { method: 'POST', path: '/_pwdev/sessions/:id/stop', summary: 'Stop live session', body: { optional: ['force'] } },
       { method: 'POST', path: '/_pwdev/sessions/:id/claim', summary: 'Claim a live session for one Playwright agent', body: { required: ['owner'], optional: ['agentId', 'taskId', 'ttlMs'] } },
       { method: 'POST', path: '/_pwdev/sessions/:id/heartbeat', summary: 'Extend the session lease', body: { required: ['leaseId'], optional: ['ttlMs'] } },
       { method: 'POST', path: '/_pwdev/sessions/:id/release', summary: 'Release the session lease without stopping Chrome', body: { required: ['leaseId'] } },
@@ -3940,7 +4107,7 @@ function pwDevApiDetails(serverUrl) {
         operation('GET', '/_pwdev/browsers', 'List browsers', 'Fetch all durable browsers with resolved components.', { method: 'GET', path: '/_pwdev/browsers' }, [], { fields: ['ok', 'browsers'] }),
         operation('POST', '/_pwdev/browsers', 'Create or update a browser', 'Send an id and browserConfigId, plus optional appId and fixed or pooled proxy references.', { method: 'POST', path: '/_pwdev/browsers', body: { id: 'checkout-smoke', browserConfigId: 'checkout-chrome', appId: 'checkout-main', proxyIds: ['checkout-traffic-a', 'checkout-traffic-b'] } }, ['browserConfigId is required.', 'proxyId and proxyIds are mutually exclusive.'], { fields: ['ok', 'browser'] }),
         operation('POST', '/_pwdev/browsers/:id/start', 'Start a browser', 'Start the browser using its config and launch its managed Whistle proxy on demand.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/start' }, ['Connect Playwright to response.session.cdpUrl.', 'Only one session can occupy a browser.'], { fields: ['ok', 'browser', 'session', 'start'] }),
-        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser', 'Stop its session and idle managed Whistle proxy while preserving profiles and reservations.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/stop' }, [], { fields: ['ok', 'browser', 'releasedSession?', 'proxyStop?'] }),
+        operation('POST', '/_pwdev/browsers/:id/stop', 'Stop a browser', 'Stop its session and idle managed Whistle proxy while preserving profiles and reservations. Use force only to discard stale local session state when its broker is unreachable.', { method: 'POST', path: '/_pwdev/browsers/checkout-smoke/stop', body: { force: true } }, ['force skips all broker and proxy-manager calls; the remote Chrome or proxy may still be running.'], { fields: ['ok', 'browser', 'releasedSession?', 'forced?', 'brokerStopSkipped?', 'proxyStopSkipped?', 'proxyStop?'] }),
       ],
     },
     proxies: {
@@ -3980,7 +4147,10 @@ function pwDevApiDetails(serverUrl) {
       operations: [
         operation('GET', '/_pwdev/sessions', 'List live sessions', 'Fetch and reconcile active broker sessions.', { method: 'GET', path: '/_pwdev/sessions' }, [], { fields: ['ok', 'sessions'] }),
         operation('GET', '/_pwdev/sessions/:id', 'Get one live session', 'Read one broker-backed session and its related app metadata.', { method: 'GET', path: '/_pwdev/sessions/checkout-smoke__default' }, ['Returns 404 when the broker no longer reports the session.'], { fields: ['ok', 'session', 'app?', 'serverUrl'] }),
-        operation('POST', '/_pwdev/sessions/:id/stop', 'Stop a live session', 'Stop directly by session id when the owning browser route is not convenient.', { method: 'POST', path: '/_pwdev/sessions/checkout-tax__default/stop' }, ['Does not delete the persistent browser, browser config, or durable proxy profile.'], { fields: ['ok', 'session'] }),
+        operation('GET', '/_pwdev/sessions/:id/pages', 'List session pages', 'Read the live CDP page targets and their cooperative lease state.', { method: 'GET', path: '/_pwdev/sessions/checkout-smoke__default/pages' }, ['Page IDs are CDP target IDs and disappear when their tabs close.', 'The API omits target WebSocket URLs; attach through session.cdpUrl.'], { fields: ['ok', 'sessionId', 'pages'] }),
+        operation('POST', '/_pwdev/sessions/:id/pages/:pageId/leases', 'Claim one page', 'Acquire a short-lived cooperative lock for precise automation of one tab.', { method: 'POST', path: '/_pwdev/sessions/checkout-smoke__default/pages/ABCD/leases', body: { owner: 'agent-name', taskId: 'checkout' } }, ['A live claim by a different owner returns 409.', 'Raw CDP clients can still access every page; clients must honor these leases.'], { fields: ['ok', 'sessionId', 'page', 'lease'] }),
+        operation('DELETE', '/_pwdev/sessions/:id/pages/:pageId/leases/:leaseId', 'Release one page', 'Release the cooperative page lock after page-specific work ends.', { method: 'DELETE', path: '/_pwdev/sessions/checkout-smoke__default/pages/ABCD/leases/pagelease_123' }, ['The session and tab remain running.', 'An incorrect lease id returns 409.'], { fields: ['ok', 'sessionId', 'pageId', 'leaseId', 'released'] }),
+        operation('POST', '/_pwdev/sessions/:id/stop', 'Stop a live session', 'Stop directly by session id when the owning browser route is not convenient. Use force only to discard stale local session state when its broker is unreachable.', { method: 'POST', path: '/_pwdev/sessions/checkout-tax__default/stop', body: { force: true } }, ['Does not delete the persistent browser, browser config, or durable proxy profile.', 'force skips all broker and proxy-manager calls; the remote Chrome or proxy may still be running.'], { fields: ['ok', 'session', 'forced?', 'brokerStopSkipped?', 'proxyStopSkipped?'] }),
       ],
     },
   };
@@ -4223,17 +4393,23 @@ export async function startPwDevBrowser({ serverUrl = '${serverUrl}', browserId 
   return response.json();
 }
 
-export async function stopPwDevBrowser({ serverUrl = '${serverUrl}', browserId } = {}) {
+export async function stopPwDevBrowser({ serverUrl = '${serverUrl}', browserId, force = false } = {}) {
   if (!browserId) throw new Error('stopPwDevBrowser requires browserId');
-  const response = await fetch(\`\${serverUrl}/_pwdev/browsers/\${encodeURIComponent(browserId)}/stop\`, { method: 'POST' });
+  const response = await fetch(\`\${serverUrl}/_pwdev/browsers/\${encodeURIComponent(browserId)}/stop\`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ force }),
+  });
   if (!response.ok) throw new Error(\`pw-dev browser stop failed: \${response.status} \${await response.text()}\`);
   return response.json();
 }
 
-export async function stopPwDevSession({ serverUrl = '${serverUrl}', sessionId } = {}) {
+export async function stopPwDevSession({ serverUrl = '${serverUrl}', sessionId, force = false } = {}) {
   if (!sessionId) throw new Error('stopPwDevSession requires sessionId');
   const response = await fetch(\`\${serverUrl}/_pwdev/sessions/\${encodeURIComponent(sessionId)}/stop\`, {
     method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ force }),
   });
   if (!response.ok) {
     throw new Error(\`pw-dev session stop failed: \${response.status} \${await response.text()}\`);
