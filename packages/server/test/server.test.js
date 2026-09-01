@@ -260,6 +260,8 @@ test('server exposes instructions and client helper source', async () => {
     assert.match(instructions.body, /Standalone/);
     assert.match(instructions.body, /_pwdev\/openapi\.json/);
     assert.match(instructions.body, /_pwdev\/delegates/);
+    assert.match(instructions.body, /accounts.*map of account labels/s);
+    assert.match(instructions.body, /"usr":"username","pwd":"password"/);
     assert.match(instructions.body, new RegExp(`\\[pw-dev app API\\]\\(${escapeRegExp(server.origin)}\\/_pwdev\\/openapi\\/apps\\.json\\)`));
     assert.match(instructions.body, /\| POST \| `\/_pwdev\/apps` \| Create or update an app \|/);
     assert.match(instructions.body, /\| GET \| `\/_pwdev\/apps\/\{id\}` \| Get one app \|/);
@@ -383,6 +385,15 @@ test('server exposes a machine-readable API reference', async () => {
     );
     const appsDocument = await getJson(`${server.origin}/_pwdev/openapi/apps.json`);
     assert.equal(appsDocument.statusCode, 200);
+    assert.equal(
+      appsDocument.body.paths['/_pwdev/apps'].post.requestBody.content['application/json'].schema.$ref,
+      '#/components/schemas/AppRegistration',
+    );
+    assert.deepEqual(appsDocument.body.components.schemas.AppAccountCredentials.required, ['usr', 'pwd']);
+    assert.equal(
+      appsDocument.body.components.schemas.AppAccounts.additionalProperties.$ref,
+      '#/components/schemas/AppAccountCredentials',
+    );
     assert.ok(appsDocument.body.paths['/_pwdev/apps/{id}'].get);
     assert.ok(appsDocument.body.paths['/_pwdev/apps/{id}'].patch);
     assert.ok(appsDocument.body.paths['/_pwdev/apps/{id}'].delete);

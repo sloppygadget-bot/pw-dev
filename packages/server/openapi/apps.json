@@ -16,6 +16,14 @@
       "post": {
         "operationId": "upsertApp",
         "summary": "Create or update an app",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AppRegistration" }
+            }
+          }
+        },
         "responses": { "200": { "description": "Saved app" } }
       }
     },
@@ -57,6 +65,39 @@
         "summary": "Get an app manifest",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "responses": { "200": { "description": "App attach contract" }, "404": { "description": "Unknown app" } }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AppRegistration": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string" },
+          "root": { "type": "string" },
+          "worktree": { "type": "string" },
+          "branch": { "type": "string" },
+          "appUrl": { "type": "string" },
+          "readme": { "type": "string" },
+          "accounts": { "$ref": "#/components/schemas/AppAccounts" },
+          "proxyId": { "type": "string" }
+        }
+      },
+      "AppAccounts": {
+        "type": "object",
+        "description": "A map of account labels to credentials.",
+        "additionalProperties": { "$ref": "#/components/schemas/AppAccountCredentials" }
+      },
+      "AppAccountCredentials": {
+        "type": "object",
+        "required": ["usr", "pwd"],
+        "properties": {
+          "usr": { "type": "string", "minLength": 1, "description": "Login username." },
+          "pwd": { "type": "string", "minLength": 1, "description": "Login password." },
+          "label": { "type": "string", "description": "Optional display label." }
+        }
       }
     }
   }

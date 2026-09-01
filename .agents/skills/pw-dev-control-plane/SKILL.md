@@ -14,6 +14,18 @@ stop top-level local services.
 Before choosing an operation, discover the running server. Its instructions
 and OpenAPI documents override any remembered route or payload shape.
 
+### Server start and restart exception
+
+A request to start or restart the local pw-dev server cannot depend on a live
+server contract. Probe the configured URL first. If it is unreachable, or a
+restart was requested, identify the exact process listening on that URL's port;
+stop it gracefully only for a requested restart, then start the top-level
+server service from the intended checkout. Wait until `/_pwdev/status` succeeds
+before continuing with normal discovery. Do not bypass the control plane and
+operate a broker directly merely because the server is down. For any other
+managed-state request while the server is unavailable, report that the control
+plane must be started first.
+
 ```bash
 export PW_DEV_URL="${PW_DEV_URL:-http://127.0.0.1:9696}"
 curl -fsS "$PW_DEV_URL/_pwdev/status"

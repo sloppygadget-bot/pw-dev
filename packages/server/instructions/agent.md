@@ -21,8 +21,11 @@ component-owned contract under `/_pwdev/proxy/*`; do not call its internal port.
 
 ## Persisted entities
 
-- **app**: project metadata, `readme`, accounts, and worktree. An app can be
-  linked from a browser but does not own browser lifecycle.
+- **app**: project metadata, `readme`, accounts, and worktree. `accounts` is a
+  map of account labels to credentials, for example
+  `{"login":{"usr":"username","pwd":"password"}}`; `usr` and `pwd` are
+  required non-empty strings, while `label` is optional. An app can be linked
+  from a browser but does not own browser lifecycle.
 - **proxy**: reusable proxy configuration; managed proxy rules/profile state are
   retained in the in-house Whistle profile. Stop and release preserve it;
   explicit proxy deletion is the destructive operation.
