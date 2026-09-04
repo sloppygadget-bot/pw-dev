@@ -22,6 +22,7 @@ const state = {
 const els = {
   interval: document.querySelector('#interval'),
   refresh: document.querySelector('#refresh'),
+  refreshStatus: document.querySelector('#refresh-status'),
   layout: document.querySelector('.layout'),
   navToggle: document.querySelector('#nav-toggle'),
   serverState: document.querySelector('#server-state'),
@@ -107,7 +108,12 @@ for (const button of document.querySelectorAll('.nav-item')) {
 }
 
 els.navToggle.addEventListener('click', () => setNavCollapsed(!state.navCollapsed));
-els.refresh.addEventListener('click', () => void refresh());
+els.refresh.addEventListener('click', async () => {
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = undefined;
+  await refresh();
+  schedule();
+});
 els.brokerCard.addEventListener('click', () => showView('broker'));
 els.newBrowser.addEventListener('click', () => openBrowserEditor());
 els.cancelBrowser.addEventListener('click', closeBrowserEditor);
@@ -143,25 +149,37 @@ els.interval.addEventListener('change', () => {
 void init();
 
 async function init() {
-  const config = await fetchJson('/api/config');
-  state.pwDevUrl = config.pwDevUrl;
-  await refresh();
-  els.newBrowser.disabled = false;
-  els.newBrowserConfig.disabled = false;
-  els.newProxy.disabled = false;
-  schedule();
+  try {
+    const config = await fetchJson('/api/config');
+    state.pwDevUrl = config.pwDevUrl;
+    await refresh();
+  } catch (error) {
+    setRefreshStatus('error', `Refresh failed: ${error.message}`);
+  } finally {
+    els.newBrowser.disabled = false;
+    els.newBrowserConfig.disabled = false;
+    els.newProxy.disabled = false;
+    schedule();
+  }
 }
 
 function schedule() {
   if (state.timer) clearTimeout(state.timer);
   state.timer = undefined;
-  if (state.intervalMs > 0) {
-    state.timer = setTimeout(async () => {
-      state.timer = undefined;
+  if (state.intervalMs <= 0) return;
+  state.timer = setTimeout(async () => {
+    state.timer = undefined;
+    try {
       await refresh();
+    } finally {
       schedule();
-    }, state.intervalMs);
-  }
+    }
+  }, state.intervalMs);
+}
+
+function setRefreshStatus(kind, message) {
+  els.refreshStatus.dataset.state = kind;
+  els.refreshStatus.textContent = message;
 }
 
 function setNavCollapsed(collapsed) {
@@ -243,10 +261,18 @@ async function refresh() {
 
 async function performRefresh() {
   els.refresh.disabled = true;
+  setRefreshStatus('loading', state.last ? 'Refreshing…' : 'Loading…');
+  const previous = state.last;
   try {
     const snapshot = normalizeSnapshot(await fetchJson('/api/snapshot'));
     state.last = snapshot;
     await render(snapshot);
+    setRefreshStatus('ok', 'Up to date');
+    return true;
+  } catch (error) {
+    state.last = previous;
+    setRefreshStatus('error', `Refresh failed: ${error.message}`);
+    return false;
   } finally {
     els.refresh.disabled = false;
   }

@@ -8,14 +8,16 @@
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <header class="topbar">
+    <div id="page-shell">
+      <header class="topbar">
       <div class="brand">
         <h1>pw-dev</h1>
         <div id="target" class="muted"><a href="/api-docs" title="Open the live API documentation">API Docs</a></div>
       </div>
       <div class="toolbar">
+        <span id="refresh-status" class="refresh-status" role="status" aria-live="polite" data-state="loading">Loading…</span>
         <label class="inline-field">
-          <span>Refresh</span>
+          <span>Auto refresh</span>
           <select id="interval">
             <option value="2000">2s</option>
             <option value="5000" selected>5s</option>
@@ -23,11 +25,11 @@
             <option value="0">Paused</option>
           </select>
         </label>
-        <button id="refresh" type="button" title="Refresh now">Refresh</button>
+        <button id="refresh" class="button-primary" type="button">Refresh now</button>
       </div>
-    </header>
+      </header>
 
-    <main>
+      <main>
       <section class="status-grid" aria-label="Status summary">
         <div class="metric">
           <span class="metric-label">Server</span>
@@ -201,7 +203,8 @@
           <section class="view" id="view-ssh-keys"><div class="section-title"><h2>SSH Keys</h2></div><div id="ssh-keys-list" class="cards"></div></section>
         </div>
       </section>
-    </main>
+      </main>
+    </div>
 
     <div id="markdown-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="markdown-modal-title">
       <div class="modal-backdrop" data-close-markdown-modal></div>

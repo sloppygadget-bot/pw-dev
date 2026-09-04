@@ -105,6 +105,20 @@ h3 {
   gap: 10px;
 }
 
+.refresh-status {
+  color: #d5dbe1;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.refresh-status[data-state="ok"] {
+  color: #bce7cf;
+}
+
+.refresh-status[data-state="error"] {
+  color: #ffd0cd;
+}
+
 .inline-field {
   display: flex;
   align-items: center;
