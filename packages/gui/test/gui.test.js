@@ -1374,6 +1374,89 @@ test('browser thumbnail clears when the remaining session tabs are GUI-only', as
   }
 });
 
+test('dashboard stale preview controls cannot open an unscoped monitor while another preview is pending', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  await seedPage.setContent('<body style="margin:0;background:#36c"></body>');
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  const snapshot = browserPreviewSnapshot();
+  snapshot.server.sessions.body.sessions.push({
+    sessionId: 'pending-session',
+    browserId: 'pending-browser',
+    browserConfigId: 'preview-config',
+    scope: 'default',
+  });
+  snapshot.server.browsers.body.browsers.push({
+    id: 'pending-browser',
+    name: 'Pending browser',
+    browserConfigId: 'preview-config',
+    sessionId: 'pending-session',
+    status: 'occupied',
+    occupancy: { state: 'unclaimed' },
+  });
+  let previewGuiOnly = false;
+  let holdPendingPages = false;
+  let releasePendingPages;
+  let pendingPagesStarted;
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.addInitScript(() => {
+      const nativeRevokeObjectUrl = URL.revokeObjectURL.bind(URL);
+      window.__revokedObjectUrls = [];
+      URL.revokeObjectURL = (url) => {
+        window.__revokedObjectUrls.push(url);
+        nativeRevokeObjectUrl(url);
+      };
+      window.__monitorOpens = [];
+      window.open = (url) => { window.__monitorOpens.push(url); };
+    });
+    await routeDashboardSnapshot(page, snapshot);
+    await page.route('**/api/pwdev/sessions/*/pages', async (route) => {
+      const sessionId = new URL(route.request().url()).pathname.split('/').at(-2);
+      if (sessionId === 'pending-session' && holdPendingPages) {
+        pendingPagesStarted();
+        await new Promise((resolve) => { releasePendingPages = resolve; });
+      }
+      const pages = sessionId === 'preview-session'
+        ? previewGuiOnly
+          ? [{ id: 'dashboard', title: 'pw-dev', url: `${gui.origin}/` }]
+          : [{ id: 'target', title: 'Target', url: 'http://127.0.0.1:3000/' }]
+        : [{ id: 'pending-target', title: 'Pending target', url: 'http://127.0.0.1:3001/' }];
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ pages }) });
+    });
+    await page.route('**/api/monitor/*/preview*', (route) => route.fulfill({
+      contentType: 'image/jpeg',
+      body: preview,
+    }));
+
+    await page.goto(gui.origin);
+    await page.waitForFunction(() => document.querySelectorAll('.browser-preview img').length === 2);
+    const previewCard = page.locator('.browser-diagram').filter({ hasText: 'Preview browser' });
+    const stalePreviewUrl = await previewCard.locator('.browser-preview img').getAttribute('src');
+    assert.equal(await previewCard.getByRole('button', { name: 'Monitor' }).count(), 1);
+    assert.equal(await previewCard.locator('.browser-preview-media').count(), 1);
+
+    previewGuiOnly = true;
+    holdPendingPages = true;
+    const pendingStarted = new Promise((resolve) => { pendingPagesStarted = resolve; });
+    await page.locator('#refresh').click();
+    await pendingStarted;
+    await page.waitForFunction(
+      (url) => window.__revokedObjectUrls.includes(url),
+      stalePreviewUrl,
+    );
+
+    await previewCard.getByRole('button', { name: 'Monitor' }).click();
+    await previewCard.locator('.browser-preview-media').click();
+    assert.deepEqual(await page.evaluate(() => window.__monitorOpens), []);
+  } finally {
+    releasePendingPages?.();
+    await browser.close();
+    await gui.close();
+  }
+});
+
 test('browser thumbnail replaces decoded images without a blank frame', async () => {
   const browser = await chromium.launch({ headless: true });
   const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });

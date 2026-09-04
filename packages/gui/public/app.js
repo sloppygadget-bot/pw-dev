@@ -726,8 +726,12 @@ function browserActions(browser) {
 }
 
 function openBrowserMonitor(browser, pageId = state.previewPageIds.get(browser.id)) {
-  const query = pageId ? `?pageId=${encodeURIComponent(pageId)}` : '';
-  window.open(`/monitor/${encodeURIComponent(browser.id)}${query}`, '_blank', 'noopener,noreferrer');
+  if (!pageId) return;
+  window.open(
+    `/monitor/${encodeURIComponent(browser.id)}?pageId=${encodeURIComponent(pageId)}`,
+    '_blank',
+    'noopener,noreferrer',
+  );
 }
 
 function isGuiPage(page) {
