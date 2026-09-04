@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -39,6 +40,308 @@ test('manager defaults Whistle storage under proxy runtime root', async () => {
   assert.equal(status.w2StorageRoot, path.resolve('packages/proxy/.runtime/whistle'));
   assert.equal(status.whistleCommand, process.execPath);
   assert.match(status.whistleArgsPrefix[0], /whistle[/\\]bin[/\\]whistle\.js$/);
+});
+
+test('default POSIX process discovery keeps a manager-owned proxy running', {
+  skip: !['darwin', 'linux'].includes(process.platform),
+}, async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw dev proxy posix processes-'));
+  let child;
+  const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
+    registryClient: fakeRegistryClient(),
+    quiet: true,
+    spawnImpl: (_command, args) => {
+      const storageDir = args[args.indexOf('-S') + 1];
+      child = spawn(process.execPath, [
+        '-e',
+        'setInterval(() => {}, 1_000)',
+        '--',
+        'run',
+        '-S',
+        storageDir,
+      ], { stdio: 'ignore' });
+      return child;
+    },
+    w2StorageRoot,
+    portAvailable: async () => true,
+  });
+
+  try {
+    await manager.createProxy({ id: 'posix-live', ruleset: 'a b' }, { start: true });
+
+    const status = await manager.getProxyStatus('posix-live');
+
+    assert.equal(status.status.running, true);
+    assert.equal(status.status.pid, child.pid);
+    await manager.stopProxy('posix-live');
+    assert.equal(child.killed, true);
+  } finally {
+    if (child && !child.killed) child.kill('SIGTERM');
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('manager stop terminates daemonized Whistle descendants', async () => {
+  const spawned = [];
+  const killed = [];
+  const liveProcesses = [];
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-process-tree-'));
+  const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
+    registryClient: fakeRegistryClient(),
+    quiet: true,
+    spawnImpl: fakeSpawn(spawned),
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+      const index = liveProcesses.findIndex((processInfo) => processInfo.pid === pid);
+      if (index !== -1) liveProcesses.splice(index, 1);
+    },
+    w2StorageRoot,
+    portAvailable: async () => true,
+  });
+
+  try {
+    const created = await manager.createProxy({ id: 'process-tree', ruleset: 'a b' }, { start: true });
+    const bootstrapData = encodeURIComponent(JSON.stringify({ storage: created.proxy.storageDir }));
+    const workerData = encodeURIComponent(JSON.stringify({
+      storage: encodeURIComponent(created.proxy.storageDir),
+    }));
+    liveProcesses.push(
+      {
+        pid: spawned[0].child.pid,
+        commandLine: `node whistle.js run -S ${created.proxy.storageDir}`,
+      },
+      {
+        pid: 2234,
+        commandLine: `node starting/lib/bootstrap.js run whistle/index.js --data ${bootstrapData}`,
+      },
+      {
+        pid: 3234,
+        commandLine: `node pfork/lib/main ${workerData}`,
+      },
+    );
+
+    const stopped = await manager.stopProxy('process-tree');
+
+    assert.equal(stopped.proxy.running, false);
+    assert.equal(spawned[0].child.killedSignal, 'SIGTERM');
+    assert.deepEqual(killed, [
+      { pid: 2234, signal: 'SIGTERM' },
+      { pid: 3234, signal: 'SIGTERM' },
+    ]);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('manager stop waits for daemonized Whistle descendants to exit', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-wait-tree-'));
+  const liveProcesses = [];
+  const child = new EventEmitter();
+  child.pid = 4234;
+  child.kill = (signal) => {
+    setTimeout(() => {
+      liveProcesses.splice(liveProcesses.findIndex((processInfo) => processInfo.pid === child.pid), 1);
+      child.emit('exit', null, signal);
+    }, 5);
+  };
+  const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
+    registryClient: fakeRegistryClient(),
+    quiet: true,
+    spawnImpl: () => child,
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: (pid) => {
+      setTimeout(() => {
+        const index = liveProcesses.findIndex((processInfo) => processInfo.pid === pid);
+        if (index !== -1) liveProcesses.splice(index, 1);
+      }, 20);
+    },
+    proxyStopPollMs: 1,
+    w2StorageRoot,
+    portAvailable: async () => true,
+  });
+
+  try {
+    const created = await manager.createProxy({ id: 'wait-tree', ruleset: 'a b' }, { start: true });
+    const bootstrapData = encodeURIComponent(JSON.stringify({ storage: created.proxy.storageDir }));
+    liveProcesses.push(
+      { pid: child.pid, commandLine: `node whistle.js run -S ${created.proxy.storageDir}` },
+      { pid: 5234, commandLine: `node starting/lib/bootstrap.js run whistle/index.js --data ${bootstrapData}` },
+    );
+
+    await manager.stopProxy('wait-tree');
+
+    assert.deepEqual(liveProcesses, []);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('manager tracks and stops its owned child when process discovery is unavailable', async () => {
+  const spawned = [];
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-owned-child-'));
+  const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
+    registryClient: fakeRegistryClient(),
+    quiet: true,
+    spawnImpl: fakeSpawn(spawned),
+    processListImpl: async () => [],
+    w2StorageRoot,
+    portAvailable: async () => true,
+  });
+
+  try {
+    await manager.createProxy({ id: 'owned-child', ruleset: 'a b' }, { start: true });
+
+    const listed = await manager.status();
+    assert.equal(listed.proxies[0].running, true);
+    assert.equal(listed.proxies[0].pid, spawned[0].child.pid);
+
+    const status = await manager.getProxyStatus('owned-child');
+    assert.equal(status.status.running, true);
+    assert.equal(status.status.pid, spawned[0].child.pid);
+
+    await manager.stopProxy('owned-child');
+    assert.equal(spawned[0].child.killedSignal, 'SIGTERM');
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('manager stop escalates stubborn Whistle processes to SIGKILL', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-kill-tree-'));
+  const liveProcesses = [];
+  const childSignals = [];
+  const killed = [];
+  const child = new EventEmitter();
+  child.pid = 6234;
+  child.kill = (signal) => {
+    childSignals.push(signal);
+    if (signal === 'SIGKILL') {
+      const index = liveProcesses.findIndex((processInfo) => processInfo.pid === child.pid);
+      if (index !== -1) liveProcesses.splice(index, 1);
+      child.emit('exit', null, signal);
+    }
+  };
+  const manager = createProxyManager({
+    applyRulesImpl: fakeApplyRules([]),
+    registryClient: fakeRegistryClient(),
+    quiet: true,
+    spawnImpl: () => child,
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+      if (signal === 'SIGKILL') {
+        const index = liveProcesses.findIndex((processInfo) => processInfo.pid === pid);
+        if (index !== -1) liveProcesses.splice(index, 1);
+      }
+    },
+    proxyStopGraceMs: 5,
+    proxyKillGraceMs: 20,
+    proxyStopPollMs: 1,
+    w2StorageRoot,
+    portAvailable: async () => true,
+  });
+
+  try {
+    const created = await manager.createProxy({ id: 'kill-tree', ruleset: 'a b' }, { start: true });
+    const bootstrapData = encodeURIComponent(JSON.stringify({ storage: created.proxy.storageDir }));
+    liveProcesses.push(
+      { pid: child.pid, commandLine: `node whistle.js run -S ${created.proxy.storageDir}` },
+      { pid: 7234, commandLine: `node starting/lib/bootstrap.js run whistle/index.js --data ${bootstrapData}` },
+    );
+
+    await manager.stopProxy('kill-tree');
+
+    assert.deepEqual(childSignals, ['SIGTERM', 'SIGKILL']);
+    assert.deepEqual(killed, [
+      { pid: 7234, signal: 'SIGTERM' },
+      { pid: 7234, signal: 'SIGKILL' },
+    ]);
+    assert.deepEqual(liveProcesses, []);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('manager rejects proxy storage outside its managed root', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-safe-root-'));
+  const outsideStorageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-outside-root-'));
+  const marker = path.join(outsideStorageDir, 'keep.txt');
+  fs.writeFileSync(marker, 'keep');
+  const manager = createProxyManager({
+    registryClient: fakeRegistryClient(),
+    quiet: true,
+    w2StorageRoot,
+    portAvailable: async () => true,
+  });
+
+  try {
+    await assert.rejects(
+      manager.createProxy({ id: 'outside-root', ruleset: 'a b', storageDir: outsideStorageDir }),
+      /storageDir must be within the managed proxy root/,
+    );
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'keep');
+  } finally {
+    fs.rmSync(outsideStorageDir, { recursive: true, force: true });
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('manager fully rolls back a started proxy when app registration fails', async () => {
+  const spawned = [];
+  const killed = [];
+  const liveProcesses = [];
+  let releaseApplyRules;
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-create-rollback-'));
+  const registryClient = fakeRegistryClient();
+  const manager = createProxyManager({
+    applyRulesImpl: async () => new Promise((resolve) => {
+      releaseApplyRules = resolve;
+    }),
+    registryClient,
+    quiet: true,
+    spawnImpl: fakeSpawn(spawned),
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+      const index = liveProcesses.findIndex((processInfo) => processInfo.pid === pid);
+      if (index !== -1) liveProcesses.splice(index, 1);
+    },
+    w2StorageRoot,
+    portAvailable: async () => true,
+  });
+
+  try {
+    await assert.rejects(async () => {
+      const creation = manager.createProxy({
+        id: 'create-rollback',
+        appId: 'missing-app',
+        ruleset: 'a b',
+      }, { start: true });
+      while (spawned.length === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+      const storageDir = spawned[0].args[spawned[0].args.indexOf('-S') + 1];
+      const bootstrapData = encodeURIComponent(JSON.stringify({ storage: storageDir }));
+      liveProcesses.push({
+        pid: 8234,
+        commandLine: `node starting/lib/bootstrap.js run whistle/index.js --data ${bootstrapData}`,
+      });
+      releaseApplyRules();
+      await creation;
+    }, /Unknown app: missing-app/);
+
+    const storageDir = spawned[0].args[spawned[0].args.indexOf('-S') + 1];
+    assert.equal(spawned[0].child.killedSignal, 'SIGTERM');
+    assert.deepEqual(killed, [{ pid: 8234, signal: 'SIGTERM' }]);
+    assert.deepEqual(registryClient.deletes, ['create-rollback']);
+    assert.equal(fs.existsSync(storageDir), false);
+    assert.deepEqual((await manager.listProxies()).proxies, []);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
 });
 
 test('manager creates Whistle instance from ruleset and attaches it to app', async () => {
@@ -294,6 +597,16 @@ test('proxy manager cleans orphaned Whistle processes on startup', async () => {
   const orphanStorageDir = fs.mkdtempSync(path.join(w2StorageRoot, 'react-login-portal-whistle-'));
   const unrelatedStorageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'unrelated-whistle-'));
   const killed = [];
+  const liveProcesses = [
+    {
+      pid: 357971,
+      commandLine: `node whistle.js run -p 8892 --uiport 9804 -S ${orphanStorageDir}`,
+    },
+    {
+      pid: 357972,
+      commandLine: `node whistle.js run -p 8893 --uiport 9805 -S ${unrelatedStorageDir}`,
+    },
+  ];
   const registryClient = fakeRegistryClient({
     proxies: [{
       id: 'react-login-portal-whistle',
@@ -305,17 +618,12 @@ test('proxy manager cleans orphaned Whistle processes on startup', async () => {
     quiet: true,
     w2StorageRoot,
     registryClient,
-    processListImpl: async () => [
-      {
-        pid: 357971,
-        commandLine: `node whistle.js run -p 8892 --uiport 9804 -S ${orphanStorageDir}`,
-      },
-      {
-        pid: 357972,
-        commandLine: `node whistle.js run -p 8893 --uiport 9805 -S ${unrelatedStorageDir}`,
-      },
-    ],
-    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+      const index = liveProcesses.findIndex((processInfo) => processInfo.pid === pid);
+      if (index !== -1) liveProcesses.splice(index, 1);
+    },
   });
 
   try {
@@ -343,6 +651,10 @@ test('proxy manager recovers registered Whistle profiles on startup', async () =
   fs.writeFileSync(path.join(storageDir, 'override-ruleset.txt'), '');
   writeProxyProfileFixture(storageDir, { id: 'recoverable-whistle', proxyPort: 8899, uiPort: 9800 });
   const killed = [];
+  const liveProcesses = [{
+    pid: 4001,
+    commandLine: `node whistle.js run -p 8899 --uiport 9800 -S ${storageDir}`,
+  }];
   const registryClient = fakeRegistryClient({
     proxies: [{
       id: 'recoverable-whistle',
@@ -360,11 +672,11 @@ test('proxy manager recovers registered Whistle profiles on startup', async () =
     quiet: true,
     w2StorageRoot,
     registryClient,
-    processListImpl: async () => [{
-      pid: 4001,
-      commandLine: `node whistle.js run -p 8899 --uiport 9800 -S ${storageDir}`,
-    }],
-    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+      liveProcesses.splice(0, liveProcesses.length);
+    },
   });
 
   try {
@@ -394,15 +706,19 @@ test('proxy manager recovers daemonized Whistle bootstrap processes', async () =
     uiport: '9804',
     storage: storageDir,
   }));
+  const liveProcesses = [{
+    pid: 918501,
+    commandLine: `node --tls-min-v1.0 C:\\workspace\\node_modules\\starting\\lib\\bootstrap.js run C:\\workspace\\node_modules\\whistle\\index.js --data ${bootstrapData}`,
+  }];
   const manager = createProxyManager({
     quiet: true,
     w2StorageRoot,
     registryClient: fakeRegistryClient(),
-    processListImpl: async () => [{
-      pid: 918501,
-      commandLine: `node --tls-min-v1.0 /workspace/node_modules/starting/lib/bootstrap.js run /workspace/node_modules/whistle/index.js --data ${bootstrapData}`,
-    }],
-    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+      liveProcesses.splice(0, liveProcesses.length);
+    },
     spawnImpl: fakeSpawn([]),
   });
 
@@ -423,27 +739,103 @@ test('proxy manager recovers daemonized Whistle bootstrap processes', async () =
   }
 });
 
-test('proxy manager cleans daemonized Whistle bootstrap orphans', async () => {
-  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-daemon-orphan-'));
-  const orphanStorageDir = fs.mkdtempSync(path.join(w2StorageRoot, 'orphaned-whistle-'));
-  const bootstrapData = encodeURIComponent(JSON.stringify({ storage: orphanStorageDir }));
-  const killed = [];
+test('proxy manager clears a recovered PID after the adopted process exits', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-recovered-exit-'));
+  const storageDir = path.join(w2StorageRoot, 'recovered-exit');
+  fs.mkdirSync(storageDir, { recursive: true });
+  writeProxyProfileFixture(storageDir, { id: 'recovered-exit', proxyPort: 8892, uiPort: 9804 });
+  const liveProcesses = [{
+    pid: 918505,
+    commandLine: `node whistle.js run -S ${storageDir}`,
+  }];
   const manager = createProxyManager({
     quiet: true,
     w2StorageRoot,
     registryClient: fakeRegistryClient(),
-    processListImpl: async () => [{
+    processListImpl: async () => liveProcesses,
+  });
+
+  try {
+    const recovered = await manager.getProxyStatus('recovered-exit');
+    assert.equal(recovered.status.running, true);
+    assert.equal(recovered.status.pid, 918505);
+
+    liveProcesses.splice(0, liveProcesses.length);
+    const exited = await manager.getProxyStatus('recovered-exit');
+    assert.equal(exited.status.running, false);
+    assert.equal(exited.status.pid, undefined);
+    assert.equal(exited.proxy.pid, undefined);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('proxy manager cleans daemonized Whistle bootstrap orphans', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-daemon-orphan-'));
+  const orphanStorageDir = fs.mkdtempSync(path.join(w2StorageRoot, 'orphaned-whistle-'));
+  const bootstrapData = encodeURIComponent(JSON.stringify({ storage: orphanStorageDir }));
+  const workerData = encodeURIComponent(JSON.stringify({
+    storage: encodeURIComponent(orphanStorageDir),
+  }));
+  const killed = [];
+  const liveProcesses = [
+    {
       pid: 918502,
       commandLine: `node /workspace/node_modules/starting/lib/bootstrap.js run /workspace/node_modules/whistle/index.js --data ${bootstrapData}`,
-    }],
-    killProcessImpl: (pid, signal) => killed.push({ pid, signal }),
+    },
+    {
+      pid: 918503,
+      commandLine: `node /workspace/node_modules/pfork/lib/main ${workerData}`,
+    },
+  ];
+  const manager = createProxyManager({
+    quiet: true,
+    w2StorageRoot,
+    registryClient: fakeRegistryClient(),
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: (pid, signal) => {
+      killed.push({ pid, signal });
+      const index = liveProcesses.findIndex((processInfo) => processInfo.pid === pid);
+      if (index !== -1) liveProcesses.splice(index, 1);
+    },
   });
 
   try {
     const cleanup = await manager.cleanupOrphans();
     assert.deepEqual(cleanup.cleaned, [{ pid: 918502, storageDir: orphanStorageDir, ids: [] }]);
-    assert.deepEqual(killed, [{ pid: 918502, signal: 'SIGTERM' }]);
+    assert.deepEqual(killed, [
+      { pid: 918502, signal: 'SIGTERM' },
+      { pid: 918503, signal: 'SIGTERM' },
+    ]);
     assert.equal(fs.existsSync(orphanStorageDir), false);
+  } finally {
+    fs.rmSync(w2StorageRoot, { recursive: true, force: true });
+  }
+});
+
+test('proxy manager preserves storage when an orphan refuses to exit', async () => {
+  const w2StorageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-proxy-stubborn-orphan-'));
+  const orphanStorageDir = fs.mkdtempSync(path.join(w2StorageRoot, 'orphaned-whistle-'));
+  const liveProcesses = [{
+    pid: 918504,
+    commandLine: `node whistle.js run -S ${orphanStorageDir}`,
+  }];
+  const manager = createProxyManager({
+    quiet: true,
+    w2StorageRoot,
+    registryClient: fakeRegistryClient(),
+    processListImpl: async () => liveProcesses,
+    killProcessImpl: () => {},
+    proxyStopGraceMs: 1,
+    proxyKillGraceMs: 1,
+    proxyStopPollMs: 1,
+  });
+
+  try {
+    const cleanup = await manager.cleanupOrphans();
+    assert.equal(cleanup.ok, false);
+    assert.deepEqual(cleanup.cleaned, []);
+    assert.equal(fs.existsSync(orphanStorageDir), true);
   } finally {
     fs.rmSync(w2StorageRoot, { recursive: true, force: true });
   }
@@ -572,6 +964,16 @@ test('proxy HTTP API creates, reads, and deletes managed proxies', async () => {
     assert.equal(openapi.statusCode, 200);
     assert.equal(openapi.body.openapi, '3.1.1');
     assert.equal(openapi.body['x-pwdev-documents'][0].url, '/_proxy/openapi/lifecycle.json');
+    const lifecycleOpenapi = await getJson(`${server.origin}/_proxy/openapi/lifecycle.json`);
+    assert.equal(
+      lifecycleOpenapi.body.paths['/proxies'].post.requestBody.content['application/json'].schema.$ref,
+      '#/components/schemas/CreateManagedProxy',
+    );
+    const rulesetsOpenapi = await getJson(`${server.origin}/_proxy/openapi/rulesets.json`);
+    assert.equal(
+      rulesetsOpenapi.body.paths['/proxies/{id}/rules'].put.requestBody.content['application/json'].schema.$ref,
+      '#/components/schemas/ReplaceManagedProxyRules',
+    );
 
     const created = await postJson(`${server.origin}/_proxy/proxies`, {
       id: 'whistle-main',

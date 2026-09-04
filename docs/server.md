@@ -593,7 +593,7 @@ Reachable broker:
 
 ## Key Files And Functions
 
-[packages/server/src/index.js](/home/pengxie/work/pw-dev/packages/server/src/index.js)
+[packages/server/src/index.js](../packages/server/src/index.js)
 
 - `startPwDevServer`: starts the HTTP server, builds the root manifest, pairs the broker, and installs the broker WebSocket proxy.
 - `handlePwDevRequest`: dispatches all `/_pwdev/*` HTTP routes.
@@ -604,13 +604,13 @@ Reachable broker:
 - `proxyBrokerHttpRequest` and `proxyBrokerUpgrade`: broker HTTP/WebSocket proxy for `/_pwdev/broker/*`.
 - `handleAppBrowserRequest`: app-scoped browser start/status/stop lifecycle.
 
-[packages/server/src/cli.js](/home/pengxie/work/pw-dev/packages/server/src/cli.js)
+[packages/server/src/cli.js](../packages/server/src/cli.js)
 
 - `main`: CLI entry point for `pw-dev server`.
 - `parseArgs`: maps CLI flags to `startPwDevServer` options.
 - `helpText`: user-facing server CLI help.
 
-[packages/server/test/server.test.js](/home/pengxie/work/pw-dev/packages/server/test/server.test.js)
+[packages/server/test/server.test.js](../packages/server/test/server.test.js)
 
 - Covers static serving, manifest/status endpoints, registry operations,
   app browser lifecycle, broker reachability diagnostics, HTTP proxying, and

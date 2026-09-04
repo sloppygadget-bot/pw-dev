@@ -84,6 +84,33 @@ test('stops the active Chrome instance', async () => {
   assert.equal(manager.activeInstance(), undefined);
 });
 
+test('stop waits for Chrome to exit before reporting success', async () => {
+  const child = new EventEmitter();
+  child.killed = false;
+  let exited = false;
+  child.kill = (signal) => {
+    child.killed = true;
+    child.signal = signal;
+    setTimeout(() => {
+      exited = true;
+      child.emit('exit', null, signal);
+    }, 20);
+  };
+  const manager = createBrowserManager({
+    chromeExecutable: '/bin/chrome',
+    spawnImpl: () => child,
+    getFreePortImpl: async () => 9333,
+    waitForChromeImpl: async () => {},
+    quiet: true,
+  });
+
+  const instance = await manager.start({ profile: 'work-okta' });
+  const result = await manager.stop({ instanceId: instance.id });
+
+  assert.equal(exited, true);
+  assert.deepEqual(result, { stopped: true, instanceId: instance.id });
+});
+
 test('starts multiple Chrome instances with different profiles', async () => {
   const children = [fakeChild(), fakeChild()];
   const spawned = [];

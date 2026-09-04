@@ -9,7 +9,18 @@
   "paths": {
     "/proxies": {
       "get": { "operationId": "listManagedProxies", "responses": { "200": { "description": "Durable managed proxy profiles and runtime state" } } },
-      "post": { "operationId": "createManagedProxy", "responses": { "200": { "description": "Created a stopped durable managed proxy profile; browser start launches it on demand" } } }
+      "post": {
+        "operationId": "createManagedProxy",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateManagedProxy" }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Created a stopped durable managed proxy profile; browser start launches it on demand" } }
+      }
     },
     "/proxies/{id}": {
       "get": {
@@ -91,6 +102,37 @@
   },
   "components": {
     "schemas": {
+      "CreateManagedProxy": {
+        "type": "object",
+        "anyOf": [
+          { "required": ["id"] },
+          { "required": ["appId"] }
+        ],
+        "required": ["ruleset"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "appId": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "taskId": { "type": "string", "minLength": 1 },
+          "owner": { "type": "string", "minLength": 1 },
+          "purpose": { "type": "string", "minLength": 1 },
+          "labels": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "ruleset": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "object" }
+            ]
+          },
+          "proxyPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "uiPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "uiPortRange": { "type": "string" },
+          "storageDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Advanced override; must resolve to a child directory of the proxy manager's w2StorageRoot."
+          }
+        }
+      },
       "StartedProxy": {
         "type": "object",
         "required": ["ok", "proxy", "alreadyRunning"],
