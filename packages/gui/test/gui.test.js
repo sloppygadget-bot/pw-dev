@@ -352,6 +352,37 @@ test('monitor preserves action request order when cached-target revalidation res
   }
 });
 
+test('monitor preserves action request order across default and explicit page aliases', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'ordered-page', title: 'Ordered', url: 'https://shop.test/' },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'ordered-alias-session');
+  hub.addGuiOrigin('http://127.0.0.1:9797');
+
+  try {
+    await hub.ensureConnection('ordered-alias-browser');
+    const page = browserDouble.page('ordered-page');
+    const deferredDescription = browserDouble.deferNextPageDescription();
+
+    const pointer = hub.action('ordered-alias-browser', undefined, { action: 'pointer', type: 'move', x: 1, y: 2 });
+    await deferredDescription.started;
+    const keyboard = hub.action('ordered-alias-browser', 'ordered-page', { action: 'keyboard', type: 'down', key: 'A' });
+    await new Promise((resolve) => setImmediate(resolve));
+    const actionsBeforeFirstRevalidation = [...page.inputActions];
+
+    deferredDescription.release();
+    await Promise.all([pointer, keyboard]);
+
+    assert.deepEqual(actionsBeforeFirstRevalidation, []);
+    assert.deepEqual(page.inputActions, [
+      { device: 'mouse', type: 'move', x: 1, y: 2 },
+      { device: 'keyboard', type: 'down', key: 'A' },
+    ]);
+  } finally {
+    await hub.close();
+  }
+});
+
 test('monitor excludes known GUI pages from selection, inventory, and viewport changes', async () => {
   const browserDouble = createMonitorBrowserDouble([
     { id: 'dashboard', title: 'pw-dev', url: 'http://127.0.0.1:9797/', viewport: { width: 390, height: 844 } },

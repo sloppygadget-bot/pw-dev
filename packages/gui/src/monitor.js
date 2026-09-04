@@ -102,7 +102,7 @@ export class BrowserMonitorHub {
   }
 
   action(browserId, pageId, payload) {
-    const key = monitorKey(browserId, pageId);
+    const key = browserId;
     return enqueueMonitorActionRequest(this.actionPromises, key, () => this.performAction(browserId, pageId, payload));
   }
 
