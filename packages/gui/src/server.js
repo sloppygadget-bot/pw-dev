@@ -55,11 +55,13 @@ export async function startPwDevGuiServer(options = {}) {
       }
       const monitorEvents = /^\/api\/monitor\/([^/]+)\/events$/.exec(requestUrl.pathname);
       if (monitorEvents) {
+        registerMonitorGuiOrigin(monitorHub, req);
         await monitorHub.stream(decodePathSegment(monitorEvents[1]), requestUrl.searchParams.get('pageId') ?? undefined, req, res);
         return;
       }
       const monitorPreview = /^\/api\/monitor\/([^/]+)\/preview$/.exec(requestUrl.pathname);
       if (monitorPreview) {
+        registerMonitorGuiOrigin(monitorHub, req);
         const image = await monitorHub.preview(decodePathSegment(monitorPreview[1]), requestUrl.searchParams.get('pageId') ?? undefined);
         res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'image/jpeg' });
         res.end(image);
@@ -67,6 +69,7 @@ export async function startPwDevGuiServer(options = {}) {
       }
       const monitorAction = /^\/api\/monitor\/([^/]+)\/action$/.exec(requestUrl.pathname);
       if (monitorAction) {
+        registerMonitorGuiOrigin(monitorHub, req);
         if (req.method !== 'POST') {
           writeJson(res, 405, { ok: false, error: 'monitor actions require POST' });
           return;
@@ -82,6 +85,7 @@ export async function startPwDevGuiServer(options = {}) {
       }
       const monitorPage = /^\/monitor\/([^/]+)$/.exec(requestUrl.pathname);
       if (monitorPage) {
+        registerMonitorGuiOrigin(monitorHub, req);
         await serveStaticFile({ req, res, filePath: path.join(PUBLIC_DIR, 'monitor.html'), contentType: 'text/html; charset=utf-8' });
         return;
       }
@@ -139,6 +143,7 @@ export async function startPwDevGuiServer(options = {}) {
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : port;
   const origin = `http://${host}:${actualPort}`;
+  monitorHub.addGuiOrigin?.(origin);
   return {
     origin,
     pwDevUrl,
@@ -152,6 +157,11 @@ export async function startPwDevGuiServer(options = {}) {
       });
     },
   };
+}
+
+function registerMonitorGuiOrigin(monitorHub, req) {
+  if (!req.headers.host) return;
+  monitorHub.addGuiOrigin?.(`http://${req.headers.host}`);
 }
 
 function validateMonitorActionRequest(req) {

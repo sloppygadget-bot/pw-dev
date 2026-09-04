@@ -321,6 +321,38 @@ test('monitor preserves input ordering across concurrent requests', async () => 
   }
 });
 
+test('monitor excludes known GUI pages from selection, inventory, and viewport changes', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'dashboard', title: 'pw-dev', url: 'http://127.0.0.1:9797/', viewport: { width: 390, height: 844 } },
+    { id: 'target', title: 'Target', url: 'http://127.0.0.1:3000/', viewport: { width: 1024, height: 768 } },
+    { id: 'monitor', title: 'Monitor', url: 'http://127.0.0.1:9797/monitor/gui-browser', viewport: { width: 390, height: 844 } },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'gui-session');
+  hub.addGuiOrigin('http://127.0.0.1:9797');
+
+  try {
+    const connection = await hub.ensureConnection('gui-browser');
+    assert.equal(connection.pageId, 'target');
+    assert.deepEqual(browserDouble.page('target').viewportSize(), { width: 1920, height: 1080 });
+    assert.deepEqual(browserDouble.page('dashboard').viewportSize(), { width: 390, height: 844 });
+    assert.deepEqual(browserDouble.page('monitor').viewportSize(), { width: 390, height: 844 });
+    assert.deepEqual((await hub.refreshPageInventory(connection)).map((page) => page.id), ['target']);
+  } finally {
+    await hub.close();
+  }
+});
+
+test('monitor reports a GUI-only session instead of resizing the operator page', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'dashboard', title: 'pw-dev', url: 'http://127.0.0.1:9797/', viewport: { width: 390, height: 844 } },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'gui-only-session');
+  hub.addGuiOrigin('http://127.0.0.1:9797');
+
+  await assert.rejects(hub.ensureConnection('gui-only-browser'), /no monitorable page/i);
+  assert.deepEqual(browserDouble.page('dashboard').viewportSize(), { width: 390, height: 844 });
+});
+
 test('two-tab monitor resolves targets, routes actions, discovers popups, falls back, and cleans up', async () => {
   const browserDouble = createMonitorBrowserDouble([
     { id: 'page-a', title: 'Home', url: 'https://shop.test/' },
@@ -618,6 +650,47 @@ test('gui serves static app and read-only config', async () => {
     assert.match(rejected.body.error, /read-only/);
   } finally {
     await server.close();
+  }
+});
+
+test('gui registers its bound origin and monitor request-host aliases', async () => {
+  const origins = [];
+  const monitorHub = {
+    addGuiOrigin: (origin) => origins.push(origin),
+    stream: async (_browserId, _pageId, _req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end();
+    },
+    preview: async () => Buffer.from('preview'),
+    action: async () => ({ ok: true }),
+    close: async () => {},
+  };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub });
+  const port = new URL(gui.origin).port;
+
+  try {
+    await request(`${gui.origin}/monitor/example-browser`, { method: 'GET', headers: { host: `localhost:${port}` } });
+    await request(`${gui.origin}/api/monitor/example-browser/preview`, { method: 'GET', headers: { host: `gui-preview.test:${port}` } });
+    await request(`${gui.origin}/api/monitor/example-browser/action`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'click', path: [1] }),
+      headers: {
+        'content-type': 'application/json',
+        host: `gui-action.test:${port}`,
+        origin: `http://gui-action.test:${port}`,
+      },
+    });
+    await request(`${gui.origin}/api/monitor/example-browser/events`, { method: 'GET', headers: { host: `gui-events.test:${port}` } });
+
+    assert.deepEqual(origins, [
+      gui.origin,
+      `http://localhost:${port}`,
+      `http://gui-preview.test:${port}`,
+      `http://gui-action.test:${port}`,
+      `http://gui-events.test:${port}`,
+    ]);
+  } finally {
+    await gui.close();
   }
 });
 
@@ -1538,6 +1611,18 @@ function createMonitorBrowserDouble(initialPages) {
   };
   for (const page of initialPages) double.open(page);
   return double;
+}
+
+function createConnectedMonitorHub(browserDouble, sessionId) {
+  return new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId, cdpUrl: 'http://broker.test/session' } } },
+    }),
+  });
 }
 
 class MonitorResponseDouble extends EventEmitter {

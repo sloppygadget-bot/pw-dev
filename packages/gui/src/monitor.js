@@ -29,10 +29,32 @@ export class BrowserMonitorHub {
     this.pwDevUrl = pwDevUrl;
     this.connectOverCDP = connectOverCDP;
     this.fetchJson = fetchJsonImpl;
+    /** @type {Set<string>} */
+    this.guiOrigins = new Set();
     /** @type {Map<string, MonitorConnection>} */
     this.connections = new Map();
     /** @type {Map<string, Promise<Buffer>>} */
     this.previewPromises = new Map();
+  }
+
+  addGuiOrigin(origin) {
+    try {
+      this.guiOrigins.add(new URL(origin).origin);
+    } catch {
+      // Ignore malformed request-host aliases; the bound origin is registered separately.
+    }
+  }
+
+  isGuiPage(page) {
+    try {
+      return this.guiOrigins.has(new URL(page.url).origin);
+    } catch {
+      return false;
+    }
+  }
+
+  async monitorablePages(browser) {
+    return (await this.describePages(browser)).filter((entry) => !this.isGuiPage(entry));
   }
 
   async stream(browserId, pageId, req, res) {
@@ -210,12 +232,12 @@ export class BrowserMonitorHub {
       }
     }
     const browser = await connectOverCDP(session.cdpUrl);
-    const pages = await this.describePages(browser);
+    const pages = await this.monitorablePages(browser);
     const selected = pageId ? pages.find((entry) => entry.id === pageId) : pages[0];
     const page = selected?.page;
     if (!page) {
       await browser.close();
-      throw httpError(409, 'Browser session has no page to monitor');
+      throw httpError(409, 'Browser session has no monitorable page');
     }
     await ensureMinimumViewport(page);
     const connection = {
@@ -296,13 +318,13 @@ export class BrowserMonitorHub {
   async describeSessionPages(connection) {
     if (connection.sessionId) {
       const result = await this.fetchJson(`${this.pwDevUrl}/_pwdev/sessions/${encodeURIComponent(connection.sessionId)}/pages`);
-      if (result.ok && Array.isArray(result.body?.pages)) return result.body.pages;
+      if (result.ok && Array.isArray(result.body?.pages)) return result.body.pages.filter((page) => !this.isGuiPage(page));
     }
-    return (await this.describePages(connection.browser)).map(({ page, ...description }) => description);
+    return (await this.monitorablePages(connection.browser)).map(({ page, ...description }) => description);
   }
 
   async refreshPageInventory(connection) {
-    const localPages = await this.describePages(connection.browser);
+    const localPages = await this.monitorablePages(connection.browser);
     let selected = localPages.find((entry) => entry.id === connection.pageId);
     if (!selected && localPages.length) {
       selected = localPages[0];
