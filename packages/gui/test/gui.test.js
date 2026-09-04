@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright';
 
@@ -28,6 +31,97 @@ test('parseArgs reads gui options', () => {
 test('resolveStaticPath keeps gui static requests under root', () => {
   assert.equal(resolveStaticPath('/tmp/gui', '/index.html'), '/tmp/gui/index.html');
   assert.equal(resolveStaticPath('/tmp/gui', '/../secret'), '/tmp/gui/secret');
+});
+
+test('monitor consumes a dialog dismissal race without an unhandled rejection', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'dialog-page', title: 'Dialog', url: 'https://dialog.test/' },
+    { id: 'background-page', title: 'Background', url: 'https://dialog.test/background' },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'dialog-session');
+  const page = browserDouble.page('dialog-page');
+  const rejection = new Error('Protocol error (Page.handleJavaScriptDialog): No dialog is showing');
+  let unhandled;
+  const onUnhandled = (error) => { unhandled = error; };
+  process.once('unhandledRejection', onUnhandled);
+
+  try {
+    await hub.ensureConnection('dialog-browser', 'dialog-page');
+    hub.observePage(hub.connections.get('dialog-browser:dialog-page'), page);
+    assert.equal(page.listenerCount('dialog'), 1);
+    assert.equal(browserDouble.page('background-page').listenerCount('dialog'), 1);
+    page.emit('dialog', { dismiss: async () => { throw rejection; } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(unhandled, undefined);
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled);
+    await hub.close();
+  }
+});
+
+test('monitor owns popup dialogs once while excluding GUI pages', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'target', title: 'Target', url: 'https://dialog.test/' },
+    { id: 'gui', title: 'GUI', url: 'http://127.0.0.1:9797/' },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'popup-dialog-session');
+  hub.addGuiOrigin('http://127.0.0.1:9797');
+  try {
+    const connection = await hub.ensureConnection('popup-dialog-browser');
+    const popup = browserDouble.open({ id: 'popup', title: 'Popup', url: 'https://dialog.test/popup' });
+    await hub.refreshPageInventory(connection);
+    await hub.refreshPageInventory(connection);
+    assert.equal(popup.listenerCount('dialog'), 1);
+    assert.equal(browserDouble.page('target').listenerCount('dialog'), 1);
+    assert.equal(browserDouble.page('gui').listenerCount('dialog'), 0);
+    let dismissals = 0;
+    popup.emit('dialog', { dismiss: async () => { dismissals += 1; } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dismissals, 1);
+  } finally {
+    await hub.close();
+  }
+});
+
+test('monitor remains usable when a second CDP client handles a real confirm dialog', async () => {
+  const launched = await launchCdpBrowser();
+  let competitor;
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: (endpoint) => chromium.connectOverCDP(endpoint),
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'real-dialog', cdpUrl: launched.wsEndpoint } } },
+    }),
+  });
+  let unhandled;
+  const onUnhandled = (error) => { unhandled = error; };
+  process.once('unhandledRejection', onUnhandled);
+  try {
+    competitor = await chromium.connectOverCDP(launched.wsEndpoint);
+    const page = competitor.contexts()[0].pages()[0];
+    await page.setContent('<button onclick="confirm(\'continue?\')">Confirm</button>');
+    await hub.ensureConnection('real-dialog-browser');
+    let competingDialogs = 0;
+    page.once('dialog', (dialog) => {
+      competingDialogs += 1;
+      void dialog.accept().catch(() => {});
+    });
+    await page.click('button');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(competingDialogs, 1);
+    assert.equal(unhandled, undefined);
+    assert.ok((await hub.preview('real-dialog-browser')).length > 0);
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled);
+    try {
+      await hub.close();
+      await competitor?.close();
+    } finally {
+      await launched.close();
+    }
+  }
 });
 
 test('monitor keeps click telemetry attached across a navigation-context race without serializing DOM', async () => {
@@ -1625,6 +1719,47 @@ test('gui snapshot discovers ready brokers from the localhost scan range', async
   }
 });
 
+async function launchCdpBrowser() {
+  const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pwdev-gui-dialog-'));
+  const child = spawn(chromium.executablePath(), [
+    '--headless=new',
+    '--no-first-run',
+    '--remote-debugging-address=127.0.0.1',
+    '--remote-debugging-port=0',
+    `--user-data-dir=${userDataDir}`,
+    'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const close = async () => {
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      child.kill('SIGTERM');
+      await exited;
+    }
+    await fs.rm(userDataDir, { recursive: true, force: true });
+  };
+  let timer;
+  try {
+    const wsEndpoint = await new Promise((resolve, reject) => {
+      let output = '';
+      timer = setTimeout(() => reject(new Error(`Timed out starting Chromium: ${output}`)), 10_000);
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => {
+        output += chunk;
+        const match = output.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+        if (match) resolve(match[1]);
+      });
+      child.once('error', reject);
+      child.once('exit', (code) => reject(new Error(`Chromium exited before CDP was ready: ${code}`)));
+    });
+    return { wsEndpoint, close };
+  } catch (error) {
+    await close();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function createMonitorBrowserDouble(initialPages) {
   const pages = [];
   const browserEvents = new EventEmitter();
@@ -1669,6 +1804,8 @@ function createMonitorBrowserDouble(initialPages) {
       isClosed: () => closed,
       closeTarget: () => { closed = true; events.emit('close'); },
       on: events.on.bind(events),
+      emit: events.emit.bind(events),
+      listenerCount: events.listenerCount.bind(events),
       mainFrame: () => frame,
       viewportSize: () => ({ ...currentViewport }),
       setViewportSize: async (viewport) => { currentViewport = { ...viewport }; },

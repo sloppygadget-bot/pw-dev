@@ -268,7 +268,7 @@ export class BrowserMonitorHub {
       this.forgetConnection(connection);
       this.broadcast(connection, { type: 'disconnected', browserId, reason: 'browser disconnected' });
     });
-    this.observePage(connection, page);
+    for (const entry of pages) this.observePage(connection, entry.page);
     await this.refresh(connection);
     return connection;
   }
@@ -344,6 +344,7 @@ export class BrowserMonitorHub {
 
   async selectMonitorablePage(connection) {
     const localPages = await this.monitorablePages(connection.browser);
+    for (const entry of localPages) this.observePage(connection, entry.page);
     let selected = localPages.find((entry) => entry.id === connection.pageId);
     if (!selected) {
       selected = localPages[0];
@@ -366,6 +367,11 @@ export class BrowserMonitorHub {
   observePage(connection, page) {
     if (connection.observedPages.has(page)) return;
     connection.observedPages.add(page);
+    page.on('dialog', (dialog) => {
+      void dialog.dismiss().catch(() => {
+        // Another CDP client may have handled the browser-wide dialog first.
+      });
+    });
     // Navigation events can arrive while a previous evaluate is still in
     // flight. Route each event through one serialized, non-throwing refresh
     // so an execution-context race cannot become an unhandled rejection.
