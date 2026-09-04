@@ -353,6 +353,56 @@ test('monitor reports a GUI-only session instead of resizing the operator page',
   assert.deepEqual(browserDouble.page('dashboard').viewportSize(), { width: 390, height: 844 });
 });
 
+test('monitor falls back before preview when the cached target navigates to the GUI', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'target', title: 'Target', url: 'http://127.0.0.1:3000/' },
+    { id: 'fallback', title: 'Fallback', url: 'http://127.0.0.1:4000/', viewport: { width: 1024, height: 768 } },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'navigation-fallback-session');
+  hub.addGuiOrigin('http://127.0.0.1:9797');
+
+  try {
+    const connection = await hub.ensureConnection('navigation-fallback-browser', 'target');
+    await browserDouble.page('target').setViewportSize({ width: 390, height: 844 });
+    browserDouble.page('target').navigateTo('http://127.0.0.1:9797/monitor/navigation-fallback-browser');
+
+    await hub.refresh(connection);
+
+    assert.equal(connection.pageId, 'fallback');
+    assert.equal(connection.lastPageState.url, 'http://127.0.0.1:4000/');
+    const preview = await hub.preview('navigation-fallback-browser', 'fallback');
+
+    assert.deepEqual(preview, Buffer.from('fallback'));
+    assert.deepEqual(browserDouble.page('fallback').viewportSize(), { width: 1920, height: 1080 });
+    assert.deepEqual(browserDouble.page('target').viewportSize(), { width: 390, height: 844 });
+  } finally {
+    await hub.close();
+  }
+});
+
+test('monitor rejects actions when the cached target navigates to the GUI without a fallback', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'target', title: 'Target', url: 'http://127.0.0.1:3000/' },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'navigation-gui-only-session');
+  hub.addGuiOrigin('http://127.0.0.1:9797');
+
+  try {
+    await hub.ensureConnection('navigation-gui-only-browser', 'target');
+    await browserDouble.page('target').setViewportSize({ width: 390, height: 844 });
+    browserDouble.page('target').navigateTo('http://127.0.0.1:9797/monitor/navigation-gui-only-browser');
+
+    await assert.rejects(
+      hub.action('navigation-gui-only-browser', 'target', { action: 'click', path: [1] }),
+      (error) => error.statusCode === 409 && error.message === 'Browser session has no monitorable page',
+    );
+    assert.deepEqual(browserDouble.page('target').actions, []);
+    assert.deepEqual(browserDouble.page('target').viewportSize(), { width: 390, height: 844 });
+  } finally {
+    await hub.close();
+  }
+});
+
 test('two-tab monitor resolves targets, routes actions, discovers popups, falls back, and cleans up', async () => {
   const browserDouble = createMonitorBrowserDouble([
     { id: 'page-a', title: 'Home', url: 'https://shop.test/' },
@@ -1534,6 +1584,7 @@ function createMonitorBrowserDouble(initialPages) {
     const inputActions = [];
     const navigationActions = [];
     let currentViewport = initialViewport ?? { width: 1280, height: 720 };
+    let currentUrl = url;
     let closed = false;
     return {
       id,
@@ -1544,7 +1595,8 @@ function createMonitorBrowserDouble(initialPages) {
       navigationActions,
       context: () => context,
       title: async () => title,
-      url: () => url,
+      url: () => currentUrl,
+      navigateTo: (nextUrl) => { currentUrl = nextUrl; },
       isClosed: () => closed,
       closeTarget: () => { closed = true; events.emit('close'); },
       on: events.on.bind(events),
@@ -1573,7 +1625,7 @@ function createMonitorBrowserDouble(initialPages) {
           return { tagName: 'BUTTON', text: title };
         }
         return {
-          url,
+          url: currentUrl,
           title,
           viewport: { ...currentViewport, devicePixelRatio: 1 },
           scroll: { x: 0, y: 0 },

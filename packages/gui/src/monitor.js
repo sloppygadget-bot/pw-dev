@@ -211,6 +211,7 @@ export class BrowserMonitorHub {
     const existing = this.connections.get(key);
     if (existing?.browser.isConnected()) {
       if (existing.idleTimer) clearTimeout(existing.idleTimer);
+      if (this.guiOrigins.size) await this.selectMonitorablePage(existing);
       return existing;
     }
     if (existing) this.connections.delete(key);
@@ -280,6 +281,7 @@ export class BrowserMonitorHub {
     while (connection.refreshRequested && this.isConnectionActive(connection)) {
       connection.refreshRequested = false;
       try {
+        if (this.guiOrigins.size) await this.selectMonitorablePage(connection);
         const pageState = await this.attachPageObserver(connection);
         connection.lastPageState = { type: 'page', browserId: connection.browserId, ...pageState };
         this.broadcast(connection, connection.lastPageState);
@@ -324,10 +326,23 @@ export class BrowserMonitorHub {
   }
 
   async refreshPageInventory(connection) {
+    const previousPage = connection.page;
+    const localPages = await this.selectMonitorablePage(connection);
+    if (connection.page !== previousPage) await this.refresh(connection);
+    const remotePages = await this.describeSessionPages(connection);
+    const remoteById = new Map(remotePages.map((page) => [page.id, page]));
+    return localPages.map(({ page, ...description }) => ({ ...description, ...remoteById.get(description.id) }));
+  }
+
+  async selectMonitorablePage(connection) {
     const localPages = await this.monitorablePages(connection.browser);
     let selected = localPages.find((entry) => entry.id === connection.pageId);
-    if (!selected && localPages.length) {
+    if (!selected) {
       selected = localPages[0];
+      if (!selected) {
+        await this.closeConnection(connection);
+        throw httpError(409, 'Browser session has no monitorable page');
+      }
       const oldPageKey = monitorKey(connection.browserId, connection.pageId);
       connection.page = selected.page;
       connection.pageId = selected.id;
@@ -336,11 +351,8 @@ export class BrowserMonitorHub {
       if (!this.connections.has(nextPageKey)) this.connections.set(nextPageKey, connection);
       await ensureMinimumViewport(connection.page);
       this.observePage(connection, selected.page);
-      await this.refresh(connection);
     }
-    const remotePages = await this.describeSessionPages(connection);
-    const remoteById = new Map(remotePages.map((page) => [page.id, page]));
-    return localPages.map(({ page, ...description }) => ({ ...description, ...remoteById.get(description.id) }));
+    return localPages;
   }
 
   observePage(connection, page) {
