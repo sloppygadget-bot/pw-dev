@@ -708,7 +708,7 @@ function browserActions(browser) {
   const deleteBlocked = Boolean(agentLease);
   return actionGroup([
     { label: 'Edit', onClick: () => openBrowserEditor(browser) },
-    browser.sessionId
+    browser.sessionId && state.previewPageIds.get(browser.id)
       ? { label: 'Monitor', onClick: () => openBrowserMonitor(browser) }
       : undefined,
     browser.sessionId
@@ -728,6 +728,18 @@ function browserActions(browser) {
 function openBrowserMonitor(browser, pageId = state.previewPageIds.get(browser.id)) {
   const query = pageId ? `?pageId=${encodeURIComponent(pageId)}` : '';
   window.open(`/monitor/${encodeURIComponent(browser.id)}${query}`, '_blank', 'noopener,noreferrer');
+}
+
+function isGuiPage(page) {
+  try {
+    return new URL(page.url).origin === location.origin;
+  } catch {
+    return false;
+  }
+}
+
+function monitorablePreviewPages(pages) {
+  return pages.filter((page) => !isGuiPage(page));
 }
 
 async function refreshBrowserPreviews(browsers) {
@@ -760,14 +772,23 @@ async function refreshBrowserPreviews(browsers) {
       if (pageResponse.ok) {
         const body = await pageResponse.json();
         if (!isLatestRefresh()) return;
-        const pages = Array.isArray(body.pages) ? body.pages : [];
+        const pages = monitorablePreviewPages(Array.isArray(body.pages) ? body.pages : []);
         state.previewPages.set(browser.id, pages);
         const selectedPageId = state.previewPageIds.get(browser.id);
         if (!pages.some((page) => page.id === selectedPageId)) state.previewPageIds.set(browser.id, pages[0]?.id);
       }
       const pageId = state.previewPageIds.get(browser.id);
-      const query = pageId ? `?pageId=${encodeURIComponent(pageId)}` : '';
-      const response = await fetch(`/api/monitor/${encodeURIComponent(browser.id)}/preview${query}`, { cache: 'no-store' });
+      if (!pageId) {
+        const previous = state.previewUrls.get(browser.id);
+        if (previous) URL.revokeObjectURL(previous);
+        state.previewUrls.delete(browser.id);
+        state.previewTransitionUrls.delete(browser.id);
+        return;
+      }
+      const response = await fetch(
+        `/api/monitor/${encodeURIComponent(browser.id)}/preview?pageId=${encodeURIComponent(pageId)}`,
+        { cache: 'no-store' },
+      );
       if (!response.ok || !isLatestRefresh()) return;
       const url = await createDecodedImageUrl(await response.blob());
       if (!isLatestRefresh()) {
@@ -1002,7 +1023,12 @@ function renderBrowserDiagram(root, browsers) {
       if (tabs) preview.append(tabs);
     } else {
       preview.classList.add('empty');
-      preview.textContent = browser.sessionId ? 'Loading preview…' : 'Start the browser to load a preview.';
+      const pages = state.previewPages.get(browser.id);
+      preview.textContent = !browser.sessionId
+        ? 'Start the browser to load a preview.'
+        : pages && pages.length === 0
+          ? 'Open a target page to load a preview.'
+          : 'Loading preview…';
     }
     content.append(details, preview);
     card.append(content);

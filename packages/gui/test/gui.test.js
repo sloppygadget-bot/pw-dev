@@ -1274,6 +1274,106 @@ test('screenshot monitor keeps an input failure visible across later input', asy
   }
 });
 
+test('dashboard previews exclude same-origin GUI tabs and never capture without an external page', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  let previewRequests = 0;
+  try {
+    const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+    await seedPage.setContent('<body style="margin:0;background:#36c"></body>');
+    const preview = await seedPage.screenshot({ type: 'jpeg' });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await routeDashboardSnapshot(page, browserPreviewSnapshot());
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ pages: [
+        { id: 'dashboard', title: 'pw-dev', url: `${gui.origin}/` },
+        { id: 'target', title: 'Target', url: 'http://127.0.0.1:3000/' },
+        { id: 'monitor', title: 'Monitor', url: `${gui.origin}/monitor/preview-browser` },
+      ] }),
+    }));
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+      previewRequests += 1;
+      assert.match(route.request().url(), /pageId=target/);
+      return route.fulfill({ contentType: 'image/jpeg', body: preview });
+    });
+    await page.goto(gui.origin);
+    await waitFor(() => previewRequests === 1);
+    await page.waitForFunction(() => document.querySelectorAll('.browser-preview-dot').length === 0);
+    assert.equal(previewRequests, 1);
+    assert.doesNotMatch(await page.locator('.browser-preview').textContent(), /pw-dev|Monitor/);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('dashboard shows a target-page empty state for a GUI-only session', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  let previewRequests = 0;
+  try {
+    const page = await browser.newPage();
+    await routeDashboardSnapshot(page, browserPreviewSnapshot());
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ pages: [
+        { id: 'dashboard', title: 'pw-dev', url: `${gui.origin}/` },
+        { id: 'monitor', title: 'Monitor', url: `${gui.origin}/monitor/preview-browser` },
+      ] }),
+    }));
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+      previewRequests += 1;
+      return route.abort();
+    });
+    await page.goto(gui.origin);
+    await page.getByText('Open a target page to load a preview.').waitFor();
+    assert.equal(previewRequests, 0);
+    assert.equal(await page.locator('.browser-preview-dot').count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Monitor' }).count(), 0);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('browser thumbnail clears when the remaining session tabs are GUI-only', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  await seedPage.setContent('<body style="margin:0;background:#36c"></body>');
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  let guiOnly = false;
+  let previewRequests = 0;
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await routeDashboardSnapshot(page, browserPreviewSnapshot());
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ pages: guiOnly
+        ? [{ id: 'dashboard', title: 'pw-dev', url: `${gui.origin}/` }]
+        : [{ id: 'target', title: 'Target', url: 'http://127.0.0.1:3000/' }],
+      }),
+    }));
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+      previewRequests += 1;
+      return route.fulfill({ contentType: 'image/jpeg', body: preview });
+    });
+
+    await page.goto(gui.origin);
+    await page.locator('.browser-preview img').waitFor({ state: 'visible' });
+    guiOnly = true;
+    await page.locator('#refresh').click();
+    await page.getByText('Open a target page to load a preview.').waitFor();
+    assert.equal(await page.locator('.browser-preview img').count(), 0);
+    assert.equal(previewRequests, 1);
+    assert.equal(await page.getByRole('button', { name: 'Monitor' }).count(), 0);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
 test('browser thumbnail replaces decoded images without a blank frame', async () => {
   const browser = await chromium.launch({ headless: true });
   const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
@@ -2146,6 +2246,26 @@ function browserPreviewSnapshot() {
     proxyManager: { status: ok({ ok: true, proxies: [] }) },
     brokers: [],
   };
+}
+
+async function routeDashboardSnapshot(page, snapshot) {
+  await page.route('**/api/config', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      ok: true,
+      pwDevUrl: 'http://pw-dev.test',
+      brokerUrl: 'http://broker.test',
+      proxyManagerUrl: 'http://proxy.test',
+    }),
+  }));
+  await page.route('**/api/snapshot', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify(snapshot),
+  }));
+  await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ pages: [] }),
+  }));
 }
 
 function get(url) {
