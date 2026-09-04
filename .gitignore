@@ -6,3 +6,4 @@ coverage/
 .pw-dev/
 packages/proxy/.runtime/
 .agent/tasks/
+.worktrees/
