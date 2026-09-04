@@ -3,6 +3,7 @@ const state = {
   intervalMs: 5000,
   refreshPromise: undefined,
   pwDevUrl: '',
+  configured: false,
   currentView: 'browsers',
   navCollapsed: false,
   last: undefined,
@@ -149,18 +150,8 @@ els.interval.addEventListener('change', () => {
 void init();
 
 async function init() {
-  try {
-    const config = await fetchJson('/api/config');
-    state.pwDevUrl = config.pwDevUrl;
-    await refresh();
-  } catch (error) {
-    setRefreshStatus('error', `Refresh failed: ${error.message}`);
-  } finally {
-    els.newBrowser.disabled = false;
-    els.newBrowserConfig.disabled = false;
-    els.newProxy.disabled = false;
-    schedule();
-  }
+  await refresh();
+  schedule();
 }
 
 function schedule() {
@@ -180,6 +171,16 @@ function schedule() {
 function setRefreshStatus(kind, message) {
   els.refreshStatus.dataset.state = kind;
   els.refreshStatus.textContent = message;
+}
+
+async function ensureConfig() {
+  if (state.configured) return;
+  const config = await fetchJson('/api/config');
+  state.pwDevUrl = config.pwDevUrl;
+  state.configured = true;
+  els.newBrowser.disabled = false;
+  els.newBrowserConfig.disabled = false;
+  els.newProxy.disabled = false;
 }
 
 function setNavCollapsed(collapsed) {
@@ -263,14 +264,24 @@ async function performRefresh() {
   els.refresh.disabled = true;
   setRefreshStatus('loading', state.last ? 'Refreshing…' : 'Loading…');
   const previous = state.last;
+  let renderStarted = false;
   try {
+    await ensureConfig();
     const snapshot = normalizeSnapshot(await fetchJson('/api/snapshot'));
     state.last = snapshot;
+    renderStarted = true;
     await render(snapshot);
     setRefreshStatus('ok', 'Up to date');
     return true;
   } catch (error) {
     state.last = previous;
+    if (renderStarted && previous) {
+      try {
+        await render(previous);
+      } catch {
+        // The original refresh error remains the actionable status.
+      }
+    }
     setRefreshStatus('error', `Refresh failed: ${error.message}`);
     return false;
   } finally {

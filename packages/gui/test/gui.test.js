@@ -629,6 +629,108 @@ test('dashboard can recover from an initial snapshot failure without reloading',
   }
 });
 
+test('dashboard retries unavailable configuration before enabling creation controls', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  let configAvailable = false;
+  let configRequests = 0;
+  let snapshotRequests = 0;
+  try {
+    const page = await browser.newPage();
+    await page.route('**/api/config', (route) => {
+      configRequests += 1;
+      return configAvailable
+        ? route.fulfill({
+          contentType: 'application/json',
+          body: JSON.stringify({ ok: true, pwDevUrl: 'http://pw-dev.test' }),
+        })
+        : route.fulfill({ status: 503, body: 'config unavailable' });
+    });
+    await page.route('**/api/snapshot', (route) => {
+      snapshotRequests += 1;
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(browserPreviewSnapshot()) });
+    });
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ pages: [] }),
+    }));
+
+    await page.goto(gui.origin);
+    await page.waitForFunction(() => document.querySelector('#refresh-status')?.dataset.state === 'error');
+    for (const selector of ['#new-browser', '#new-browser-config', '#new-proxy']) {
+      assert.equal(await page.locator(selector).isDisabled(), true);
+    }
+    assert.equal(snapshotRequests, 0, 'snapshot loading must wait for configuration');
+
+    configAvailable = true;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => document.querySelector('#refresh-status')?.dataset.state === 'ok');
+    await page.getByRole('heading', { name: 'Preview browser' }).waitFor();
+    for (const selector of ['#new-browser', '#new-browser-config', '#new-proxy']) {
+      assert.equal(await page.locator(selector).isEnabled(), true);
+    }
+    assert.equal(configRequests, 2, 'manual refresh must retry configuration');
+    assert.equal(snapshotRequests, 1);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('dashboard restores the last rendered snapshot after a later renderer fails', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  await seedPage.setContent('<body style="margin:0;background:#36c"></body>');
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  await seedPage.close();
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  let snapshotRequests = 0;
+  let previewRequests = 0;
+  try {
+    const page = await browser.newPage();
+    await page.route('**/api/config', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, pwDevUrl: 'http://pw-dev.test' }),
+    }));
+    await page.route('**/api/snapshot', (route) => {
+      snapshotRequests += 1;
+      const snapshot = browserPreviewSnapshot();
+      if (snapshotRequests === 2) {
+        snapshot.server.browsers.body.browsers[0].name = 'Broken browser';
+        snapshot.server.remoteHosts.body.remoteHosts = [null];
+      }
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(snapshot) });
+    });
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ pages: [{ id: 'preview-page', title: 'Preview', url: 'https://preview.test/' }] }),
+    }));
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+      previewRequests += 1;
+      return previewRequests === 1
+        ? route.fulfill({ contentType: 'image/jpeg', body: preview })
+        : route.fulfill({ status: 503, body: 'preview unavailable' });
+    });
+
+    await page.goto(gui.origin);
+    const priorHeading = page.getByRole('heading', { name: 'Preview browser' });
+    const thumbnail = page.locator('.browser-preview img');
+    await priorHeading.waitFor();
+    await thumbnail.waitFor({ state: 'visible' });
+    const priorSrc = await thumbnail.getAttribute('src');
+
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => document.querySelector('#refresh-status')?.dataset.state === 'error');
+    assert.equal(await priorHeading.count(), 1);
+    assert.equal(await page.getByRole('heading', { name: 'Broken browser' }).count(), 0);
+    assert.equal(await thumbnail.getAttribute('src'), priorSrc);
+    assert.equal(await thumbnail.isVisible(), true);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
 test('two-tab monitor resolves targets, routes actions, discovers popups, falls back, and cleans up', async () => {
   const browserDouble = createMonitorBrowserDouble([
     { id: 'page-a', title: 'Home', url: 'https://shop.test/' },
