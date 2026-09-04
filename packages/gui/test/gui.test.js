@@ -559,6 +559,83 @@ test('monitor rejects actions when the cached target navigates to the GUI withou
   }
 });
 
+test('dashboard exposes active view state and contains README modal focus', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  try {
+    const page = await browser.newPage();
+    await routeDashboardSnapshot(page, snapshotWithReadme());
+    await page.goto(gui.origin);
+
+    const browsersNav = page.locator('.nav-item[data-view="browsers"]');
+    assert.equal(await browsersNav.getAttribute('aria-current'), 'page');
+    assert.equal(await page.locator('.nav-item[aria-current="page"]').count(), 1);
+    await page.locator('summary', { hasText: 'Assets' }).click();
+    await page.locator('.nav-item[data-view="apps"]').click();
+    assert.equal(await browsersNav.getAttribute('aria-current'), null);
+    assert.equal(await page.locator('.nav-item[data-view="apps"]').getAttribute('aria-current'), 'page');
+    assert.equal(await page.locator('.nav-item[aria-current="page"]').count(), 1);
+
+    await browsersNav.click();
+    assert.equal(await page.locator('[data-browser-view="diagram"]').getAttribute('aria-pressed'), 'true');
+    await page.locator('[data-browser-view="table"]').click();
+    assert.equal(await page.locator('[data-browser-view="diagram"]').getAttribute('aria-pressed'), 'false');
+    assert.equal(await page.locator('[data-browser-view="table"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('[data-browser-view][aria-pressed="true"]').count(), 1);
+
+    await page.locator('.nav-item[data-view="apps"]').click();
+    const invoker = page.getByRole('button', { name: 'View README' }).first();
+    await invoker.click();
+    assert.equal(await page.locator('#page-shell').getAttribute('inert'), '');
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'copy-markdown-modal');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'close-markdown-modal');
+    await page.keyboard.press('Escape');
+    assert.equal(await invoker.evaluate((button) => document.activeElement === button), true);
+    assert.equal(await page.locator('#page-shell').getAttribute('inert'), null);
+
+    await invoker.click();
+    await page.locator('[data-close-markdown-modal]').click({ position: { x: 4, y: 4 } });
+    assert.equal(await invoker.evaluate((button) => document.activeElement === button), true);
+    assert.equal(await page.locator('#page-shell').getAttribute('inert'), null);
+    await invoker.click();
+    await page.locator('#close-markdown-modal').click();
+    assert.equal(await invoker.evaluate((button) => document.activeElement === button), true);
+    assert.equal(await page.locator('#page-shell').getAttribute('inert'), null);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('dashboard mobile navigation keeps one entity group expanded', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    await routeDashboardSnapshot(page, browserPreviewSnapshot());
+    await page.goto(gui.origin);
+
+    const assets = page.locator('[data-nav-group="assets"]');
+    const runtime = page.locator('[data-nav-group="runtime"]');
+    await assets.locator('summary').click();
+    await page.locator('.nav-item[data-view="apps"]').click();
+    await runtime.locator('summary').click();
+    assert.equal(await assets.getAttribute('open'), '');
+    assert.equal(await runtime.getAttribute('open'), '');
+
+    await page.locator('.nav-item[data-view="sessions"]').click();
+    assert.equal(await assets.getAttribute('open'), null);
+    assert.equal(await runtime.getAttribute('open'), '');
+    assert.equal(await page.locator('.nav-item[data-view="sessions"]').getAttribute('aria-current'), 'page');
+    assert.equal(await page.locator('.nav-item[aria-current="page"]').count(), 1);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
 test('dashboard keeps stale data visible and resumes polling after a snapshot failure', async () => {
   const browser = await chromium.launch({ headless: true });
   const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
@@ -2329,6 +2406,17 @@ function browserPreviewSnapshot() {
     proxyManager: { status: ok({ ok: true, proxies: [] }) },
     brokers: [],
   };
+}
+
+function snapshotWithReadme() {
+  const snapshot = browserPreviewSnapshot();
+  snapshot.server.apps.body.apps = [{
+    id: 'readme-app',
+    name: 'README app',
+    appUrl: 'https://readme.test/',
+    readme: '# README\n\nKeyboard-accessible content.',
+  }];
+  return snapshot;
 }
 
 async function routeDashboardSnapshot(page, snapshot) {

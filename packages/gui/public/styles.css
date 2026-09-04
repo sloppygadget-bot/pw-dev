@@ -15,6 +15,7 @@
   --red-bg: #fde8e7;
   --blue: #245b8f;
   --blue-bg: #e8f1fb;
+  --focus-ring: #245b8f;
 }
 
 * {
@@ -144,6 +145,11 @@ button {
 
 button {
   cursor: pointer;
+}
+
+:where(button, select, input, textarea, a, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 button:hover,

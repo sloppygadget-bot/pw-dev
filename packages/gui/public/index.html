@@ -56,7 +56,7 @@
             <span class="nav-toggle-icon" aria-hidden="true">◀</span>
           </button>
           <div id="entity-navigation" class="nav-links">
-          <button class="nav-item active" data-view="browsers" type="button">
+          <button class="nav-item active" data-view="browsers" type="button" aria-current="page">
             <span>Browsers</span><b id="count-browsers">0</b>
           </button>
           <details class="nav-group" data-nav-group="assets">
@@ -96,8 +96,8 @@
               <div class="section-actions">
                 <button id="new-browser" type="button">New browser</button>
                 <div class="toggle-group" role="group" aria-label="Browser view">
-                  <button class="toggle-btn active" data-browser-view="diagram" type="button">Diagram</button>
-                  <button class="toggle-btn" data-browser-view="table" type="button">Table</button>
+                  <button class="toggle-btn active" data-browser-view="diagram" type="button" aria-pressed="true">Diagram</button>
+                  <button class="toggle-btn" data-browser-view="table" type="button" aria-pressed="false">Table</button>
                 </div>
               </div>
             </div>

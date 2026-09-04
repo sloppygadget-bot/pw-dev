@@ -15,6 +15,7 @@ const state = {
   previewTransitionUrls: new Map(),
   nextPreviewRefreshGeneration: 0,
   markdownModalText: '',
+  markdownModalInvoker: undefined,
   editingBrowserId: undefined,
   editingBrowserConfigId: undefined,
   editingProxyId: undefined,
@@ -82,6 +83,7 @@ const els = {
   proxyPurpose: document.querySelector('#proxy-purpose'),
   proxyLabels: document.querySelector('#proxy-labels'),
   proxyEditorError: document.querySelector('#proxy-editor-error'),
+  pageShell: document.querySelector('#page-shell'),
   markdownModal: document.querySelector('#markdown-modal'),
   markdownModalTitle: document.querySelector('#markdown-modal-title'),
   markdownModalSubtitle: document.querySelector('#markdown-modal-subtitle'),
@@ -98,7 +100,9 @@ for (const button of document.querySelectorAll('[data-browser-view]')) {
   button.addEventListener('click', () => {
     state.browserView = button.dataset.browserView;
     for (const item of document.querySelectorAll('[data-browser-view]')) {
-      item.classList.toggle('active', item.dataset.browserView === state.browserView);
+      const active = item.dataset.browserView === state.browserView;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-pressed', String(active));
     }
     if (state.last) renderBrowsers(state.last.browsers);
   });
@@ -140,7 +144,22 @@ els.markdownModal.addEventListener('click', (event) => {
 });
 els.copyMarkdownModal.addEventListener('click', copyMarkdownModal);
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !els.markdownModal.classList.contains('hidden')) closeMarkdownModal();
+  if (els.markdownModal.classList.contains('hidden')) return;
+  if (event.key === 'Escape') {
+    closeMarkdownModal();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = modalFocusableElements();
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && (document.activeElement === first || !els.markdownModal.contains(document.activeElement))) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !els.markdownModal.contains(document.activeElement))) {
+    event.preventDefault();
+    first?.focus();
+  }
 });
 els.interval.addEventListener('change', () => {
   state.intervalMs = Number(els.interval.value);
@@ -194,9 +213,18 @@ function setNavCollapsed(collapsed) {
 function showView(view) {
   state.currentView = view;
   const navItem = document.querySelector(`.nav-item[data-view="${view}"]`);
-  navItem?.closest('details.nav-group')?.setAttribute('open', '');
+  const activeGroup = navItem?.closest('details.nav-group');
+  if (activeGroup) activeGroup.open = true;
+  if (matchMedia('(max-width: 850px)').matches) {
+    for (const group of document.querySelectorAll('details.nav-group')) {
+      if (group !== activeGroup) group.open = false;
+    }
+  }
   for (const item of document.querySelectorAll('.nav-item')) {
-    item.classList.toggle('active', item.dataset.view === view);
+    const active = item.dataset.view === view;
+    item.classList.toggle('active', active);
+    if (active) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
   }
   for (const panel of document.querySelectorAll('.view')) {
     panel.classList.toggle('active', panel.id === `view-${view}`);
@@ -1657,24 +1685,36 @@ function createMarkdownViewer(value) {
   button.type = 'button';
   button.className = 'readme-button';
   button.textContent = 'View README';
-  button.addEventListener('click', () => openMarkdownModal(value.title, value.text));
+  button.addEventListener('click', () => openMarkdownModal(value.title, value.text, button));
   return button;
 }
 
-function openMarkdownModal(title, text) {
+function modalFocusableElements() {
+  return [...els.markdownModal.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter((element) => !element.hidden && element.getClientRects().length > 0);
+}
+
+function openMarkdownModal(title, text, invoker) {
+  state.markdownModalInvoker = invoker;
   state.markdownModalText = text;
   els.markdownModalTitle.textContent = 'README';
   els.markdownModalSubtitle.textContent = title ?? '';
   renderMarkdown(els.markdownModalContent, text);
   els.copyMarkdownModal.textContent = 'Copy README';
   els.markdownModal.classList.remove('hidden');
+  els.pageShell.inert = true;
   document.body.classList.add('modal-open');
   els.closeMarkdownModal.focus();
 }
 
 function closeMarkdownModal() {
+  if (els.markdownModal.classList.contains('hidden')) return;
   els.markdownModal.classList.add('hidden');
+  els.pageShell.inert = false;
   document.body.classList.remove('modal-open');
+  const invoker = state.markdownModalInvoker;
+  state.markdownModalInvoker = undefined;
+  if (invoker?.isConnected) invoker.focus();
 }
 
 async function copyMarkdownModal() {
