@@ -249,6 +249,35 @@ test('monitor routes keyboard and pasted text to the selected Playwright page', 
   }
 });
 
+test('monitor routes back, forward, and reload to the selected Playwright page', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'navigation-page', title: 'Navigation', url: 'https://example.test/' },
+  ]);
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'navigation-session', cdpUrl: 'http://broker.test/session' } } },
+    }),
+  });
+
+  try {
+    await hub.action('navigation-browser', 'navigation-page', { action: 'navigation', type: 'back' });
+    await hub.action('navigation-browser', 'navigation-page', { action: 'navigation', type: 'forward' });
+    await hub.action('navigation-browser', 'navigation-page', { action: 'navigation', type: 'reload' });
+
+    assert.deepEqual(browserDouble.page('navigation-page').navigationActions, [
+      { type: 'back', options: { waitUntil: 'commit', timeout: 10_000 } },
+      { type: 'forward', options: { waitUntil: 'commit', timeout: 10_000 } },
+      { type: 'reload', options: { waitUntil: 'commit', timeout: 10_000 } },
+    ]);
+  } finally {
+    await hub.close();
+  }
+});
+
 test('monitor preserves input ordering across concurrent requests', async () => {
   const browserDouble = createMonitorBrowserDouble([
     { id: 'ordered-page', title: 'Ordered', url: 'https://shop.test/' },
@@ -441,6 +470,11 @@ test('gui serves static app and read-only config', async () => {
     assert.match(monitor.body, /id="mirror-image"/);
     assert.doesNotMatch(monitor.body, /id="mirror-frame"/);
     assert.match(monitor.body, /id="nav-target-url"/);
+    assert.match(monitor.body, /id="nav-back"[^>]*aria-label="Back"/);
+    assert.match(monitor.body, /id="nav-forward"[^>]*aria-label="Forward"/);
+    assert.match(monitor.body, /id="nav-reload"[^>]*aria-label="Reload"/);
+    assert.match(monitor.body, /class="browser-toolbar"[\s\S]*id="nav-back"[\s\S]*id="nav-target-url"/);
+    assert.doesNotMatch(monitor.body, /<header class="monitor-topbar">[\s\S]*id="nav-back"[\s\S]*<\/header>/);
     assert.match(monitor.body, /id="mirror-click-marker"/);
     assert.match(monitor.body, /id="refresh-screenshot"/);
     assert.match(monitor.body, /id="page-summary"/);
@@ -467,7 +501,7 @@ test('gui serves static app and read-only config', async () => {
     assert.equal(monitorStyle.statusCode, 200);
     assert.match(monitorStyle.body, /mirror-image/);
     assert.match(monitorStyle.body, /object-fit: contain/);
-    assert.match(monitorStyle.body, /max-width: min\(45vw, 560px\)/);
+    assert.match(monitorStyle.body, /\.browser-address/);
     assert.match(monitorStyle.body, /\.mirror-head #page-meta/);
 
     const appScript = await get(`${server.origin}/app.js`);
@@ -537,7 +571,6 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /function renderBrowserPreviewTabs/);
     assert.match(appScript.body, /\/api\/pwdev\/sessions\/\$\{encodeURIComponent\(browser\.sessionId\)\}\/pages/);
     assert.match(appScript.body, /browser-preview-dot/);
-    assert.match(appScript.body, /URL\.createObjectURL\(await response\.blob\(\)\)/);
     assert.doesNotMatch(appScript.body, /setInterval\(\(\) => void refresh\(\)/);
     assert.match(appScript.body, /renderBrowsers\(snapshot\.browsers\);[\s\S]*?void refreshBrowserPreviews\(snapshot\.browsers\)/);
     assert.match(appScript.body, /openBrowserMonitor\(browser\)/);
@@ -636,6 +669,11 @@ test('screenshot monitor forwards mapped mouse, keyboard, and paste input', asyn
       return image?.complete && image.naturalWidth > 0;
     });
 
+    assert.equal(await page.locator('.monitor-topbar #nav-back').count(), 0);
+    await page.locator('.browser-toolbar #nav-back').click();
+    await page.locator('#nav-forward').click();
+    await page.locator('#nav-reload').click();
+
     const box = await mirror.boundingBox();
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
@@ -673,6 +711,7 @@ test('screenshot monitor forwards mapped mouse, keyboard, and paste input', asyn
     }, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
 
     await waitFor(() => actions.some((action) => action.action === 'keyboard' && action.type === 'insertText'));
+    await waitFor(() => actions.filter((action) => action.action === 'navigation').length === 3);
     await waitFor(() => actions.some((action) => action.action === 'pointer' && action.type === 'up' && action.x < 1));
     const pointerDown = actions.find((action) => action.action === 'pointer' && action.type === 'down');
     assert.ok(Math.abs(pointerDown.x - 960) < 1);
@@ -685,6 +724,10 @@ test('screenshot monitor forwards mapped mouse, keyboard, and paste input', asyn
     assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'up' && action.key === 'v'), false);
     assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'down' && action.key === 'Enter'), true);
     assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'down' && action.key === 'ArrowLeft'), true);
+    assert.deepEqual(
+      actions.filter((action) => action.action === 'navigation').map((action) => action.type),
+      ['back', 'forward', 'reload'],
+    );
     const pointerUps = actions.filter((action) => action.action === 'pointer' && action.type === 'up');
     assert.ok(pointerUps.at(-1).x < 1, 'an outside drag should release at the viewport edge');
     assert.equal(actions.some((action) => action.action === 'pointer' && action.type === 'wheel' && action.deltaY === 48), true);
@@ -774,6 +817,240 @@ test('screenshot monitor keeps an input failure visible across later input', asy
     await page.waitForFunction(() => document.querySelector('#input-meta')?.textContent?.includes('remote input unavailable'));
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.match(await page.locator('#input-meta').textContent(), /remote input unavailable/);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('browser thumbnail replaces decoded images without a blank frame', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  await seedPage.setContent('<body style="margin:0;background:#d33"></body>');
+  const firstPreview = await seedPage.screenshot({ type: 'jpeg' });
+  await seedPage.setContent('<body style="margin:0;background:#36c"></body>');
+  const secondPreview = await seedPage.screenshot({ type: 'jpeg' });
+  const gui = await startPwDevGuiServer({
+    port: 0,
+    brokerDiscovery: false,
+    monitorHub: { async close() {} },
+  });
+  let previewRequests = 0;
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.addInitScript(() => {
+      const nativeDecode = HTMLImageElement.prototype.decode;
+      let previewDecodeCount = 0;
+      HTMLImageElement.prototype.decode = function decodePreview() {
+        previewDecodeCount += 1;
+        window.__previewDecodeCount = previewDecodeCount;
+        if (previewDecodeCount === 1) return nativeDecode.call(this);
+        return new Promise((resolve, reject) => {
+          window.__releasePreviewDecode = () => nativeDecode.call(this).then(resolve, reject);
+          window.__rejectPreviewDecode = () => reject(new Error('synthetic decode failure'));
+        });
+      };
+    });
+    await page.route('**/api/config', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, pwDevUrl: 'http://pw-dev.test', brokerUrl: 'http://broker.test', proxyManagerUrl: 'http://proxy.test' }),
+    }));
+    await page.route('**/api/snapshot', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(browserPreviewSnapshot()),
+    }));
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, sessionId: 'preview-session', pages: [{ id: 'preview-page', type: 'page', title: 'Preview', url: 'https://preview.test/' }] }),
+    }));
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+      previewRequests += 1;
+      return route.fulfill({
+        contentType: 'image/jpeg',
+        body: previewRequests === 1 ? firstPreview : secondPreview,
+      });
+    });
+
+    await page.goto(gui.origin);
+    const thumbnail = page.locator('.browser-preview img');
+    await thumbnail.waitFor({ state: 'visible' });
+    const firstSrc = await thumbnail.getAttribute('src');
+
+    await page.locator('#refresh').click();
+    await waitFor(() => previewRequests === 2);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(await thumbnail.getAttribute('src'), firstSrc, 'the decoded thumbnail should remain visible during replacement decoding');
+    assert.equal(
+      await thumbnail.evaluate((image) => getComputedStyle(image).animationName),
+      'none',
+      're-rendering the unchanged thumbnail should not replay its fade',
+    );
+    await page.evaluate(() => window.__releasePreviewDecode());
+    await page.waitForFunction((previousSrc) => document.querySelector('.browser-preview img')?.getAttribute('src') !== previousSrc, firstSrc);
+    assert.deepEqual(
+      await thumbnail.evaluate((image) => {
+        const style = getComputedStyle(image);
+        return { animationName: style.animationName, animationDuration: style.animationDuration };
+      }),
+      { animationName: 'browser-preview-fade', animationDuration: '0.15s' },
+    );
+
+    const decodedSrc = await thumbnail.getAttribute('src');
+    await page.locator('#refresh').click();
+    await waitFor(() => previewRequests === 3);
+    await page.waitForFunction(() => window.__previewDecodeCount === 3);
+    await page.evaluate(() => window.__rejectPreviewDecode());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(await thumbnail.getAttribute('src'), decodedSrc, 'a failed decode should retain the previous thumbnail');
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.locator('#refresh').click();
+    await waitFor(() => previewRequests === 4);
+    await page.waitForFunction(() => window.__previewDecodeCount === 4);
+    await page.evaluate(() => window.__releasePreviewDecode());
+    await page.waitForFunction((previousSrc) => document.querySelector('.browser-preview img')?.getAttribute('src') !== previousSrc, decodedSrc);
+    assert.equal(
+      await thumbnail.evaluate((image) => getComputedStyle(image).animationName),
+      'none',
+      'reduced-motion users should not receive the thumbnail fade',
+    );
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('browser thumbnail ignores an older decode that finishes after a newer refresh', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const previews = [];
+  for (const color of ['#d33', '#db3', '#36c']) {
+    await seedPage.setContent(`<body style="margin:0;background:${color}"></body>`);
+    previews.push(await seedPage.screenshot({ type: 'jpeg' }));
+  }
+  const gui = await startPwDevGuiServer({
+    port: 0,
+    brokerDiscovery: false,
+    monitorHub: { async close() {} },
+  });
+  let previewRequests = 0;
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.addInitScript(() => {
+      const nativeDecode = HTMLImageElement.prototype.decode;
+      let previewDecodeCount = 0;
+      HTMLImageElement.prototype.decode = function decodePreview() {
+        previewDecodeCount += 1;
+        if (previewDecodeCount !== 2) return nativeDecode.call(this);
+        return new Promise((resolve, reject) => {
+          window.__releaseOlderPreviewDecode = () => nativeDecode.call(this).then(resolve, reject);
+        });
+      };
+    });
+    await page.route('**/api/config', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, pwDevUrl: 'http://pw-dev.test', brokerUrl: 'http://broker.test', proxyManagerUrl: 'http://proxy.test' }),
+    }));
+    await page.route('**/api/snapshot', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(browserPreviewSnapshot()),
+    }));
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, sessionId: 'preview-session', pages: [{ id: 'preview-page', type: 'page', title: 'Preview', url: 'https://preview.test/' }] }),
+    }));
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+      const preview = previews[Math.min(previewRequests, previews.length - 1)];
+      previewRequests += 1;
+      return route.fulfill({ contentType: 'image/jpeg', body: preview });
+    });
+
+    await page.goto(gui.origin);
+    const thumbnail = page.locator('.browser-preview img');
+    await thumbnail.waitFor({ state: 'visible' });
+    const firstSrc = await thumbnail.getAttribute('src');
+
+    await page.locator('#refresh').click();
+    await waitFor(() => previewRequests === 2);
+    await page.locator('#refresh').click();
+    await waitFor(() => previewRequests === 3);
+    await page.waitForFunction((previousSrc) => document.querySelector('.browser-preview img')?.getAttribute('src') !== previousSrc, firstSrc);
+    const newestSrc = await thumbnail.getAttribute('src');
+
+    await page.evaluate(() => window.__releaseOlderPreviewDecode());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await page.locator('[data-browser-view="table"]').click();
+    await page.locator('[data-browser-view="diagram"]').click();
+    assert.equal(await thumbnail.getAttribute('src'), newestSrc, 'an obsolete decode must not replace the latest thumbnail');
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('browser thumbnail discards an initial preview if the browser stops before decode', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  await seedPage.setContent('<body style="margin:0;background:#36c"></body>');
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const gui = await startPwDevGuiServer({
+    port: 0,
+    brokerDiscovery: false,
+    monitorHub: { async close() {} },
+  });
+  let running = true;
+  let previewRequests = 0;
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.addInitScript(() => {
+      const nativeDecode = HTMLImageElement.prototype.decode;
+      let previewDecodeCount = 0;
+      HTMLImageElement.prototype.decode = function decodePreview() {
+        previewDecodeCount += 1;
+        window.__previewDecodeCount = previewDecodeCount;
+        return new Promise((resolve, reject) => {
+          window.__releasePreviewDecode = () => nativeDecode.call(this).then(resolve, reject);
+        });
+      };
+    });
+    await page.route('**/api/config', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, pwDevUrl: 'http://pw-dev.test', brokerUrl: 'http://broker.test', proxyManagerUrl: 'http://proxy.test' }),
+    }));
+    await page.route('**/api/snapshot', (route) => {
+      const snapshot = browserPreviewSnapshot();
+      if (!running) {
+        snapshot.server.sessions.body.sessions = [];
+        delete snapshot.server.browsers.body.browsers[0].sessionId;
+        snapshot.server.browsers.body.browsers[0].status = 'ready';
+      }
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(snapshot) });
+    });
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, sessionId: 'preview-session', pages: [{ id: 'preview-page', type: 'page', title: 'Preview', url: 'https://preview.test/' }] }),
+    }));
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+      previewRequests += 1;
+      return route.fulfill({ contentType: 'image/jpeg', body: preview });
+    });
+
+    await page.goto(gui.origin);
+    await waitFor(() => previewRequests === 1);
+    await page.waitForFunction(() => window.__previewDecodeCount === 1);
+
+    running = false;
+    await page.locator('#refresh').click();
+    await page.getByText('Start the browser to load a preview.').waitFor();
+    await page.evaluate(() => window.__releasePreviewDecode());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    running = true;
+    await page.locator('#refresh').click();
+    await waitFor(() => previewRequests === 2);
+    await page.waitForFunction(() => window.__previewDecodeCount === 2);
+    assert.equal(await page.locator('.browser-preview img').count(), 0, 'a restarted browser should wait for its new preview instead of showing a stale initial decode');
   } finally {
     await browser.close();
     await gui.close();
@@ -1182,6 +1459,7 @@ function createMonitorBrowserDouble(initialPages) {
     const events = new EventEmitter();
     const frame = {};
     const inputActions = [];
+    const navigationActions = [];
     let currentViewport = initialViewport ?? { width: 1280, height: 720 };
     let closed = false;
     return {
@@ -1190,6 +1468,7 @@ function createMonitorBrowserDouble(initialPages) {
       lease,
       actions: [],
       inputActions,
+      navigationActions,
       context: () => context,
       title: async () => title,
       url: () => url,
@@ -1210,6 +1489,9 @@ function createMonitorBrowserDouble(initialPages) {
         up: async (key) => inputActions.push({ device: 'keyboard', type: 'up', key }),
         insertText: async (text) => inputActions.push({ device: 'keyboard', type: 'insertText', text }),
       },
+      goBack: async (options) => { navigationActions.push({ type: 'back', options }); return null; },
+      goForward: async (options) => { navigationActions.push({ type: 'forward', options }); return null; },
+      reload: async (options) => { navigationActions.push({ type: 'reload', options }); },
       exposeFunction: async () => {},
       evaluate: async (_callback, value) => {
         if (value?.action) {
@@ -1315,6 +1597,32 @@ function startJsonServer(routes) {
       });
     });
   });
+}
+
+function browserPreviewSnapshot() {
+  const ok = (body) => ({ ok: true, body });
+  return {
+    collectedAt: '2026-09-04T00:00:00.000Z',
+    urls: { brokerUrl: 'http://broker.test' },
+    server: {
+      status: ok({ ok: true, manifest: { id: 'pwdev' }, broker: { reachable: true } }),
+      apps: ok({ apps: [] }),
+      browserConfigs: ok({ browserConfigs: [{ id: 'preview-config', headless: true }] }),
+      sessions: ok({ sessions: [{ sessionId: 'preview-session', browserId: 'preview-browser', browserConfigId: 'preview-config', scope: 'default' }] }),
+      browsers: ok({ browsers: [{ id: 'preview-browser', name: 'Preview browser', browserConfigId: 'preview-config', sessionId: 'preview-session', status: 'occupied', occupancy: { state: 'unclaimed' } }] }),
+      proxies: ok({ proxies: [] }),
+      sshKeys: ok({ sshKeys: [] }),
+      remoteHosts: ok({ remoteHosts: [] }),
+      proxyStatuses: [],
+    },
+    broker: {
+      status: ok({ ok: true, state: 'active', instances: [] }),
+      networks: ok({ networks: [] }),
+      proxyForwards: ok({ forwards: [] }),
+    },
+    proxyManager: { status: ok({ ok: true, proxies: [] }) },
+    brokers: [],
+  };
 }
 
 function get(url) {

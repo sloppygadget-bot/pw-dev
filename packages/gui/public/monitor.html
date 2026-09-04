@@ -14,10 +14,6 @@
         <div id="monitor-subtitle" class="muted">Connecting…</div>
       </div>
       <nav class="monitor-nav" aria-label="Monitor navigation">
-        <div class="target-nav">
-          <span class="eyebrow">TARGET</span>
-          <a id="nav-target-url" href="#" target="_blank" rel="noopener noreferrer">Waiting for target…</a>
-        </div>
         <span id="monitor-status" class="status-pill neutral">Connecting</span>
         <a href="/" target="_blank" rel="noopener noreferrer">Dashboard</a>
         <button id="refresh-screenshot" type="button">Refresh screenshot</button>
@@ -27,6 +23,16 @@
     <main class="monitor-layout">
       <section class="mirror-panel panel">
         <div class="panel-head mirror-head">
+          <div class="browser-toolbar" aria-label="Browser toolbar">
+            <div class="browser-controls" aria-label="Page navigation">
+              <button id="nav-back" type="button" aria-label="Back" title="Back">←</button>
+              <button id="nav-forward" type="button" aria-label="Forward" title="Forward">→</button>
+              <button id="nav-reload" type="button" aria-label="Reload" title="Reload">↻</button>
+            </div>
+            <div class="browser-address">
+              <a id="nav-target-url" href="#" target="_blank" rel="noopener noreferrer">Waiting for target…</a>
+            </div>
+          </div>
           <div id="page-meta" class="muted">Waiting for page state…</div>
         </div>
         <div id="mirror-frame-wrap" class="mirror-frame-wrap" tabindex="0" role="application" aria-label="Interactive live browser; click to focus, then use mouse and keyboard">

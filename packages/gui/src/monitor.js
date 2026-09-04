@@ -9,8 +9,10 @@ const ALLOWED_ACTIONS = new Set(['click', 'focus', 'highlight', 'scrollIntoView'
 const POINTER_ACTION_TYPES = new Set(['move', 'down', 'up', 'wheel']);
 const POINTER_BUTTONS = new Set(['left', 'middle', 'right']);
 const KEYBOARD_ACTION_TYPES = new Set(['down', 'up', 'insertText']);
+const NAVIGATION_ACTION_TYPES = new Set(['back', 'forward', 'reload']);
 const MIN_VIEWPORT_WIDTH = 1_920;
 const MIN_VIEWPORT_HEIGHT = 1_080;
+const MONITOR_NAVIGATION_OPTIONS = { waitUntil: 'commit', timeout: 10_000 };
 const NAVIGATION_RETRY_DELAY_MS = 25;
 const MAX_NAVIGATION_RETRIES = 3;
 const PREVIEW_TIMEOUT_MS = 2_000;
@@ -98,6 +100,16 @@ export class BrowserMonitorHub {
         else if (input.type === 'up') await connection.page.keyboard.up(input.key);
         else await connection.page.keyboard.insertText(input.text);
         return { ok: true, action, type: input.type };
+      });
+    }
+    if (action === 'navigation') {
+      const type = validateNavigationAction(payload);
+      return enqueueMonitorAction(connection, async () => {
+        let response;
+        if (type === 'back') response = await connection.page.goBack(MONITOR_NAVIGATION_OPTIONS);
+        else if (type === 'forward') response = await connection.page.goForward(MONITOR_NAVIGATION_OPTIONS);
+        else response = await connection.page.reload(MONITOR_NAVIGATION_OPTIONS);
+        return { ok: true, action, type, navigated: response !== null };
       });
     }
     if (!ALLOWED_ACTIONS.has(action)) throw httpError(400, `Unsupported monitor action: ${action}`);
@@ -414,6 +426,13 @@ export class BrowserMonitorHub {
   writeEvent(res, event) {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   }
+}
+
+function validateNavigationAction(payload) {
+  if (!NAVIGATION_ACTION_TYPES.has(payload?.type)) {
+    throw httpError(400, 'navigation type must be back, forward, or reload');
+  }
+  return payload.type;
 }
 
 function validateNodePath(rawPath) {

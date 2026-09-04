@@ -61,8 +61,30 @@ h2 { font-size: 15px; }
 .eyebrow { color: #9fb5ca; font-size: 11px; letter-spacing: .08em; }
 .monitor-topbar .muted { color: #c1c9d0; }
 .monitor-nav { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; gap: 14px; min-width: 0; }
-.target-nav { display: flex; flex: 0 1 min(45vw, 560px); flex-direction: column; align-items: flex-end; min-width: 0; max-width: min(45vw, 560px); }
-.target-nav a { display: block; width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-toolbar { display: flex; width: 100%; align-items: center; gap: 8px; }
+.browser-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.browser-controls button {
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: #3f4952;
+  font-size: 19px;
+  line-height: 1;
+}
+.browser-controls button:hover { border-color: #c6ccd2; background: #e7ebef; }
+.browser-controls button:focus-visible { outline: 2px solid #7dbbff; outline-offset: 2px; }
+.browser-address {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 1px solid #c7cdd3;
+  border-radius: 18px;
+  background: #f1f3f5;
+  padding: 6px 12px;
+}
+.browser-address a { display: block; overflow: hidden; color: #35424e; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+.browser-address a:hover { text-decoration: underline; }
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -98,8 +120,8 @@ h2 { font-size: 15px; }
   border-bottom: 1px solid var(--line);
 }
 .panel-head.compact { align-items: center; padding: 11px 13px; }
-.mirror-head { min-height: 48px; align-items: center; }
-.mirror-head #page-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mirror-head { display: block; min-height: 48px; }
+.mirror-head #page-meta { min-width: 0; margin-top: 7px; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .mirror-frame-wrap {
   position: relative;
   min-height: 620px;
@@ -162,15 +184,16 @@ h2 { font-size: 15px; }
 }
 
 @media (max-width: 900px) {
-  .target-nav { max-width: 35vw; }
+  .browser-address { font-size: 12px; }
 }
 @media (max-width: 620px) {
   .monitor-brand { width: 100%; flex-wrap: wrap; gap: 4px 8px; }
   .monitor-brand .muted { flex-basis: 100%; }
   .monitor-topbar { align-items: flex-start; flex-direction: column; }
   .monitor-nav { width: 100%; justify-content: space-between; flex-wrap: wrap; }
-  .target-nav { align-items: flex-start; max-width: 100%; order: 3; width: 100%; }
   .monitor-layout { padding: 8px; }
+  .browser-toolbar { align-items: stretch; flex-direction: column; }
+  .browser-address { width: 100%; }
   .mirror-frame-wrap { height: 70vh; min-height: 420px; padding: 8px; }
   .panel-head { flex-direction: column; }
 }

@@ -170,7 +170,8 @@ When a browser has a live session, its GUI `Monitor` action opens
 session over CDP and streams a JPEG preview once per second. The monitored
 page viewport is kept at a minimum of 1920x1080, and the preview forwards
 mouse movement, clicks, drags, wheel input, keyboard input, and pasted text to
-the selected page. It does not launch another browser.
+the selected page. Browser-style back, forward, and reload controls operate on
+that same selected page. It does not launch another browser.
 
 Discovery endpoints:
 

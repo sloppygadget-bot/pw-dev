@@ -10,6 +10,9 @@ const state = {
   previewUrls: new Map(),
   previewPages: new Map(),
   previewPageIds: new Map(),
+  previewRefreshGenerations: new Map(),
+  previewTransitionUrls: new Map(),
+  nextPreviewRefreshGeneration: 0,
   markdownModalText: '',
   editingBrowserId: undefined,
   editingBrowserConfigId: undefined,
@@ -691,19 +694,35 @@ function openBrowserMonitor(browser, pageId = state.previewPageIds.get(browser.i
 }
 
 async function refreshBrowserPreviews(browsers) {
-  const activeIds = new Set(browsers.filter((browser) => browser.sessionId).map((browser) => browser.id));
-  for (const [browserId, url] of state.previewUrls) {
+  const knownBrowsers = state.last?.browsers ?? browsers;
+  const activeIds = new Set(knownBrowsers.filter((browser) => browser.sessionId).map((browser) => browser.id));
+  const trackedIds = new Set([
+    ...state.previewUrls.keys(),
+    ...state.previewPages.keys(),
+    ...state.previewPageIds.keys(),
+    ...state.previewRefreshGenerations.keys(),
+    ...state.previewTransitionUrls.keys(),
+  ]);
+  for (const browserId of trackedIds) {
     if (activeIds.has(browserId)) continue;
-    URL.revokeObjectURL(url);
+    const url = state.previewUrls.get(browserId);
+    if (url) URL.revokeObjectURL(url);
     state.previewUrls.delete(browserId);
     state.previewPages.delete(browserId);
     state.previewPageIds.delete(browserId);
+    state.previewRefreshGenerations.delete(browserId);
+    state.previewTransitionUrls.delete(browserId);
   }
   await Promise.all(browsers.filter((browser) => browser.sessionId).map(async (browser) => {
+    const generation = ++state.nextPreviewRefreshGeneration;
+    state.previewRefreshGenerations.set(browser.id, generation);
+    const isLatestRefresh = () => state.previewRefreshGenerations.get(browser.id) === generation;
     try {
       const pageResponse = await fetch(`/api/pwdev/sessions/${encodeURIComponent(browser.sessionId)}/pages`, { cache: 'no-store' });
+      if (!isLatestRefresh()) return;
       if (pageResponse.ok) {
         const body = await pageResponse.json();
+        if (!isLatestRefresh()) return;
         const pages = Array.isArray(body.pages) ? body.pages : [];
         state.previewPages.set(browser.id, pages);
         const selectedPageId = state.previewPageIds.get(browser.id);
@@ -712,15 +731,37 @@ async function refreshBrowserPreviews(browsers) {
       const pageId = state.previewPageIds.get(browser.id);
       const query = pageId ? `?pageId=${encodeURIComponent(pageId)}` : '';
       const response = await fetch(`/api/monitor/${encodeURIComponent(browser.id)}/preview${query}`, { cache: 'no-store' });
-      if (!response.ok) return;
-      const url = URL.createObjectURL(await response.blob());
+      if (!response.ok || !isLatestRefresh()) return;
+      const url = await createDecodedImageUrl(await response.blob());
+      if (!isLatestRefresh()) {
+        URL.revokeObjectURL(url);
+        return;
+      }
       const previous = state.previewUrls.get(browser.id);
       state.previewUrls.set(browser.id, url);
-      if (previous) URL.revokeObjectURL(previous);
+      if (previous) {
+        state.previewTransitionUrls.set(browser.id, url);
+        URL.revokeObjectURL(previous);
+      } else {
+        state.previewTransitionUrls.delete(browser.id);
+      }
     } catch {
       // Keep the previous preview when a transient monitor capture fails.
     }
   }));
+}
+
+async function createDecodedImageUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  const image = new Image();
+  image.src = url;
+  try {
+    await image.decode();
+    return url;
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
 }
 
 async function selectBrowserPreviewPage(browser, pageId) {
@@ -914,6 +955,10 @@ function renderBrowserDiagram(root, browsers) {
       const image = document.createElement('img');
       image.alt = `Latest browser preview for ${browser.name ?? browser.id}`;
       image.src = previewUrl;
+      if (state.previewTransitionUrls.get(browser.id) === previewUrl) {
+        image.classList.add('preview-updated');
+        state.previewTransitionUrls.delete(browser.id);
+      }
       previewMedia.append(image);
       preview.append(previewMedia);
       const tabs = renderBrowserPreviewTabs(browser);
