@@ -321,6 +321,37 @@ test('monitor preserves input ordering across concurrent requests', async () => 
   }
 });
 
+test('monitor preserves action request order when cached-target revalidation resolves out of order', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'ordered-page', title: 'Ordered', url: 'https://shop.test/' },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'ordered-revalidation-session');
+  hub.addGuiOrigin('http://127.0.0.1:9797');
+
+  try {
+    await hub.ensureConnection('ordered-revalidation-browser', 'ordered-page');
+    const page = browserDouble.page('ordered-page');
+    const deferredDescription = browserDouble.deferNextPageDescription();
+
+    const pointer = hub.action('ordered-revalidation-browser', 'ordered-page', { action: 'pointer', type: 'move', x: 1, y: 2 });
+    await deferredDescription.started;
+    const keyboard = hub.action('ordered-revalidation-browser', 'ordered-page', { action: 'keyboard', type: 'down', key: 'A' });
+    await new Promise((resolve) => setImmediate(resolve));
+    const actionsBeforeFirstRevalidation = [...page.inputActions];
+
+    deferredDescription.release();
+    await Promise.all([pointer, keyboard]);
+
+    assert.deepEqual(actionsBeforeFirstRevalidation, []);
+    assert.deepEqual(page.inputActions, [
+      { device: 'mouse', type: 'move', x: 1, y: 2 },
+      { device: 'keyboard', type: 'down', key: 'A' },
+    ]);
+  } finally {
+    await hub.close();
+  }
+});
+
 test('monitor excludes known GUI pages from selection, inventory, and viewport changes', async () => {
   const browserDouble = createMonitorBrowserDouble([
     { id: 'dashboard', title: 'pw-dev', url: 'http://127.0.0.1:9797/', viewport: { width: 390, height: 844 } },
@@ -1566,6 +1597,7 @@ test('gui snapshot discovers ready brokers from the localhost scan range', async
 function createMonitorBrowserDouble(initialPages) {
   const pages = [];
   const browserEvents = new EventEmitter();
+  let deferredPageDescription;
   let connected = true;
   let closeCalls = 0;
   const context = {
@@ -1573,6 +1605,12 @@ function createMonitorBrowserDouble(initialPages) {
     newCDPSession: async (page) => ({
       send: async (method) => {
         assert.equal(method, 'Target.getTargetInfo');
+        if (deferredPageDescription) {
+          const deferred = deferredPageDescription;
+          deferredPageDescription = undefined;
+          deferred.markStarted();
+          await deferred.promise;
+        }
         return { targetInfo: { targetId: page.id } };
       },
       detach: async () => {},
@@ -1659,6 +1697,14 @@ function createMonitorBrowserDouble(initialPages) {
       return pages.find((page) => page.id === id);
     },
     livePages: () => context.pages(),
+    deferNextPageDescription() {
+      let markStarted;
+      let release;
+      const started = new Promise((resolve) => { markStarted = resolve; });
+      const promise = new Promise((resolve) => { release = resolve; });
+      deferredPageDescription = { markStarted, promise };
+      return { started, release };
+    },
     get closeCalls() { return closeCalls; },
   };
   for (const page of initialPages) double.open(page);

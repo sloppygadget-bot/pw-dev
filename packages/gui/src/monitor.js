@@ -35,6 +35,8 @@ export class BrowserMonitorHub {
     this.connections = new Map();
     /** @type {Map<string, Promise<Buffer>>} */
     this.previewPromises = new Map();
+    /** @type {Map<string, Promise<void>>} */
+    this.actionPromises = new Map();
   }
 
   addGuiOrigin(origin) {
@@ -99,7 +101,12 @@ export class BrowserMonitorHub {
     res.once('close', cleanup);
   }
 
-  async action(browserId, pageId, payload) {
+  action(browserId, pageId, payload) {
+    const key = monitorKey(browserId, pageId);
+    return enqueueMonitorActionRequest(this.actionPromises, key, () => this.performAction(browserId, pageId, payload));
+  }
+
+  async performAction(browserId, pageId, payload) {
     const connection = await this.ensureConnection(browserId, pageId);
     const action = payload?.action;
     if (action === 'pointer') {
@@ -194,6 +201,7 @@ export class BrowserMonitorHub {
     const connections = [...new Set(this.connections.values())];
     this.connections.clear();
     this.previewPromises.clear();
+    this.actionPromises.clear();
     await Promise.all(connections.map(async (connection) => {
       for (const subscriber of connection.subscribers) subscriber.end();
       connection.subscribers.clear();
@@ -521,6 +529,16 @@ function enqueueMonitorAction(connection, operation) {
   const result = connection.actionQueue.then(operation);
   connection.actionQueue = result.catch(() => undefined);
   return result;
+}
+
+function enqueueMonitorActionRequest(actionPromises, key, operation) {
+  const previous = actionPromises.get(key) ?? Promise.resolve();
+  const result = previous.then(operation);
+  const tail = result.catch(() => undefined);
+  actionPromises.set(key, tail);
+  return result.finally(() => {
+    if (actionPromises.get(key) === tail) actionPromises.delete(key);
+  });
 }
 
 async function ensureMinimumViewport(page) {
