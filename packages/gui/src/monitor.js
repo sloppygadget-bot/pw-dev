@@ -6,6 +6,11 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const MAX_PATH_LENGTH = 80;
 const ALLOWED_ACTIONS = new Set(['click', 'focus', 'highlight', 'scrollIntoView']);
+const POINTER_ACTION_TYPES = new Set(['move', 'down', 'up', 'wheel']);
+const POINTER_BUTTONS = new Set(['left', 'middle', 'right']);
+const KEYBOARD_ACTION_TYPES = new Set(['down', 'up', 'insertText']);
+const MIN_VIEWPORT_WIDTH = 1_920;
+const MIN_VIEWPORT_HEIGHT = 1_080;
 const NAVIGATION_RETRY_DELAY_MS = 25;
 const MAX_NAVIGATION_RETRIES = 3;
 const PREVIEW_TIMEOUT_MS = 2_000;
@@ -73,33 +78,57 @@ export class BrowserMonitorHub {
   async action(browserId, pageId, payload) {
     const connection = await this.ensureConnection(browserId, pageId);
     const action = payload?.action;
+    if (action === 'pointer') {
+      const input = validatePointerAction(
+        payload,
+        connection.page.viewportSize?.() ?? connection.lastPageState?.viewport
+      );
+      return enqueueMonitorAction(connection, async () => {
+        await connection.page.mouse.move(input.x, input.y);
+        if (input.type === 'down') await connection.page.mouse.down({ button: input.button });
+        else if (input.type === 'up') await connection.page.mouse.up({ button: input.button });
+        else if (input.type === 'wheel') await connection.page.mouse.wheel(input.deltaX, input.deltaY);
+        return { ok: true, action, type: input.type };
+      });
+    }
+    if (action === 'keyboard') {
+      const input = validateKeyboardAction(payload);
+      return enqueueMonitorAction(connection, async () => {
+        if (input.type === 'down') await connection.page.keyboard.down(input.key);
+        else if (input.type === 'up') await connection.page.keyboard.up(input.key);
+        else await connection.page.keyboard.insertText(input.text);
+        return { ok: true, action, type: input.type };
+      });
+    }
     if (!ALLOWED_ACTIONS.has(action)) throw httpError(400, `Unsupported monitor action: ${action}`);
     const path = validateNodePath(payload?.path);
     if (action === 'scrollIntoView' && payload?.behavior !== undefined && !['auto', 'smooth'].includes(payload.behavior)) {
       throw httpError(400, 'behavior must be auto or smooth');
     }
-    const result = await connection.page.evaluate(({ action: requestedAction, path: nodePath, behavior }) => {
-      let node = document.documentElement;
-      for (const index of nodePath) {
-        if (!node?.childNodes?.[index]) throw new Error('DOM path no longer exists');
-        node = node.childNodes[index];
-      }
-      if (!(node instanceof Element)) throw new Error('DOM path does not point to an element');
-      if (requestedAction === 'click') node.click();
-      else if (requestedAction === 'focus') node.focus();
-      else if (requestedAction === 'scrollIntoView') node.scrollIntoView({ behavior: behavior ?? 'smooth', block: 'center', inline: 'center' });
-      else {
-        node.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-        const previous = node.getAttribute('data-pwdev-monitor-highlight');
-        node.setAttribute('data-pwdev-monitor-highlight', 'true');
-        setTimeout(() => {
-          if (previous === null) node.removeAttribute('data-pwdev-monitor-highlight');
-          else node.setAttribute('data-pwdev-monitor-highlight', previous);
-        }, 1500);
-      }
-      return { tagName: node.tagName, text: (node.textContent ?? '').trim().slice(0, 240) };
-    }, { action, path, behavior: payload?.behavior });
-    return { ok: true, action, path, result };
+    return enqueueMonitorAction(connection, async () => {
+      const result = await connection.page.evaluate(({ action: requestedAction, path: nodePath, behavior }) => {
+        let node = document.documentElement;
+        for (const index of nodePath) {
+          if (!node?.childNodes?.[index]) throw new Error('DOM path no longer exists');
+          node = node.childNodes[index];
+        }
+        if (!(node instanceof Element)) throw new Error('DOM path does not point to an element');
+        if (requestedAction === 'click') node.click();
+        else if (requestedAction === 'focus') node.focus();
+        else if (requestedAction === 'scrollIntoView') node.scrollIntoView({ behavior: behavior ?? 'smooth', block: 'center', inline: 'center' });
+        else {
+          node.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+          const previous = node.getAttribute('data-pwdev-monitor-highlight');
+          node.setAttribute('data-pwdev-monitor-highlight', 'true');
+          setTimeout(() => {
+            if (previous === null) node.removeAttribute('data-pwdev-monitor-highlight');
+            else node.setAttribute('data-pwdev-monitor-highlight', previous);
+          }, 1500);
+        }
+        return { tagName: node.tagName, text: (node.textContent ?? '').trim().slice(0, 240) };
+      }, { action, path, behavior: payload?.behavior });
+      return { ok: true, action, path, result };
+    });
   }
 
   preview(browserId, pageId) {
@@ -118,6 +147,7 @@ export class BrowserMonitorHub {
   async capturePreview(browserId, pageId) {
     const connection = await this.ensureConnection(browserId, pageId);
     if (connection.page.isClosed()) throw httpError(409, 'Browser session has no page to monitor');
+    await ensureMinimumViewport(connection.page);
     return connection.page.screenshot({
       type: 'jpeg',
       quality: 60,
@@ -175,6 +205,7 @@ export class BrowserMonitorHub {
       await browser.close();
       throw httpError(409, 'Browser session has no page to monitor');
     }
+    await ensureMinimumViewport(page);
     const connection = {
       browserId,
       sessionId: session.sessionId,
@@ -184,6 +215,7 @@ export class BrowserMonitorHub {
       subscribers: new Set(),
       observedPages: new WeakSet(),
       lastPageState: undefined,
+      actionQueue: Promise.resolve(),
       bindingName: `__pwdevMonitor_${browserId.replace(/[^A-Za-z0-9_$]/g, '_')}_${Date.now()}`,
     };
     this.connections.set(key, connection);
@@ -268,6 +300,7 @@ export class BrowserMonitorHub {
       if (this.connections.get(oldPageKey) === connection) this.connections.delete(oldPageKey);
       const nextPageKey = monitorKey(connection.browserId, selected.id);
       if (!this.connections.has(nextPageKey)) this.connections.set(nextPageKey, connection);
+      await ensureMinimumViewport(connection.page);
       this.observePage(connection, selected.page);
       await this.refresh(connection);
     }
@@ -388,6 +421,63 @@ function validateNodePath(rawPath) {
     throw httpError(400, 'path must be an array of DOM child indexes');
   }
   return rawPath;
+}
+
+function validatePointerAction(payload, viewport) {
+  const type = payload?.type;
+  if (!POINTER_ACTION_TYPES.has(type)) throw httpError(400, 'pointer type must be move, down, up, or wheel');
+  const x = finiteNumber(payload?.x, 'x');
+  const y = finiteNumber(payload?.y, 'y');
+  if (x < 0 || y < 0) throw httpError(400, 'pointer coordinates must be non-negative');
+  if (viewport && (x >= viewport.width || y >= viewport.height)) {
+    throw httpError(400, 'pointer coordinates must be within the target viewport');
+  }
+  const button = payload?.button ?? 'left';
+  if (!POINTER_BUTTONS.has(button)) throw httpError(400, 'button must be left, middle, or right');
+  return {
+    type,
+    x,
+    y,
+    button,
+    deltaX: type === 'wheel' ? finiteNumber(payload?.deltaX ?? 0, 'deltaX') : 0,
+    deltaY: type === 'wheel' ? finiteNumber(payload?.deltaY ?? 0, 'deltaY') : 0,
+  };
+}
+
+function validateKeyboardAction(payload) {
+  const type = payload?.type;
+  if (!KEYBOARD_ACTION_TYPES.has(type)) throw httpError(400, 'keyboard type must be down, up, or insertText');
+  if (type === 'insertText') {
+    if (typeof payload?.text !== 'string' || payload.text.length > 10_000) {
+      throw httpError(400, 'text must be a string of at most 10000 characters');
+    }
+    return { type, text: payload.text };
+  }
+  if (typeof payload?.key !== 'string' || payload.key.length === 0 || payload.key.length > 64) {
+    throw httpError(400, 'key must be a non-empty string of at most 64 characters');
+  }
+  return { type, key: payload.key };
+}
+
+function finiteNumber(value, name) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw httpError(400, `${name} must be a finite number`);
+  return value;
+}
+
+function enqueueMonitorAction(connection, operation) {
+  const result = connection.actionQueue.then(operation);
+  connection.actionQueue = result.catch(() => undefined);
+  return result;
+}
+
+async function ensureMinimumViewport(page) {
+  const reported = page.viewportSize?.() ?? await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  const width = Number.isFinite(reported?.width) ? Math.max(reported.width, MIN_VIEWPORT_WIDTH) : MIN_VIEWPORT_WIDTH;
+  const height = Number.isFinite(reported?.height) ? Math.max(reported.height, MIN_VIEWPORT_HEIGHT) : MIN_VIEWPORT_HEIGHT;
+  if (reported?.width !== width || reported?.height !== height) {
+    await page.setViewportSize({ width, height });
+  }
+  return { width, height };
 }
 
 function httpError(statusCode, message) {

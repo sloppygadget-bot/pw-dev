@@ -29,8 +29,8 @@
         <div class="panel-head mirror-head">
           <div id="page-meta" class="muted">Waiting for page state…</div>
         </div>
-        <div id="mirror-frame-wrap" class="mirror-frame-wrap">
-          <img id="mirror-image" alt="Live browser screenshot">
+        <div id="mirror-frame-wrap" class="mirror-frame-wrap" tabindex="0" role="application" aria-label="Interactive live browser; click to focus, then use mouse and keyboard">
+          <img id="mirror-image" alt="Live browser screenshot" draggable="false">
           <div id="mirror-click-marker" class="mirror-click-marker" aria-hidden="true"></div>
           <div id="mirror-empty" class="mirror-empty">Waiting for a live browser screenshot…</div>
         </div>
@@ -40,6 +40,7 @@
           <span id="viewport-meta">Viewport —</span>
           <span id="scroll-meta">Scroll —</span>
           <span id="click-meta">Click —</span>
+          <span id="input-meta">Input ready</span>
           <span id="update-meta">Updated —</span>
         </div>
       </section>

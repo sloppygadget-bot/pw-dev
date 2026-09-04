@@ -167,9 +167,10 @@ browser config. Override the primary endpoints with `--pwdev-url`,
 
 When a browser has a live session, its GUI `Monitor` action opens
 `/monitor/<browser-id>` in a new tab. The monitor attaches to that existing
-session over CDP and reconstructs a searchable live DOM mirror with
-stylesheets, viewport, scroll state, DOM patches, and safe element
-highlight/click/focus actions. It does not launch another browser.
+session over CDP and streams a JPEG preview once per second. The monitored
+page viewport is kept at a minimum of 1920x1080, and the preview forwards
+mouse movement, clicks, drags, wheel input, keyboard input, and pasted text to
+the selected page. It does not launch another browser.
 
 Discovery endpoints:
 

@@ -71,6 +71,11 @@ export async function startPwDevGuiServer(options = {}) {
           writeJson(res, 405, { ok: false, error: 'monitor actions require POST' });
           return;
         }
+        const requestError = validateMonitorActionRequest(req);
+        if (requestError) {
+          writeJson(res, requestError.statusCode, { ok: false, error: requestError.message });
+          return;
+        }
         const payload = await readJsonRequest(req);
         writeJson(res, 200, await monitorHub.action(decodePathSegment(monitorAction[1]), requestUrl.searchParams.get('pageId') ?? undefined, payload));
         return;
@@ -147,6 +152,19 @@ export async function startPwDevGuiServer(options = {}) {
       });
     },
   };
+}
+
+function validateMonitorActionRequest(req) {
+  const contentType = req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase();
+  if (contentType !== 'application/json') {
+    return { statusCode: 415, message: 'monitor actions require application/json' };
+  }
+  const origin = req.headers.origin;
+  const expectedOrigin = req.headers.host ? `http://${req.headers.host}` : undefined;
+  if (origin && origin !== expectedOrigin) {
+    return { statusCode: 403, message: 'monitor actions require a same-origin request' };
+  }
+  return undefined;
 }
 
 async function collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl, brokerDiscovery }) {

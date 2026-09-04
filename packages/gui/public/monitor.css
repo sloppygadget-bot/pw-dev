@@ -106,7 +106,10 @@ h2 { font-size: 15px; }
   height: calc(100vh - 190px);
   background: #e9edf1;
   padding: 14px;
+  outline: none;
+  touch-action: none;
 }
+.mirror-frame-wrap:focus-visible { box-shadow: inset 0 0 0 3px rgba(36, 91, 143, .65); }
 #mirror-image {
   width: 100%;
   height: 100%;
@@ -114,6 +117,8 @@ h2 { font-size: 15px; }
   object-fit: contain;
   border: 1px solid #aeb7c0;
   background: #fff;
+  cursor: crosshair;
+  user-select: none;
 }
 .mirror-click-marker {
   position: absolute;

@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import test from 'node:test';
+import { chromium } from 'playwright';
 
 import { parseArgs } from '../src/cli.js';
 import { BrowserMonitorHub } from '../src/monitor.js';
@@ -67,6 +68,8 @@ test('monitor preview uses a short timeout and coalesces concurrent captures', a
     browser: { isConnected: () => true },
     page: {
       isClosed: () => false,
+      viewportSize: () => ({ width: 1920, height: 1080 }),
+      setViewportSize: async () => {},
       screenshot: (options) => {
         captures.push(options);
         return new Promise((resolve) => { finishCapture = resolve; });
@@ -79,13 +82,39 @@ test('monitor preview uses a short timeout and coalesces concurrent captures', a
 
   const first = hub.preview(connection.browserId);
   const second = hub.preview(connection.browserId);
-  await Promise.resolve();
+  await waitFor(() => captures.length === 1);
 
   assert.equal(captures.length, 1);
   assert.deepEqual(captures[0], { type: 'jpeg', quality: 60, scale: 'css', timeout: 2_000 });
   finishCapture(Buffer.from('preview'));
   assert.deepEqual(await Promise.all([first, second]), [Buffer.from('preview'), Buffer.from('preview')]);
   assert.equal(hub.previewPromises.has(connection.browserId), false);
+});
+
+test('monitor restores the 1080p minimum before every screenshot', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'resized-page', title: 'Resized', url: 'https://shop.test/' },
+  ]);
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'resized-session', cdpUrl: 'http://broker.test/session' } } },
+    }),
+  });
+
+  try {
+    await hub.ensureConnection('resized-browser', 'resized-page');
+    await browserDouble.page('resized-page').setViewportSize({ width: 800, height: 600 });
+
+    await hub.preview('resized-browser', 'resized-page');
+
+    assert.deepEqual(browserDouble.page('resized-page').viewportSize(), { width: 1920, height: 1080 });
+  } finally {
+    await hub.close();
+  }
 });
 
 test('monitor relays real browser click coordinates to its event subscribers', () => {
@@ -106,6 +135,161 @@ test('monitor relays real browser click coordinates to its event subscribers', (
   assert.deepEqual(events, [
     'data: {"type":"click","x":320,"y":180,"viewport":{"width":1280,"height":720},"browserId":"click-indicator"}\n\n',
   ]);
+});
+
+test('monitor raises a short browser viewport to a true 1080p minimum', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'wide-page', title: 'Wide', url: 'https://shop.test/', viewport: { width: 2560, height: 720 } },
+  ]);
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'viewport-session', cdpUrl: 'http://broker.test/session' } } },
+    }),
+  });
+
+  try {
+    const connection = await hub.ensureConnection('viewport-browser', 'wide-page');
+
+    assert.deepEqual(browserDouble.page('wide-page').viewportSize(), { width: 2560, height: 1080 });
+    assert.deepEqual(connection.lastPageState.viewport, { width: 2560, height: 1080, devicePixelRatio: 1 });
+  } finally {
+    await hub.close();
+  }
+});
+
+test('monitor routes mouse input to the selected Playwright page', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'input-page', title: 'Input', url: 'https://shop.test/' },
+  ]);
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'input-session', cdpUrl: 'http://broker.test/session' } } },
+    }),
+  });
+
+  try {
+    await hub.action('input-browser', 'input-page', { action: 'pointer', type: 'move', x: 120, y: 240 });
+    await hub.action('input-browser', 'input-page', { action: 'pointer', type: 'down', x: 120, y: 240, button: 'left' });
+    await hub.action('input-browser', 'input-page', { action: 'pointer', type: 'up', x: 120, y: 240, button: 'left' });
+    await hub.action('input-browser', 'input-page', { action: 'pointer', type: 'wheel', x: 120, y: 240, deltaX: 5, deltaY: 80 });
+
+    assert.deepEqual(browserDouble.page('input-page').inputActions, [
+      { device: 'mouse', type: 'move', x: 120, y: 240 },
+      { device: 'mouse', type: 'move', x: 120, y: 240 },
+      { device: 'mouse', type: 'down', button: 'left' },
+      { device: 'mouse', type: 'move', x: 120, y: 240 },
+      { device: 'mouse', type: 'up', button: 'left' },
+      { device: 'mouse', type: 'move', x: 120, y: 240 },
+      { device: 'mouse', type: 'wheel', deltaX: 5, deltaY: 80 },
+    ]);
+  } finally {
+    await hub.close();
+  }
+});
+
+test('monitor rejects mouse coordinates outside the target viewport', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'bounded-page', title: 'Bounded', url: 'https://shop.test/' },
+  ]);
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'bounded-session', cdpUrl: 'http://broker.test/session' } } },
+    }),
+  });
+
+  try {
+    await assert.rejects(
+      hub.action('bounded-browser', 'bounded-page', { action: 'pointer', type: 'down', x: 1920, y: 540 }),
+      /pointer coordinates must be within the target viewport/,
+    );
+    assert.deepEqual(browserDouble.page('bounded-page').inputActions, []);
+  } finally {
+    await hub.close();
+  }
+});
+
+test('monitor routes keyboard and pasted text to the selected Playwright page', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'input-page', title: 'Input', url: 'https://shop.test/' },
+  ]);
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'input-session', cdpUrl: 'http://broker.test/session' } } },
+    }),
+  });
+
+  try {
+    await hub.action('input-browser', 'input-page', { action: 'keyboard', type: 'down', key: 'Shift' });
+    await hub.action('input-browser', 'input-page', { action: 'keyboard', type: 'up', key: 'Shift' });
+    await hub.action('input-browser', 'input-page', { action: 'keyboard', type: 'insertText', text: 'hello' });
+
+    assert.deepEqual(browserDouble.page('input-page').inputActions, [
+      { device: 'keyboard', type: 'down', key: 'Shift' },
+      { device: 'keyboard', type: 'up', key: 'Shift' },
+      { device: 'keyboard', type: 'insertText', text: 'hello' },
+    ]);
+  } finally {
+    await hub.close();
+  }
+});
+
+test('monitor preserves input ordering across concurrent requests', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'ordered-page', title: 'Ordered', url: 'https://shop.test/' },
+  ]);
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async () => ({
+      ok: true,
+      statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'ordered-session', cdpUrl: 'http://broker.test/session' } } },
+    }),
+  });
+
+  try {
+    await hub.ensureConnection('ordered-browser', 'ordered-page');
+    const page = browserDouble.page('ordered-page');
+    let releaseMove;
+    page.mouse.move = async () => {
+      page.inputActions.push({ type: 'move-start' });
+      await new Promise((resolve) => { releaseMove = resolve; });
+      page.inputActions.push({ type: 'move-end' });
+    };
+    page.keyboard.down = async (key) => page.inputActions.push({ type: 'key-down', key });
+
+    const pointer = hub.action('ordered-browser', 'ordered-page', { action: 'pointer', type: 'move', x: 1, y: 2 });
+    while (!releaseMove) await new Promise((resolve) => setImmediate(resolve));
+    const keyboard = hub.action('ordered-browser', 'ordered-page', { action: 'keyboard', type: 'down', key: 'A' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(page.inputActions, [{ type: 'move-start' }]);
+    releaseMove();
+    await Promise.all([pointer, keyboard]);
+    assert.deepEqual(page.inputActions, [
+      { type: 'move-start' },
+      { type: 'move-end' },
+      { type: 'key-down', key: 'A' },
+    ]);
+  } finally {
+    await hub.close();
+  }
 });
 
 test('two-tab monitor resolves targets, routes actions, discovers popups, falls back, and cleans up', async () => {
@@ -172,6 +356,36 @@ test('two-tab monitor resolves targets, routes actions, discovers popups, falls 
     assert.equal(fetchedUrls.some((url) => url.endsWith('/_pwdev/sessions/shared-session/pages')), true);
   } finally {
     await gui.close();
+  }
+});
+
+test('monitor applies the 1080p minimum when it falls back to another tab', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'page-a', title: 'First', url: 'https://shop.test/a' },
+  ]);
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: async () => browserDouble.browser,
+    fetchJson: async (rawUrl) => {
+      if (rawUrl.endsWith('/_pwdev/browsers/fallback-browser')) {
+        return { ok: true, statusCode: 200, body: { browser: { runtime: { sessionId: 'fallback-session', cdpUrl: 'http://broker.test/session' } } } };
+      }
+      return { ok: true, statusCode: 200, body: { pages: [] } };
+    },
+  });
+
+  try {
+    const connection = await hub.ensureConnection('fallback-browser', 'page-a');
+    browserDouble.open({ id: 'page-b', title: 'Second', url: 'https://shop.test/b', viewport: { width: 1024, height: 768 } });
+    browserDouble.closePage('page-a');
+
+    await hub.refreshPageInventory(connection);
+
+    assert.equal(connection.pageId, 'page-b');
+    assert.deepEqual(browserDouble.page('page-b').viewportSize(), { width: 1920, height: 1080 });
+    assert.deepEqual(connection.lastPageState.viewport, { width: 1920, height: 1080, devicePixelRatio: 1 });
+  } finally {
+    await hub.close();
   }
 });
 
@@ -371,6 +585,233 @@ test('gui serves static app and read-only config', async () => {
     assert.match(rejected.body.error, /read-only/);
   } finally {
     await server.close();
+  }
+});
+
+test('screenshot monitor forwards mapped mouse, keyboard, and paste input', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  await seedPage.setContent('<body style="margin:0;background:#fff"></body>');
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const actions = [];
+  const monitorHub = {
+    async stream(browserId, pageId, req, res) {
+      res.writeHead(200, {
+        'cache-control': 'no-store',
+        'content-type': 'text/event-stream; charset=utf-8',
+      });
+      res.write(`data: ${JSON.stringify({
+        type: 'connected',
+        browserId,
+        sessionId: 'input-session',
+        pageId: pageId ?? 'input-page',
+        pages: [{ id: 'input-page', title: 'Input target', url: 'https://target.test/' }],
+      })}\n\n`);
+      res.write(`data: ${JSON.stringify({
+        type: 'page',
+        browserId,
+        url: 'https://target.test/',
+        title: 'Input target',
+        viewport: { width: 1920, height: 1080, devicePixelRatio: 1 },
+        scroll: { x: 0, y: 0 },
+      })}\n\n`);
+      req.once('close', () => res.end());
+    },
+    async preview() { return preview; },
+    async action(_browserId, _pageId, payload) {
+      actions.push(payload);
+      return { ok: true, action: payload.action, type: payload.type };
+    },
+    async close() {},
+  };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: gui.origin });
+    await page.goto(`${gui.origin}/monitor/input-browser?pageId=input-page`);
+    const mirror = page.locator('#mirror-image');
+    await mirror.waitFor({ state: 'visible' });
+    await page.waitForFunction(() => {
+      const image = document.querySelector('#mirror-image');
+      return image?.complete && image.naturalWidth > 0;
+    });
+
+    const box = await mirror.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2 + 8);
+    await page.mouse.up();
+    await page.mouse.wheel(0, 120);
+    await page.keyboard.type('Hi');
+    await page.evaluate(() => navigator.clipboard.writeText(' pasted'));
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+V' : 'Control+V');
+    await page.locator('#mirror-frame-wrap').evaluate((element) => {
+      element.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'V', code: 'KeyV', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      }));
+      element.dispatchEvent(new KeyboardEvent('keyup', {
+        key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true,
+      }));
+    });
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('ArrowLeft');
+
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x - 20, box.y + box.height / 2);
+    await page.mouse.up();
+
+    await page.locator('#mirror-frame-wrap').evaluate((element, point) => {
+      element.dispatchEvent(new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        clientX: point.x,
+        clientY: point.y,
+        deltaY: 3,
+        deltaMode: WheelEvent.DOM_DELTA_LINE,
+      }));
+    }, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+
+    await waitFor(() => actions.some((action) => action.action === 'keyboard' && action.type === 'insertText'));
+    await waitFor(() => actions.some((action) => action.action === 'pointer' && action.type === 'up' && action.x < 1));
+    const pointerDown = actions.find((action) => action.action === 'pointer' && action.type === 'down');
+    assert.ok(Math.abs(pointerDown.x - 960) < 1);
+    assert.ok(Math.abs(pointerDown.y - 540) < 1);
+    assert.equal(actions.some((action) => action.action === 'pointer' && action.type === 'up'), true);
+    assert.equal(actions.some((action) => action.action === 'pointer' && action.type === 'wheel' && action.deltaY === 120), true);
+    assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'down'), true);
+    assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'up'), true);
+    assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'insertText' && action.text === ' pasted'), true);
+    assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'up' && action.key === 'v'), false);
+    assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'down' && action.key === 'Enter'), true);
+    assert.equal(actions.some((action) => action.action === 'keyboard' && action.type === 'down' && action.key === 'ArrowLeft'), true);
+    const pointerUps = actions.filter((action) => action.action === 'pointer' && action.type === 'up');
+    assert.ok(pointerUps.at(-1).x < 1, 'an outside drag should release at the viewport edge');
+    assert.equal(actions.some((action) => action.action === 'pointer' && action.type === 'wheel' && action.deltaY === 48), true);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('screenshot monitor bounds queued pointer moves while an action is slow', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  await seedPage.setContent('<body style="margin:0;background:#fff"></body>');
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const actions = [];
+  let releaseFirstMove;
+  const monitorHub = {
+    async stream(browserId, pageId, req, res) {
+      res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'text/event-stream; charset=utf-8' });
+      res.write(`data: ${JSON.stringify({ type: 'connected', browserId, sessionId: 'slow-session', pageId, pages: [] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'page', browserId, viewport: { width: 1920, height: 1080, devicePixelRatio: 1 } })}\n\n`);
+      req.once('close', () => res.end());
+    },
+    async preview() { return preview; },
+    async action(_browserId, _pageId, payload) {
+      actions.push(payload);
+      if (payload.action === 'pointer' && payload.type === 'move' && !releaseFirstMove) {
+        await new Promise((resolve) => { releaseFirstMove = resolve; });
+      }
+      return { ok: true };
+    },
+    async close() {},
+  };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.goto(`${gui.origin}/monitor/slow-browser?pageId=slow-page`);
+    const mirror = page.locator('#mirror-image');
+    await mirror.waitFor({ state: 'visible' });
+    await page.waitForFunction(() => document.querySelector('#mirror-image')?.naturalWidth > 0);
+    const box = await mirror.boundingBox();
+
+    await page.mouse.move(box.x + 100, box.y + 100);
+    await waitFor(() => Boolean(releaseFirstMove));
+    for (let offset = 0; offset < 8; offset += 1) {
+      await page.mouse.move(box.x + 110 + offset * 5, box.y + 110 + offset * 3);
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+    }
+    await page.mouse.down();
+    releaseFirstMove();
+
+    await waitFor(() => actions.some((action) => action.action === 'pointer' && action.type === 'down'));
+    const moves = actions.filter((action) => action.action === 'pointer' && action.type === 'move');
+    assert.equal(moves.length, 2, 'only the in-flight and latest queued move should be sent');
+    assert.deepEqual(actions.slice(-2).map((action) => action.type), ['move', 'down']);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('screenshot monitor keeps an input failure visible across later input', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  let attempts = 0;
+  const monitorHub = {
+    async stream(browserId, pageId, req, res) {
+      res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'text/event-stream; charset=utf-8' });
+      res.write(`data: ${JSON.stringify({ type: 'connected', browserId, sessionId: 'error-session', pageId, pages: [] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'page', browserId, viewport: { width: 1920, height: 1080, devicePixelRatio: 1 } })}\n\n`);
+      req.once('close', () => res.end());
+    },
+    async preview() { return preview; },
+    async action() {
+      attempts += 1;
+      return attempts === 1 ? { ok: false, error: 'remote input unavailable' } : { ok: true };
+    },
+    async close() {},
+  };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.goto(`${gui.origin}/monitor/error-browser?pageId=error-page`);
+    await page.locator('#mirror-frame-wrap').focus();
+    await page.keyboard.press('a');
+    await page.waitForFunction(() => document.querySelector('#input-meta')?.textContent?.includes('remote input unavailable'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(await page.locator('#input-meta').textContent(), /remote input unavailable/);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('monitor action endpoint rejects cross-origin and non-JSON writes', async () => {
+  let actionCalls = 0;
+  const monitorHub = {
+    async action() { actionCalls += 1; return { ok: true }; },
+    async close() {},
+  };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub });
+  try {
+    const path = `${gui.origin}/api/monitor/input-browser/action?pageId=input-page`;
+    const plain = await request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: JSON.stringify({ action: 'keyboard', type: 'down', key: 'A' }),
+    });
+    assert.equal(plain.statusCode, 415);
+
+    const foreign = await request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://attacker.test' },
+      body: JSON.stringify({ action: 'keyboard', type: 'down', key: 'A' }),
+    });
+    assert.equal(foreign.statusCode, 403);
+
+    const sameOrigin = await request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: gui.origin },
+      body: JSON.stringify({ action: 'keyboard', type: 'down', key: 'A' }),
+    });
+    assert.equal(sameOrigin.statusCode, 200);
+    assert.equal(actionCalls, 1);
+  } finally {
+    await gui.close();
   }
 });
 
@@ -737,15 +1178,18 @@ function createMonitorBrowserDouble(initialPages) {
       detach: async () => {},
     }),
   };
-  const makePage = ({ id, title, url, lease }) => {
+  const makePage = ({ id, title, url, lease, viewport: initialViewport }) => {
     const events = new EventEmitter();
     const frame = {};
+    const inputActions = [];
+    let currentViewport = initialViewport ?? { width: 1280, height: 720 };
     let closed = false;
     return {
       id,
       titleValue: title,
       lease,
       actions: [],
+      inputActions,
       context: () => context,
       title: async () => title,
       url: () => url,
@@ -753,6 +1197,19 @@ function createMonitorBrowserDouble(initialPages) {
       closeTarget: () => { closed = true; events.emit('close'); },
       on: events.on.bind(events),
       mainFrame: () => frame,
+      viewportSize: () => ({ ...currentViewport }),
+      setViewportSize: async (viewport) => { currentViewport = { ...viewport }; },
+      mouse: {
+        move: async (x, y) => inputActions.push({ device: 'mouse', type: 'move', x, y }),
+        down: async ({ button }) => inputActions.push({ device: 'mouse', type: 'down', button }),
+        up: async ({ button }) => inputActions.push({ device: 'mouse', type: 'up', button }),
+        wheel: async (deltaX, deltaY) => inputActions.push({ device: 'mouse', type: 'wheel', deltaX, deltaY }),
+      },
+      keyboard: {
+        down: async (key) => inputActions.push({ device: 'keyboard', type: 'down', key }),
+        up: async (key) => inputActions.push({ device: 'keyboard', type: 'up', key }),
+        insertText: async (text) => inputActions.push({ device: 'keyboard', type: 'insertText', text }),
+      },
       exposeFunction: async () => {},
       evaluate: async (_callback, value) => {
         if (value?.action) {
@@ -763,7 +1220,7 @@ function createMonitorBrowserDouble(initialPages) {
         return {
           url,
           title,
-          viewport: { width: 1280, height: 720, devicePixelRatio: 1 },
+          viewport: { ...currentViewport, devicePixelRatio: 1 },
           scroll: { x: 0, y: 0 },
           capturedAt: '2026-08-27T00:00:00.000Z',
         };
@@ -903,4 +1360,12 @@ function writeJson(res, statusCode, payload) {
     'content-length': body.length,
   });
   res.end(body);
+}
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
