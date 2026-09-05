@@ -971,7 +971,7 @@ body.modal-open { overflow: hidden; }
   }
 
   .nav-links {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
     gap: 4px;
   }
 

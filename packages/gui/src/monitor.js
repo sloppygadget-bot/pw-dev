@@ -67,6 +67,7 @@ export class BrowserMonitorHub {
     // the browser navigated elsewhere. Refresh before sending the cached page
     // metadata so a newly opened tab never starts with stale dimensions.
     await this.refresh(connection);
+    const initialPages = await this.refreshPageInventory(connection);
     res.writeHead(200, {
       'cache-control': 'no-store',
       'connection': 'keep-alive',
@@ -74,7 +75,6 @@ export class BrowserMonitorHub {
       'x-accel-buffering': 'no',
     });
     connection.subscribers.add(res);
-    const initialPages = await this.refreshPageInventory(connection);
     this.writeEvent(res, { type: 'connected', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages: initialPages });
     this.writeEvent(res, connection.lastPageState ?? { type: 'state', status: 'connecting', browserId });
     const keepAlive = setInterval(() => {
@@ -94,12 +94,16 @@ export class BrowserMonitorHub {
       cleaned = true;
       clearInterval(keepAlive);
       clearInterval(pageInventory);
+      req.off('close', cleanup);
+      res.off('close', cleanup);
+      res.off('finish', cleanup);
       connection.subscribers.delete(res);
       if (connection.subscribers.size === 0) void this.closeConnection(connection);
     };
     let cleaned = false;
     req.once('close', cleanup);
     res.once('close', cleanup);
+    res.once('finish', cleanup);
   }
 
   action(browserId, pageId, payload) {
@@ -203,16 +207,7 @@ export class BrowserMonitorHub {
     this.connections.clear();
     this.previewPromises.clear();
     this.actionPromises.clear();
-    await Promise.all(connections.map(async (connection) => {
-      for (const subscriber of connection.subscribers) subscriber.end();
-      connection.subscribers.clear();
-      if (connection.idleTimer) clearTimeout(connection.idleTimer);
-      try {
-        await connection.browser.close();
-      } catch {
-        // The browser session may already have disconnected or stopped.
-      }
-    }));
+    await Promise.all(connections.map((connection) => this.closeConnection(connection)));
   }
 
   async ensureConnection(browserId, pageId) {
@@ -270,8 +265,8 @@ export class BrowserMonitorHub {
     if (!pageId) this.connections.set(monitorKey(browserId, selected.id), connection);
     browser.on('disconnected', () => {
       if (![...this.connections.values()].includes(connection)) return;
-      this.forgetConnection(connection);
       this.broadcast(connection, { type: 'disconnected', browserId, reason: 'browser disconnected' });
+      void this.closeConnection(connection);
     });
     for (const entry of pages) this.observePage(connection, entry.page);
     await this.refresh(connection);
@@ -354,6 +349,8 @@ export class BrowserMonitorHub {
     if (!selected) {
       selected = localPages[0];
       if (!selected) {
+        connection.lastPageState = undefined;
+        this.broadcast(connection, { type: 'no-target', browserId: connection.browserId, pageId: null, pages: [] });
         await this.closeConnection(connection);
         throw httpError(409, 'Browser session has no monitorable page');
       }
@@ -409,6 +406,8 @@ export class BrowserMonitorHub {
     connection.closing = true;
     if (connection.idleTimer) clearTimeout(connection.idleTimer);
     this.forgetConnection(connection);
+    for (const subscriber of connection.subscribers) subscriber.end();
+    connection.subscribers.clear();
     try {
       await connection.browser.close();
     } catch {

@@ -23,6 +23,8 @@ const INPUT_ERROR_VISIBILITY_MS = 3_000;
 const WHEEL_LINE_HEIGHT_PX = 16;
 const BUTTON_NAMES = ['left', 'middle', 'right'];
 const state = {
+  hasTarget: false,
+  targetGeneration: 0,
   previewUrl: undefined,
   refreshTimer: undefined,
   refreshing: false,
@@ -40,15 +42,16 @@ const state = {
 };
 
 title.textContent = `Screenshot monitor — ${browserId}`;
+setTargetControls(false);
 
 eventSource.addEventListener('message', (event) => {
   try {
     handleEvent(JSON.parse(event.data));
   } catch {
-    setStatus('Monitor error', 'bad');
+    clearTarget('Monitor error', 'Reload this monitor to reconnect.');
   }
 });
-eventSource.onerror = () => setStatus('Disconnected', 'bad');
+eventSource.onerror = () => clearTarget('Disconnected', 'Waiting to reconnect…');
 refreshButton.addEventListener('click', () => void refreshScreenshot());
 backButton.addEventListener('click', () => sendAction({ action: 'navigation', type: 'back' }));
 forwardButton.addEventListener('click', () => sendAction({ action: 'navigation', type: 'forward' }));
@@ -64,6 +67,7 @@ imageWrap.addEventListener('keyup', handleKeyUp);
 imageWrap.addEventListener('paste', handlePaste);
 imageWrap.addEventListener('blur', releasePressedKeys);
 image.addEventListener('load', () => {
+  if (!state.hasTarget) return;
   empty.classList.add('hidden');
   placeClickMarker(state.lastClick);
 });
@@ -75,9 +79,20 @@ window.addEventListener('beforeunload', () => {
   if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
 });
 
-void refreshScreenshot();
-
 function handleEvent(event) {
+  if (event.type === 'no-target') {
+    eventSource.close();
+    pageId = null;
+    const next = new URL(location.href);
+    next.searchParams.delete('pageId');
+    history.replaceState(null, '', next);
+    clearTarget('No target page', 'Open a target page, then reload this monitor.');
+    return;
+  }
+  if (event.type === 'error' || event.type === 'disconnected') {
+    clearTarget(event.type === 'error' ? 'Monitor error' : 'Browser disconnected', event.error || 'Waiting to reconnect…');
+    return;
+  }
   if (event.type === 'connected' || event.type === 'pages') {
     if (event.type === 'connected') {
       setStatus('Live', 'good');
@@ -90,18 +105,71 @@ function handleEvent(event) {
       history.replaceState(null, '', next);
     }
     renderPageDots(event.pages ?? [], event.pageId);
+    if (event.pageId) resumeTarget();
     return;
   }
   if (event.type === 'page' || event.type === 'viewport') {
+    if (event.type === 'page') resumeTarget();
+    if (!state.hasTarget) return;
     updatePageState(event);
     return;
   }
   if (event.type === 'click') {
+    if (!state.hasTarget) return;
     state.lastClick = event;
     placeClickMarker(event);
     return;
   }
-  if (event.type === 'disconnected') setStatus('Browser disconnected', 'bad');
+}
+
+function setTargetControls(enabled) {
+  for (const button of [refreshButton, backButton, forwardButton, reloadButton]) button.disabled = !enabled;
+  imageWrap.setAttribute('aria-disabled', String(!enabled));
+  imageWrap.tabIndex = enabled ? 0 : -1;
+}
+
+function resumeTarget() {
+  if (state.hasTarget) return;
+  state.hasTarget = true;
+  setStatus('Live', 'good');
+  setTargetControls(true);
+  void refreshScreenshot();
+}
+
+function clearTarget(label, message) {
+  state.hasTarget = false;
+  state.targetGeneration += 1;
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = undefined;
+  clearTimeout(state.inputErrorTimer);
+  cancelPendingPointerMove();
+  state.actionQueue.length = 0;
+  state.pressedKeys.clear();
+  state.suppressedKeyUps.clear();
+  if (state.activePointer) imageWrap.releasePointerCapture?.(state.activePointer.pointerId);
+  state.activePointer = undefined;
+  state.viewport = undefined;
+  state.lastClick = undefined;
+  if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+  state.previewUrl = undefined;
+  image.removeAttribute('src');
+  image.classList.add('hidden');
+  clickMarker.classList.remove('visible');
+  pageDots.replaceChildren();
+  pageSummary.textContent = 'No available target';
+  pageMeta.textContent = message;
+  pageMeta.removeAttribute('title');
+  navTargetUrl.textContent = 'No target page';
+  navTargetUrl.removeAttribute('title');
+  navTargetUrl.removeAttribute('href');
+  for (const name of ['viewport', 'scroll', 'click', 'update']) {
+    document.querySelector(`#${name}-meta`).textContent = `${name === 'update' ? 'Updated' : name[0].toUpperCase() + name.slice(1)} —`;
+  }
+  inputMeta.textContent = 'Input unavailable';
+  empty.textContent = message;
+  empty.classList.remove('hidden');
+  setStatus(label, 'bad');
+  setTargetControls(false);
 }
 
 function updatePageState(event) {
@@ -135,32 +203,38 @@ async function decodedObjectUrl(blob) {
 }
 
 async function refreshScreenshot() {
-  if (state.refreshing) return;
+  if (!state.hasTarget || state.refreshing) return;
   if (state.refreshTimer) {
     clearTimeout(state.refreshTimer);
     state.refreshTimer = undefined;
   }
   state.refreshing = true;
+  const generation = state.targetGeneration;
   refreshButton.disabled = true;
   try {
     const response = await fetch(monitorUrl('preview'), { cache: 'no-store' });
     if (!response.ok) throw new Error(`Screenshot capture failed: ${response.status}`);
     const next = await decodedObjectUrl(await response.blob());
+    if (!state.hasTarget || generation !== state.targetGeneration) {
+      URL.revokeObjectURL(next.url);
+      return;
+    }
     const previousUrl = state.previewUrl;
     state.previewUrl = next.url;
     image.src = next.url;
+    image.classList.remove('hidden');
     imageWrap.style.setProperty('--mirror-aspect', `${next.width} / ${next.height}`);
     if (previousUrl) URL.revokeObjectURL(previousUrl);
     document.querySelector('#update-meta').textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch {
-    if (!state.previewUrl) {
+    if (state.hasTarget && generation === state.targetGeneration && !state.previewUrl) {
       empty.textContent = 'Screenshot unavailable; retrying…';
       empty.classList.remove('hidden');
     }
   } finally {
     state.refreshing = false;
-    refreshButton.disabled = false;
-    state.refreshTimer = setTimeout(() => void refreshScreenshot(), SCREENSHOT_INTERVAL_MS);
+    refreshButton.disabled = !state.hasTarget;
+    if (state.hasTarget) state.refreshTimer = setTimeout(() => void refreshScreenshot(), SCREENSHOT_INTERVAL_MS);
   }
 }
 
@@ -362,6 +436,7 @@ function cancelPendingPointerMove() {
 }
 
 function sendAction(payload) {
+  if (!state.hasTarget) return;
   const queued = state.actionQueue.at(-1);
   if (isPointerMove(payload) && isPointerMove(queued)) {
     queued.x = payload.x;
@@ -402,11 +477,13 @@ function isPointerMove(payload) {
 }
 
 function showInputProgress(label) {
+  if (!state.hasTarget) return;
   if (Date.now() < state.inputErrorUntil) return;
   inputMeta.textContent = label;
 }
 
 function showInputError(error) {
+  if (!state.hasTarget) return;
   state.inputErrorUntil = Date.now() + INPUT_ERROR_VISIBILITY_MS;
   inputMeta.textContent = `Input error: ${error.message}`;
   if (state.inputErrorTimer) clearTimeout(state.inputErrorTimer);

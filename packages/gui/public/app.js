@@ -765,7 +765,11 @@ function openBrowserMonitor(browser, pageId = state.previewPageIds.get(browser.i
 
 function isGuiPage(page) {
   try {
-    return new URL(page.url).origin === location.origin;
+    const url = new URL(page.url);
+    if (url.origin === location.origin) return true;
+    const localAliases = new Set(['localhost', '127.0.0.1']);
+    return localAliases.has(url.hostname) && localAliases.has(location.hostname)
+      && url.protocol === location.protocol && url.port === location.port;
   } catch {
     return false;
   }

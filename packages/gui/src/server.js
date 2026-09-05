@@ -55,13 +55,13 @@ export async function startPwDevGuiServer(options = {}) {
       }
       const monitorEvents = /^\/api\/monitor\/([^/]+)\/events$/.exec(requestUrl.pathname);
       if (monitorEvents) {
-        registerMonitorGuiOrigin(monitorHub, req);
+        registerMonitorGuiOrigin(monitorHub, req, host);
         await monitorHub.stream(decodePathSegment(monitorEvents[1]), requestUrl.searchParams.get('pageId') ?? undefined, req, res);
         return;
       }
       const monitorPreview = /^\/api\/monitor\/([^/]+)\/preview$/.exec(requestUrl.pathname);
       if (monitorPreview) {
-        registerMonitorGuiOrigin(monitorHub, req);
+        registerMonitorGuiOrigin(monitorHub, req, host);
         const image = await monitorHub.preview(decodePathSegment(monitorPreview[1]), requestUrl.searchParams.get('pageId') ?? undefined);
         res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'image/jpeg' });
         res.end(image);
@@ -69,7 +69,7 @@ export async function startPwDevGuiServer(options = {}) {
       }
       const monitorAction = /^\/api\/monitor\/([^/]+)\/action$/.exec(requestUrl.pathname);
       if (monitorAction) {
-        registerMonitorGuiOrigin(monitorHub, req);
+        registerMonitorGuiOrigin(monitorHub, req, host);
         if (req.method !== 'POST') {
           writeJson(res, 405, { ok: false, error: 'monitor actions require POST' });
           return;
@@ -85,16 +85,18 @@ export async function startPwDevGuiServer(options = {}) {
       }
       const monitorPage = /^\/monitor\/([^/]+)$/.exec(requestUrl.pathname);
       if (monitorPage) {
-        registerMonitorGuiOrigin(monitorHub, req);
+        registerMonitorGuiOrigin(monitorHub, req, host);
         await serveStaticFile({ req, res, filePath: path.join(PUBLIC_DIR, 'monitor.html'), contentType: 'text/html; charset=utf-8' });
         return;
       }
       if (requestUrl.pathname === '/api-docs') {
+        registerMonitorGuiOrigin(monitorHub, req, host);
         res.writeHead(302, { location: '/api-docs/' });
         res.end();
         return;
       }
       if (requestUrl.pathname === '/api-docs/') {
+        registerMonitorGuiOrigin(monitorHub, req, host);
         await serveStaticFile({ req, res, filePath: path.join(PUBLIC_DIR, 'api-docs.html'), contentType: 'text/html; charset=utf-8' });
         return;
       }
@@ -123,7 +125,7 @@ export async function startPwDevGuiServer(options = {}) {
         await proxyPwDevRequest({ req, res, requestUrl, pwDevUrl });
         return;
       }
-      await serveStatic({ req, res, root: PUBLIC_DIR });
+      await serveStatic({ req, res, root: PUBLIC_DIR, onHtml: () => registerMonitorGuiOrigin(monitorHub, req, host) });
     } catch (error) {
       writeJson(res, error?.statusCode || 500, {
         ok: false,
@@ -159,9 +161,22 @@ export async function startPwDevGuiServer(options = {}) {
   };
 }
 
-function registerMonitorGuiOrigin(monitorHub, req) {
-  if (!req.headers.host) return;
-  monitorHub.addGuiOrigin?.(`http://${req.headers.host}`);
+function registerMonitorGuiOrigin(monitorHub, req, configuredHost) {
+  const authority = req.headers.host;
+  if (!authority || /[/\\@?#]/.test(authority)) return;
+  try {
+    const url = new URL(`http://${authority}`);
+    const localAddress = req.socket.localAddress?.replace(/^::ffff:/, '');
+    const hostname = url.hostname.replace(/^\[|\]$/g, '');
+    const allowedHosts = new Set([configuredHost, localAddress]);
+    if (localAddress === '127.0.0.1' || localAddress === '::1') allowedHosts.add('localhost');
+    // A Host header cannot designate another application's origin or port.
+    // Forwarded headers are intentionally not used to expand this trust scope.
+    if (Number(url.port || 80) !== req.socket.localPort || !allowedHosts.has(hostname)) return;
+    monitorHub.addGuiOrigin?.(url.origin);
+  } catch {
+    // Invalid request authorities cannot add GUI origins.
+  }
 }
 
 function validateMonitorActionRequest(req) {
@@ -556,7 +571,7 @@ function isJsonResponse(response) {
   return /^application\/json(?:;|$)/i.test(String(response.headers['content-type'] || ''));
 }
 
-async function serveStatic({ req, res, root }) {
+async function serveStatic({ req, res, root, onHtml }) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, { allow: 'GET, HEAD' });
     res.end('Method Not Allowed');
@@ -575,6 +590,7 @@ async function serveStatic({ req, res, root }) {
     return;
   }
   const body = req.method === 'HEAD' ? undefined : await fs.readFile(resolved.path);
+  if (path.extname(resolved.path).toLowerCase() === '.html') onHtml();
   res.writeHead(200, {
     'content-type': MIME_TYPES.get(path.extname(resolved.path).toLowerCase()) || 'application/octet-stream',
     'content-length': resolved.size,

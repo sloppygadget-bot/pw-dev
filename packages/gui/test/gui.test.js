@@ -608,6 +608,56 @@ test('monitor rejects actions when the cached target navigates to the GUI withou
   }
 });
 
+for (const transition of ['navigation', 'close']) {
+  test(`monitor ends established streams when the final external target disappears by ${transition}`, async (t) => {
+    const browserDouble = createMonitorBrowserDouble([
+      { id: 'target', title: 'Target', url: 'https://target.test/' },
+      { id: 'gui', title: 'GUI', url: 'http://127.0.0.1:9797/' },
+    ]);
+    const hub = createConnectedMonitorHub(browserDouble, 'no-target-session');
+    hub.addGuiOrigin('http://127.0.0.1:9797');
+    const intervals = new Set();
+    const nativeSetInterval = globalThis.setInterval;
+    const nativeClearInterval = globalThis.clearInterval;
+    t.mock.method(globalThis, 'setInterval', (...args) => {
+      const timer = nativeSetInterval(...args);
+      intervals.add(timer);
+      return timer;
+    });
+    t.mock.method(globalThis, 'clearInterval', (timer) => {
+      intervals.delete(timer);
+      nativeClearInterval(timer);
+    });
+    const requests = [new EventEmitter(), new EventEmitter()];
+    const responses = [new MonitorResponseDouble(), new MonitorResponseDouble()];
+    try {
+      await hub.stream('no-target-browser', 'target', requests[0], responses[0]);
+      await hub.stream('no-target-browser', 'target', requests[1], responses[1]);
+      const connection = hub.connections.get('no-target-browser:target');
+      assert.equal(connection.subscribers.size, 2);
+      assert.equal(intervals.size, 4);
+      if (transition === 'navigation') browserDouble.page('target').navigateTo('http://127.0.0.1:9797/');
+      else browserDouble.closePage('target');
+
+      await assert.rejects(hub.refreshPageInventory(connection), /no monitorable page/i);
+
+      for (const response of responses) {
+        assert.equal(response.events().at(-1).type, 'no-target');
+        assert.deepEqual(response.events().at(-1).pages, []);
+        assert.equal(response.writableEnded, true);
+      }
+      assert.equal(connection.lastPageState, undefined);
+      assert.equal(connection.subscribers.size, 0);
+      assert.equal(intervals.size, 0, 'both inventory and keepalive timers are released for every subscriber');
+      assert.equal(hub.connections.size, 0);
+      assert.equal(browserDouble.closeCalls, 1);
+    } finally {
+      for (const request of requests) request.emit('close');
+      await hub.close();
+    }
+  });
+}
+
 test('dashboard exposes active view state and contains README modal focus', async () => {
   const browser = await chromium.launch({ headless: true });
   const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
@@ -658,11 +708,12 @@ test('dashboard exposes active view state and contains README modal focus', asyn
   }
 });
 
-test('dashboard mobile navigation keeps one entity group expanded', async () => {
+for (const width of [390, 850, 851]) {
+test(`dashboard navigation uses the accordion breakpoint at ${width}px`, async () => {
   const browser = await chromium.launch({ headless: true });
   const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
   try {
-    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    const page = await browser.newPage({ viewport: { width, height: 844 } });
     await routeDashboardSnapshot(page, browserPreviewSnapshot());
     await page.goto(gui.origin);
 
@@ -675,15 +726,27 @@ test('dashboard mobile navigation keeps one entity group expanded', async () => 
     assert.equal(await runtime.getAttribute('open'), '');
 
     await page.locator('.nav-item[data-view="sessions"]').click();
-    assert.equal(await assets.getAttribute('open'), null);
+    assert.equal(await assets.getAttribute('open'), width <= 850 ? null : '');
     assert.equal(await runtime.getAttribute('open'), '');
     assert.equal(await page.locator('.nav-item[data-view="sessions"]').getAttribute('aria-current'), 'page');
     assert.equal(await page.locator('.nav-item[aria-current="page"]').count(), 1);
+    if (width <= 850) {
+      const boxes = await page.locator('.nav-links > *').evaluateAll((elements) => elements.map((element) => {
+        const { x, y, width, height } = element.getBoundingClientRect();
+        return { x, y, width, height };
+      }));
+      for (const [index, box] of boxes.entries()) {
+        assert.equal(box.x, boxes[0].x, 'mobile navigation occupies one column');
+        assert.equal(box.width, boxes[0].width);
+        if (index) assert.ok(box.y >= boxes[index - 1].y + boxes[index - 1].height);
+      }
+    }
   } finally {
     await browser.close();
     await gui.close();
   }
 });
+}
 
 test('dashboard keeps stale data visible and resumes polling after a snapshot failure', async () => {
   const browser = await chromium.launch({ headless: true });
@@ -1151,7 +1214,7 @@ test('gui serves static app and read-only config', async () => {
   }
 });
 
-test('gui registers its bound origin and monitor request-host aliases', async () => {
+test('gui registers document and monitor aliases only for its listening authority', async () => {
   const origins = [];
   const monitorHub = {
     addGuiOrigin: (origin) => origins.push(origin),
@@ -1167,26 +1230,61 @@ test('gui registers its bound origin and monitor request-host aliases', async ()
   const port = new URL(gui.origin).port;
 
   try {
-    await request(`${gui.origin}/monitor/example-browser`, { method: 'GET', headers: { host: `localhost:${port}` } });
-    await request(`${gui.origin}/api/monitor/example-browser/preview`, { method: 'GET', headers: { host: `gui-preview.test:${port}` } });
+    for (const document of ['/', '/index.html', '/api-docs', '/api-docs/', '/api-docs.html', '/monitor.html', '/monitor/example-browser']) {
+      const count = origins.length;
+      await request(`${gui.origin}${document}`, { method: 'GET', headers: { host: `localhost:${port}` } });
+      assert.ok(origins.slice(count).includes(`http://localhost:${port}`), `${document} registers the served alias`);
+    }
+    await request(`${gui.origin}/api/monitor/example-browser/preview`, { method: 'GET', headers: { host: `localhost:${port}` } });
     await request(`${gui.origin}/api/monitor/example-browser/action`, {
       method: 'POST',
       body: JSON.stringify({ action: 'click', path: [1] }),
       headers: {
         'content-type': 'application/json',
-        host: `gui-action.test:${port}`,
-        origin: `http://gui-action.test:${port}`,
+        host: `localhost:${port}`,
+        origin: `http://localhost:${port}`,
       },
     });
-    await request(`${gui.origin}/api/monitor/example-browser/events`, { method: 'GET', headers: { host: `gui-events.test:${port}` } });
+    await request(`${gui.origin}/api/monitor/example-browser/events`, { method: 'GET', headers: { host: `localhost:${port}` } });
 
-    assert.deepEqual(origins, [
-      gui.origin,
-      `http://localhost:${port}`,
-      `http://gui-preview.test:${port}`,
-      `http://gui-action.test:${port}`,
-      `http://gui-events.test:${port}`,
-    ]);
+    assert.equal(origins[0], gui.origin);
+    const validOrigins = [...origins];
+    for (const host of [`unrelated.test:${port}`, 'localhost:3000', `localhost:${port}@unrelated.test`, `localhost:${port}/spoof`]) {
+      await request(`${gui.origin}/api/monitor/example-browser/preview`, { method: 'GET', headers: { host } });
+      await request(`${gui.origin}/`, { method: 'GET', headers: { host } });
+    }
+    assert.deepEqual(origins, validOrigins, 'untrusted Host headers cannot mark other applications as the GUI');
+  } finally {
+    await gui.close();
+  }
+});
+
+test('GUI documents register localhost after monitoring began through 127.0.0.1 without taking operator dialogs', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'target', title: 'Target', url: 'http://localhost:3000/' },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'mixed-host-session');
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: hub });
+  const alias = gui.origin.replace('127.0.0.1', 'localhost');
+  try {
+    assert.equal((await get(`${gui.origin}/api/monitor/mixed-host-browser/preview`)).body, 'target');
+    const connection = hub.connections.get('mixed-host-browser');
+    const operatorPages = [
+      browserDouble.open({ id: 'ip-gui', title: 'GUI', url: `${gui.origin}/`, viewport: { width: 390, height: 844 } }),
+      browserDouble.open({ id: 'alias-gui', title: 'GUI', url: `${alias}/`, viewport: { width: 390, height: 844 } }),
+    ];
+    await get(alias);
+    let dismissals = 0;
+    for (const page of operatorPages) page.emit('dialog', { dismiss: async () => { dismissals += 1; } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dismissals, 0, 'both GUI aliases keep their confirmations');
+    assert.deepEqual((await hub.refreshPageInventory(connection)).map((page) => page.id), ['target']);
+    for (const page of operatorPages) {
+      assert.deepEqual(page.viewportSize(), { width: 390, height: 844 });
+      assert.equal(page.listenerCount('load'), 0, 'GUI documents have no monitor telemetry observers');
+      assert.equal(page.listenerCount('dialog'), 1, 'one inert listener suppresses Playwright auto-dismissal');
+    }
+    assert.equal(connection.pageId, 'target', 'the unrelated localhost application remains eligible');
   } finally {
     await gui.close();
   }
@@ -1214,6 +1312,74 @@ function staticMonitorHub(preview) {
     async close() {},
   };
 }
+
+test('monitor clears stale Live state and pending screenshots after an established target becomes GUI-only', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'target', title: 'Target', url: 'https://target.test/' },
+  ]);
+  browserDouble.page('target').screenshot = async () => preview;
+  const hub = createConnectedMonitorHub(browserDouble, 'no-target-session');
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: hub });
+  let previewRequests = 0;
+  try {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      const nativeDecode = HTMLImageElement.prototype.decode;
+      const nativeRevoke = URL.revokeObjectURL;
+      window.__revokedUrls = [];
+      URL.revokeObjectURL = (url) => { window.__revokedUrls.push(url); nativeRevoke(url); };
+      HTMLImageElement.prototype.decode = function () {
+        if (!window.__holdDecode) return nativeDecode.call(this);
+        window.__pendingDecodeUrl = this.src;
+        return new Promise((resolve, reject) => {
+          window.__releaseDecode = () => nativeDecode.call(this).then(resolve, reject);
+        });
+      };
+    });
+    page.on('request', (request) => {
+      if (request.url().includes('/preview')) previewRequests += 1;
+    });
+    await page.goto(`${gui.origin}/monitor/no-target-browser?pageId=target`);
+    await page.waitForFunction(() => document.querySelector('#mirror-image').naturalWidth > 0);
+    const oldUrl = await page.locator('#mirror-image').getAttribute('src');
+    assert.equal(await page.locator('#monitor-status').textContent(), 'Live');
+    await page.evaluate(() => { window.__holdDecode = true; });
+    await page.locator('#refresh-screenshot').click();
+    await page.waitForFunction(() => window.__releaseDecode);
+    const pendingUrl = await page.evaluate(() => window.__pendingDecodeUrl);
+    const connection = hub.connections.get('no-target-browser:target');
+    browserDouble.page('target').navigateTo(`${gui.origin}/`);
+    await hub.refresh(connection);
+    await page.waitForFunction(() => !document.querySelector('#monitor-status').classList.contains('good'), null, { timeout: 2000 });
+    assert.equal(await page.locator('#monitor-status').textContent(), 'No target page');
+    assert.equal(await page.locator('#mirror-image').getAttribute('src'), null);
+    assert.equal(await page.locator('#mirror-image').isVisible(), false, 'the vanished screenshot does not leave a broken image');
+    assert.equal(await page.locator('.page-dot, .page-picker').count(), 0);
+    assert.equal(await page.locator('#nav-target-url').getAttribute('href'), null);
+    assert.doesNotMatch(await page.locator('#page-meta').textContent(), /target\.test/);
+    assert.match(await page.locator('#mirror-empty').textContent(), /open a target page/i);
+    assert.equal(await page.locator('#mirror-empty').isVisible(), true);
+    for (const id of ['refresh-screenshot', 'nav-back', 'nav-forward', 'nav-reload']) {
+      assert.equal(await page.locator(`#${id}`).isDisabled(), true);
+    }
+    assert.equal(await page.locator('#mirror-frame-wrap').getAttribute('aria-disabled'), 'true');
+    await page.evaluate(() => window.__releaseDecode());
+    await page.waitForFunction((url) => window.__revokedUrls.includes(url), pendingUrl);
+    assert.equal(await page.locator('#mirror-image').getAttribute('src'), null, 'late decode cannot restore the vanished target');
+    assert.ok(await page.evaluate((url) => window.__revokedUrls.includes(url), oldUrl));
+    const requestsAfterLoss = previewRequests;
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    assert.equal(previewRequests, requestsAfterLoss, 'screenshot polling stops without a target');
+    await waitFor(() => connection.subscribers.size === 0);
+    assert.equal(hub.connections.size, 0);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
 
 test('monitor stays compact on mobile and loads all same-origin assets', async () => {
   const browser = await chromium.launch({ headless: true });
@@ -1597,7 +1763,8 @@ test('screenshot monitor keeps an input failure visible across later input', asy
   }
 });
 
-test('dashboard previews exclude same-origin GUI tabs and never capture without an external page', async () => {
+for (const operatorHost of ['127.0.0.1', 'localhost']) {
+test(`dashboard previews exclude mixed-host GUI tabs when opened through ${operatorHost}`, async () => {
   const browser = await chromium.launch({ headless: true });
   const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
   let previewRequests = 0;
@@ -1611,6 +1778,7 @@ test('dashboard previews exclude same-origin GUI tabs and never capture without 
       contentType: 'application/json',
       body: JSON.stringify({ pages: [
         { id: 'dashboard', title: 'pw-dev', url: `${gui.origin}/` },
+        { id: 'alternate-gui', title: 'Alias GUI', url: `${gui.origin.replace('127.0.0.1', 'localhost')}/` },
         { id: 'target', title: 'Target', url: 'http://127.0.0.1:3000/' },
         { id: 'monitor', title: 'Monitor', url: `${gui.origin}/monitor/preview-browser` },
       ] }),
@@ -1620,9 +1788,12 @@ test('dashboard previews exclude same-origin GUI tabs and never capture without 
       assert.match(route.request().url(), /pageId=target/);
       return route.fulfill({ contentType: 'image/jpeg', body: preview });
     });
-    await page.goto(gui.origin);
-    await waitFor(() => previewRequests === 1);
-    await page.waitForFunction(() => document.querySelectorAll('.browser-preview-dot').length === 0);
+    await page.goto(gui.origin.replace('127.0.0.1', operatorHost));
+    await page.waitForFunction(() => {
+      const image = document.querySelector('.browser-preview img');
+      return image?.complete && image.naturalWidth > 0;
+    }, null, { timeout: 2000 });
+    assert.equal(await page.locator('.browser-preview-dot').count(), 0);
     assert.equal(previewRequests, 1);
     assert.doesNotMatch(await page.locator('.browser-preview').textContent(), /pw-dev|Monitor/);
   } finally {
@@ -1630,6 +1801,7 @@ test('dashboard previews exclude same-origin GUI tabs and never capture without 
     await gui.close();
   }
 });
+}
 
 test('dashboard shows a target-page empty state for a GUI-only session', async () => {
   const browser = await chromium.launch({ headless: true });
@@ -2410,8 +2582,14 @@ async function launchCdpBrowser() {
   const close = async () => {
     if (child.pid && child.exitCode === null && child.signalCode === null) {
       const exited = new Promise((resolve) => child.once('exit', resolve));
-      child.kill('SIGTERM');
-      await exited;
+      const killTimer = setTimeout(() => child.kill('SIGKILL'), 1000);
+      killTimer.unref();
+      try {
+        child.kill('SIGTERM');
+        await exited;
+      } finally {
+        clearTimeout(killTimer);
+      }
     }
     await fs.rm(userDataDir, { recursive: true, force: true });
   };
