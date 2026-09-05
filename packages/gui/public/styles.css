@@ -15,7 +15,12 @@
   --red-bg: #fde8e7;
   --blue: #245b8f;
   --blue-bg: #e8f1fb;
+  --accent: #245b8f;
+  --accent-hover: #194b79;
   --focus-ring: #245b8f;
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --shadow-sm: 0 2px 8px rgba(21, 23, 25, .06);
 }
 
 * {
@@ -137,7 +142,7 @@ select,
 button {
   min-height: 34px;
   border: 1px solid var(--strong-line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
   padding: 0 10px;
@@ -147,12 +152,18 @@ button {
   cursor: pointer;
 }
 
+button:disabled { cursor: not-allowed; opacity: .52; }
+.button-primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+.button-primary:hover:not(:disabled) { border-color: var(--accent-hover); background: var(--accent-hover); }
+.button-danger { border-color: #d8a5a1; background: var(--red-bg); color: var(--red); }
+.button-danger:hover:not(:disabled) { border-color: var(--red); }
+
 :where(button, select, input, textarea, a, summary, [tabindex]):focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
-button:hover,
+button:hover:not(:disabled),
 select:hover {
   border-color: #8d98a5;
 }
@@ -482,7 +493,8 @@ main {
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
   padding: 14px;
   min-width: 0;
 }
@@ -574,18 +586,17 @@ body.modal-open { overflow: hidden; }
 
 .browsers-diagram {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr));
   gap: 12px;
 }
 
-@container (max-width: 980px) {
-  .browsers-diagram {
-    grid-template-columns: 1fr;
-  }
-}
-
 .browser-diagram-title {
-  margin-bottom: 8px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .browser-diagram-name {
@@ -595,11 +606,11 @@ body.modal-open { overflow: hidden; }
   gap: 8px;
 }
 
-.browser-diagram-info { display: flex; flex-direction: column; gap: 4px; }
+.browser-diagram-info { display: flex; min-width: 0; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
 .browser-diagram h3 { margin: 0; }
 .browser-config-separator { color: var(--muted); }
 .browser-config-title-link { font-size: 13px; }
-.browser-diagram-controls { display: flex; margin-bottom: 8px; }
+.browser-diagram-controls { display: flex; margin: 0 0 0 auto; }
 .browser-diagram-controls .table-actions { justify-content: flex-start; }
 .browser-occupancy { color: var(--muted); font-size: 13px; }
 
@@ -623,6 +634,8 @@ body.modal-open { overflow: hidden; }
   .browser-preview {
     min-height: 240px;
   }
+
+  .browser-diagram-controls { width: 100%; margin-left: 0; }
 }
 
 .browser-diagram-details { display: flex; min-width: 0; flex-direction: column; }
@@ -716,8 +729,9 @@ body.modal-open { overflow: hidden; }
 }
 
 .entity-table {
-  min-width: 100%;
-  width: max-content;
+  width: 100%;
+  min-width: 720px;
+  table-layout: auto;
   border-collapse: collapse;
   background: var(--surface);
   font-size: 13px;
@@ -729,8 +743,13 @@ body.modal-open { overflow: hidden; }
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
+
+.entity-table-dense { min-width: 960px; }
+.entity-table td:last-child { min-width: 132px; }
+.entity-table .mono { word-break: break-word; }
 
 .entity-table th {
   color: var(--muted);
@@ -910,6 +929,8 @@ body.modal-open { overflow: hidden; }
 }
 
 @media (max-width: 850px) {
+  main { padding: 12px; }
+
   .topbar {
     align-items: flex-start;
     flex-direction: column;
@@ -917,12 +938,21 @@ body.modal-open { overflow: hidden; }
 
   .toolbar {
     width: 100%;
+    flex-wrap: wrap;
     justify-content: space-between;
   }
 
-  .status-grid,
+  .status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .metric { min-height: 62px; padding: 10px 12px; }
+
   .layout {
     grid-template-columns: 1fr;
+    gap: 12px;
   }
 
   .layout.nav-collapsed {
@@ -957,7 +987,7 @@ body.modal-open { overflow: hidden; }
   .section-title,
   .section-actions {
     align-items: flex-start;
-    flex-direction: column;
+    flex-wrap: wrap;
   }
 
   .editor-grid {

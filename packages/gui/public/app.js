@@ -532,8 +532,8 @@ async function render(snapshot) {
   renderBrowserConfigs(snapshot.browserConfigs, snapshot.sessions, snapshot.browsers, snapshot.brokers);
   renderSessions(snapshot.sessions, snapshot.relationships, snapshot.browsers);
   renderProxies(snapshot.proxies, snapshot.relationships, snapshot.browsers, snapshot.apps, snapshot.sessions);
-  renderCards(els.remoteHosts, snapshot.remoteHosts.map((host) => ({ title: host.name ?? host.id, subtitle: host.id, rows: { Target: host.target, 'SSH key': host.sshKeyId } })));
-  renderCards(els.sshKeys, snapshot.sshKeys.map((key) => ({ title: key.name ?? key.id, subtitle: key.id, rows: { Fingerprint: key.fingerprint, Updated: formatDate(key.updatedAt) } })));
+  renderCards(els.remoteHosts, snapshot.remoteHosts.map((host) => ({ title: host.name ?? host.id, subtitle: host.id, rows: { Target: host.target, 'SSH key': host.sshKeyId } })), { emptyMessage: 'No remote hosts' });
+  renderCards(els.sshKeys, snapshot.sshKeys.map((key) => ({ title: key.name ?? key.id, subtitle: key.id, rows: { Fingerprint: key.fingerprint, Updated: formatDate(key.updatedAt) } })), { emptyMessage: 'No SSH keys' });
   void refreshBrowserPreviews(snapshot.browsers).then(() => {
     if (state.last === snapshot) renderBrowsers(snapshot.browsers);
   });
@@ -745,6 +745,7 @@ function browserActions(browser) {
     {
       label: 'Delete',
       disabled: deleteBlocked,
+      kind: 'danger',
       title: deleteBlocked
         ? `Cannot delete: occupied by ${agentLease.owner}${agentLease.taskId ? `, task ${agentLease.taskId}` : ''}`
         : 'Delete browser',
@@ -912,6 +913,7 @@ function createActionButtons(actions = []) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = action.label;
+    if (action.kind) button.classList.add(`button-${action.kind}`);
     button.disabled = Boolean(action.disabled);
     if (action.title) button.title = action.title;
     button.addEventListener('click', async () => {
@@ -943,7 +945,7 @@ function renderBrowsers(browsers) {
       browser.profile,
       sessionLink(browser.sessionId),
       browserActions(browser),
-    ]), { rowKeys: browsers.map((browser) => browser.id), rowKeyAttribute: 'browserId' });
+    ]), { rowKeys: browsers.map((browser) => browser.id), rowKeyAttribute: 'browserId', emptyMessage: 'No browsers', tableClass: 'entity-table-dense' });
     return;
   }
   els.browsersTable.classList.add('hidden');
@@ -995,7 +997,7 @@ function renderBrowserDiagram(root, browsers) {
     controls.className = 'browser-diagram-controls';
     controls.append(createActionButtons(browserActions(browser).actions));
     titleInfo.append(titleGroup, occupancyLabel);
-    heading.append(controls, titleInfo);
+    heading.append(titleInfo, controls);
     details.append(heading);
     const flowColumn = document.createElement('div');
     flowColumn.className = 'browser-flow-column';
@@ -1097,7 +1099,7 @@ function renderApps(apps, relationships, browsers) {
     app.branch,
     usedBy(browsers, 'appId', app.id),
     app.readme ? markdownView(app.readme, app.name ?? app.id) : undefined,
-  ]), { rowKeys: apps.map((app) => app.id), rowKeyAttribute: 'appId' });
+  ]), { rowKeys: apps.map((app) => app.id), rowKeyAttribute: 'appId', emptyMessage: 'No apps' });
 }
 
 function renderBroker(snapshot) {
@@ -1113,7 +1115,7 @@ function renderBroker(snapshot) {
     const remoteOs = [remoteMachine?.platform, remoteMachine?.release].filter(Boolean).join(' ');
     return {
       broker: true,
-      title: `BROKER${index + 1}`,
+      title: `Broker ${index + 1}`,
       subtitle: entry.url,
       badge: [
         badge(broker ? (active ? 'Active' : 'Idle') : 'Offline', broker ? (active ? 'good' : 'neutral') : 'bad'),
@@ -1137,7 +1139,7 @@ function renderBroker(snapshot) {
         Instances: broker?.instanceCount ?? broker?.instances?.length ?? 0,
       },
     };
-  }));
+  }), { emptyMessage: 'No brokers' });
 }
 
 function renderBrowserConfigs(browserConfigs, sessions, browsers, brokers) {
@@ -1154,7 +1156,7 @@ function renderBrowserConfigs(browserConfigs, sessions, browsers, brokers) {
       activeSessions.join(' · ') || 'None',
       browserConfigActions(browserConfig, usage),
     ];
-  }), { rowKeys: browserConfigs.map((browserConfig) => browserConfig.id), rowKeyAttribute: 'browserConfigId' });
+  }), { rowKeys: browserConfigs.map((browserConfig) => browserConfig.id), rowKeyAttribute: 'browserConfigId', emptyMessage: 'No browser configs' });
 }
 
 function brokerForBrowserConfig(browserConfig, brokers) {
@@ -1186,6 +1188,7 @@ function browserConfigActions(browserConfig, usage) {
     },
     {
       label: 'Delete config',
+      kind: 'danger',
       disabled: referenced || occupied,
       title: occupied
         ? `Cannot delete: occupied by ${usage.occupiedBy.join(', ')}`
@@ -1216,7 +1219,7 @@ function renderSessions(sessions, relationships, browsers) {
     formatSessionLease(session),
     usedBy(browsers, 'sessionId', session.sessionId),
     session.browserInstanceId,
-  ]), { rowKeys: sessions.map((session) => session.sessionId) });
+  ]), { rowKeys: sessions.map((session) => session.sessionId), emptyMessage: 'No sessions', tableClass: 'entity-table-dense' });
 }
 
 function formatBrowserOccupancy(browser) {
@@ -1443,6 +1446,7 @@ function proxyActions(proxy, usage) {
     },
     {
       label: 'Delete proxy',
+      kind: 'danger',
       disabled: referenced || occupied,
       title: occupied
         ? `Cannot delete: occupied by ${usage.occupiedBy.join(', ')}`
@@ -1468,7 +1472,7 @@ function renderProxies(proxies, relationships, browsers, apps, sessions) {
     usage.occupiedBy.join(', ') || '—',
     proxyActions(proxy, usage),
   ];
-  }), { rowKeys: proxies.map((proxy) => proxy.id), rowKeyAttribute: 'proxyId' });
+  }), { rowKeys: proxies.map((proxy) => proxy.id), rowKeyAttribute: 'proxyId', emptyMessage: 'No proxies', tableClass: 'entity-table-dense' });
 }
 
 function proxyGuiLink(proxyId) {
@@ -1488,14 +1492,15 @@ function usedBy(browsers = [], field, id) {
     .join(', ') || '—';
 }
 
-function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'sessionId' } = {}) {
+function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'sessionId', emptyMessage = 'No records', tableClass } = {}) {
   root.replaceChildren();
   if (!rows.length) {
-    root.append(emptyState());
+    root.append(emptyState(emptyMessage));
     return;
   }
   const table = document.createElement('table');
   table.className = 'entity-table';
+  if (tableClass) table.classList.add(tableClass);
   const head = document.createElement('thead');
   const headerRow = document.createElement('tr');
   for (const column of columns) {
@@ -1550,10 +1555,10 @@ function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'ses
   root.append(scroll);
 }
 
-function renderCards(root, cards) {
+function renderCards(root, cards, { emptyMessage = 'No records' } = {}) {
   root.replaceChildren();
   if (!cards.length) {
-    root.append(emptyState());
+    root.append(emptyState(emptyMessage));
     return;
   }
 
@@ -1648,6 +1653,7 @@ function renderCards(root, cards) {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = action.label;
+        if (action.kind) button.classList.add(`button-${action.kind}`);
         button.addEventListener('click', async () => {
           button.disabled = true;
           try {

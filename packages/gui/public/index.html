@@ -25,7 +25,7 @@
             <option value="0">Paused</option>
           </select>
         </label>
-        <button id="refresh" class="button-primary" type="button">Refresh now</button>
+        <button id="refresh" type="button">Refresh now</button>
       </div>
       </header>
 
@@ -94,7 +94,7 @@
             <div class="section-title">
               <h2>Browsers</h2>
               <div class="section-actions">
-                <button id="new-browser" type="button">New browser</button>
+                <button id="new-browser" class="button-primary" type="button">New browser</button>
                 <div class="toggle-group" role="group" aria-label="Browser view">
                   <button class="toggle-btn active" data-browser-view="diagram" type="button" aria-pressed="true">Diagram</button>
                   <button class="toggle-btn" data-browser-view="table" type="button" aria-pressed="false">Table</button>
@@ -117,7 +117,7 @@
                 <label class="editor-wide"><span>README (optional)</span><textarea id="browser-readme" name="readme" rows="2"></textarea></label>
               </div>
               <div class="editor-actions">
-                <button id="save-browser" type="submit">Save browser</button>
+                <button id="save-browser" class="button-primary" type="submit">Save browser</button>
                 <span id="browser-editor-error" class="bad-text" role="alert"></span>
               </div>
             </form>
@@ -138,7 +138,7 @@
           <section class="view" id="view-browser-configs">
             <div class="section-title">
               <h2>Browser Configs</h2>
-              <div class="section-actions"><button id="new-browser-config" type="button">New browser config</button></div>
+              <div class="section-actions"><button id="new-browser-config" class="button-primary" type="button">New browser config</button></div>
             </div>
             <form id="browser-config-editor" class="editor hidden">
               <div class="editor-head">
@@ -157,7 +157,7 @@
                 <label class="check-field"><input id="browser-config-reset-profile" name="resetProfile" type="checkbox"><span>Reset profile on start</span></label>
               </div>
               <div class="editor-actions">
-                <button id="save-browser-config" type="submit">Save browser config</button>
+                <button id="save-browser-config" class="button-primary" type="submit">Save browser config</button>
                 <span id="browser-config-editor-error" class="bad-text" role="alert"></span>
               </div>
             </form>
@@ -173,7 +173,7 @@
           <section class="view" id="view-proxies">
             <div class="section-title">
               <h2>Proxies</h2>
-              <div class="section-actions"><button id="new-proxy" type="button">New proxy</button></div>
+              <div class="section-actions"><button id="new-proxy" class="button-primary" type="button">New proxy</button></div>
             </div>
             <form id="proxy-editor" class="editor hidden">
               <div class="editor-head">
@@ -193,7 +193,7 @@
                 <label><span>Labels</span><input id="proxy-labels" name="labels" placeholder="smoke, checkout"></label>
               </div>
               <div class="editor-actions">
-                <button id="save-proxy" type="submit">Save proxy</button>
+                <button id="save-proxy" class="button-primary" type="submit">Save proxy</button>
                 <span id="proxy-editor-error" class="bad-text" role="alert"></span>
               </div>
             </form>

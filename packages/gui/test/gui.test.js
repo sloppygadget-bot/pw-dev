@@ -1044,7 +1044,6 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /browserConfigLabel\.className = 'browser-config-title-link entity-link mono'/);
     assert.doesNotMatch(appScript.body, /spawned from/);
     assert.match(appScript.body, /controls\.className = 'browser-diagram-controls'/);
-    assert.match(appScript.body, /heading\.append\(controls, titleInfo\);/);
     assert.doesNotMatch(appScript.body, /titleGroup\.append\(controls\);/);
     assert.doesNotMatch(appScript.body, /heading\.append\(titleInfo\);/);
     assert.match(appScript.body, /occupancyLabel\.className = 'browser-occupancy'/);
@@ -1075,15 +1074,11 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /text-align: center/);
     assert.match(styles.body, /padding: 8px 14px/);
     assert.match(styles.body, /\.browser-diagram-title/);
-    assert.match(styles.body, /\.browser-diagram-title \{\s*margin-bottom: 8px/);
-    assert.match(styles.body, /\.browser-diagram-controls \{ display: flex; margin-bottom: 8px; \}/);
     assert.match(styles.body, /\.browser-diagram-content/);
     assert.match(styles.body, /\.browser-preview-pages/);
     assert.match(styles.body, /\.browser-preview-dot\.selected/);
     assert.match(styles.body, /grid-template-columns: minmax\(240px, 34%\) minmax\(0, 1fr\)/);
     assert.match(styles.body, /\.browser-diagram-content[\s\S]*?gap: 12px/);
-    assert.match(styles.body, /\.browsers-diagram[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
-    assert.match(styles.body, /@container \(max-width: 980px\)[\s\S]*?\.browsers-diagram[\s\S]*?grid-template-columns: 1fr/);
     assert.match(styles.body, /@container \(max-width: 680px\)[\s\S]*?\.browser-diagram-content[\s\S]*?grid-template-columns: 1fr/);
     assert.match(styles.body, /\.browser-preview/);
     assert.match(styles.body, /align-self: stretch/);
@@ -1091,7 +1086,6 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /\.browser-preview img[\s\S]*?height: 100%/);
     assert.doesNotMatch(styles.body, /\.browser-preview-head/);
     assert.match(styles.body, /max-width: 100%/);
-    assert.match(styles.body, /width: max-content/);
     assert.match(styles.body, /\.broker-card \.kv[\s\S]*?180px/);
     assert.match(appScript.body, /SSH peer IP addresses/);
     assert.match(appScript.body, /SSH peer OS \/ kernel/);
@@ -2381,6 +2375,146 @@ function startJsonServer(routes) {
     });
   });
 }
+
+function longContentSnapshot() {
+  const snapshot = browserPreviewSnapshot();
+  snapshot.server.browserConfigs.body.browserConfigs[0].targetUrl =
+    'https://example.test/a/very/long/path/that/must/wrap?with=a-long-query-value&and=another-long-value';
+  snapshot.server.browserConfigs.body.browserConfigs[0].proxyBypassList = [
+    '*.internal.example.test', '*.services.example.test',
+  ];
+  snapshot.server.browsers.body.browsers[0].occupancy = {
+    state: 'claimed', owner: 'another-agent', taskId: 'long-running-quality-check',
+  };
+  snapshot.server.proxies.body.proxies.push({ id: 'layout-proxy', proxyUrl: 'http://proxy.test:8899' });
+  return snapshot;
+}
+
+test('dashboard layout is compact and keeps actions reachable at desktop and mobile widths', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const pageErrors = [];
+    const failedResponses = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    page.on('requestfailed', (request) => failedResponses.push(request.url()));
+    page.on('response', (response) => {
+      if (new URL(response.url()).origin === gui.origin && response.status() >= 400) {
+        failedResponses.push(`${response.status()} ${response.url()}`);
+      }
+    });
+    await routeDashboardSnapshot(page, longContentSnapshot());
+    await page.goto(gui.origin);
+    await page.locator('.browser-diagram').waitFor();
+    await page.locator('#interval').selectOption('0');
+    const contentWidth = await page.locator('.content').evaluate((element) => element.getBoundingClientRect().width);
+    const cardWidth = await page.locator('.browser-diagram').evaluate((element) => element.getBoundingClientRect().width);
+    assert.ok(cardWidth >= contentWidth * 0.9, 'a single browser should use the available content width');
+    assert.equal(await page.locator('.browser-diagram-title').evaluate((heading) => heading.firstElementChild?.className), 'browser-diagram-info');
+    await page.locator('[data-nav-group="assets"] summary').click();
+    await page.locator('[data-nav-group="runtime"] summary').click();
+    for (const view of ['browsers', 'browser-configs', 'proxies']) {
+      await page.locator(`.nav-item[data-view="${view}"]`).click();
+      const deletion = page.locator('.view.active').getByRole('button', { name: /Delete/ }).first();
+      const box = await deletion.boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= 1440, `${view} desktop actions should be fully visible`);
+      const style = await deletion.evaluate((button) => {
+        const css = getComputedStyle(button);
+        return { danger: button.classList.contains('button-danger'), color: css.color, background: css.backgroundColor, opacity: Number(css.opacity), cursor: css.cursor };
+      });
+      assert.equal(style.danger, true);
+      assert.equal(style.color, 'rgb(179, 38, 30)');
+      assert.equal(style.background, 'rgb(253, 232, 231)');
+      if (view !== 'proxies') {
+        assert.equal(await deletion.isDisabled(), true);
+        assert.ok(style.opacity < 1);
+        assert.equal(style.cursor, 'not-allowed');
+      }
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 1440);
+    }
+    await page.locator('.nav-item[data-view="browser-configs"]').click();
+    await page.locator('#new-browser-config').click();
+    await page.mouse.move(0, 0);
+    assert.notEqual(await page.locator('#browser-config-reset-profile').evaluate((checkbox) => getComputedStyle(checkbox).accentColor), 'auto');
+    for (const id of ['new-browser', 'save-browser', 'new-browser-config', 'save-browser-config', 'new-proxy', 'save-proxy']) {
+      assert.equal(await page.locator(`#${id}`).evaluate((button) => getComputedStyle(button).backgroundColor), 'rgb(36, 91, 143)');
+    }
+    assert.deepEqual(await page.locator('.button-primary').allTextContents(), [
+      'New browser', 'Save browser', 'New browser config', 'Save browser config', 'New proxy', 'Save proxy',
+    ]);
+    await page.locator('#cancel-browser-config').click();
+    await page.locator('.nav-item[data-view="browsers"]').click();
+    await page.getByRole('button', { name: 'Table', exact: true }).click();
+    const browserDelete = page.locator('#browsers-table').getByRole('button', { name: 'Delete', exact: true });
+    const desktopDeleteBox = await browserDelete.boundingBox();
+    assert.ok(desktopDeleteBox.x + desktopDeleteBox.width <= 1440);
+    assert.equal(await browserDelete.isDisabled(), true);
+    assert.equal(await browserDelete.evaluate((button) => button.classList.contains('button-danger')), true);
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const view of ['browsers', 'apps', 'browser-configs', 'proxies', 'sessions', 'broker', 'remote-hosts', 'ssh-keys']) {
+      if (view !== 'browsers') {
+        const group = page.locator(`[data-nav-group="${['sessions', 'broker'].includes(view) ? 'runtime' : 'assets'}"]`);
+        if (await group.getAttribute('open') === null) await group.locator('summary').click();
+      }
+      await page.locator(`.nav-item[data-view="${view}"]`).click();
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390, `${view} should not overflow the document`);
+      if (view === 'browsers' || view === 'browser-configs' || view === 'proxies') {
+        const scroll = page.locator('.view.active .table-scroll');
+        await scroll.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+        const action = page.locator('.view.active').getByRole('button', { name: /Delete/ });
+        const box = await action.boundingBox();
+        assert.ok(box.x >= 0 && box.x + box.width <= 390, `${view} mobile actions should be reachable by scrolling the table`);
+      }
+      if (view === 'browsers') {
+        await page.getByRole('button', { name: 'Diagram', exact: true }).click();
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
+        const title = await page.locator('.browser-diagram-info').boundingBox();
+        const controls = await page.locator('.browser-diagram-controls').boundingBox();
+        assert.ok(controls.y >= title.y + title.height, 'mobile controls should wrap below the title');
+      }
+    }
+    const metrics = await page.locator('.metric').all();
+    const rows = new Set(await Promise.all(metrics.map(async (metric) => Math.round((await metric.boundingBox()).y))));
+    assert.equal(rows.size, 2, 'four metrics should form two compact rows');
+    for (const metric of metrics) assert.ok((await metric.boundingBox()).height <= 90);
+    assert.deepEqual(pageErrors, []);
+    assert.deepEqual(failedResponses, []);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('dashboard uses contextual empty copy and readable broker labels', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  try {
+    const page = await browser.newPage();
+    const snapshot = browserPreviewSnapshot();
+    for (const key of ['apps', 'browserConfigs', 'sessions', 'browsers', 'proxies', 'sshKeys', 'remoteHosts']) snapshot.server[key].body[key] = [];
+    await routeDashboardSnapshot(page, snapshot);
+    await page.goto(gui.origin);
+    await page.getByText('No browsers', { exact: true }).waitFor();
+    await page.locator('#interval').selectOption('0');
+    await page.locator('[data-nav-group="assets"] summary').click();
+    await page.locator('[data-nav-group="runtime"] summary').click();
+    for (const [view, copy] of [['apps', 'No apps'], ['browser-configs', 'No browser configs'], ['proxies', 'No proxies'], ['sessions', 'No sessions'], ['remote-hosts', 'No remote hosts'], ['ssh-keys', 'No SSH keys']]) {
+      await page.locator(`.nav-item[data-view="${view}"]`).click();
+      assert.equal(await page.locator('.view.active .empty').textContent(), copy);
+    }
+    await page.locator('.nav-item[data-view="browsers"]').click();
+    await page.getByRole('button', { name: 'Table', exact: true }).click();
+    assert.equal(await page.locator('.view.active .empty:visible').textContent(), 'No browsers');
+    await page.locator('.nav-item[data-view="broker"]').click();
+    assert.equal(await page.locator('.broker-card h3').textContent(), 'Broker 1');
+    assert.equal(await page.getByRole('button', { name: 'Refresh now', exact: true }).count(), 1);
+    assert.equal(await page.locator('label.inline-field > span').textContent(), 'Auto refresh');
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
 
 function browserPreviewSnapshot() {
   const ok = (body) => ({ ok: true, body });
