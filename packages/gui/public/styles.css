@@ -653,6 +653,7 @@ body.modal-open { overflow: hidden; }
   box-sizing: border-box;
   min-width: 0;
   width: 100%;
+  overflow-wrap: anywhere;
   padding: 8px 14px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -817,6 +818,11 @@ body.modal-open { overflow: hidden; }
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 12px;
+}
+
+.card-head > div:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .id {

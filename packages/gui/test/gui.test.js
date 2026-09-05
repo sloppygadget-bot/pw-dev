@@ -2386,8 +2386,43 @@ function longContentSnapshot() {
   snapshot.server.browsers.body.browsers[0].occupancy = {
     state: 'claimed', owner: 'another-agent', taskId: 'long-running-quality-check',
   };
-  snapshot.server.proxies.body.proxies.push({ id: 'layout-proxy', proxyUrl: 'http://proxy.test:8899' });
+  const appId = 'a'.repeat(64);
+  const proxyId = 'p'.repeat(64);
+  snapshot.server.browsers.body.browsers[0].appId = appId;
+  snapshot.server.browsers.body.browsers[0].proxyId = proxyId;
+  snapshot.server.apps.body.apps.push({ id: appId, appUrl: 'https://example.test/' });
+  snapshot.server.proxies.body.proxies.push({ id: proxyId, proxyUrl: 'http://proxy.test:8899' });
+  snapshot.server.remoteHosts.body.remoteHosts.push({ id: 'layout-host', name: 'h'.repeat(64), target: 'user@host.test', sshKeyId: 'layout-key' });
+  snapshot.server.sshKeys.body.sshKeys.push({ id: 'layout-key', name: 'k'.repeat(64), fingerprint: 'SHA256:test-key' });
   return snapshot;
+}
+
+for (const view of ['browsers', 'remote-hosts', 'ssh-keys']) {
+  test(`dashboard long content wraps in ${view} cards without document overflow`, async () => {
+    const browser = await chromium.launch({ headless: true });
+    const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+    try {
+      const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+      await routeDashboardSnapshot(page, longContentSnapshot());
+      await page.goto(gui.origin);
+      await page.locator('.browser-diagram').waitFor();
+      await page.locator('#interval').selectOption('0');
+      if (view !== 'browsers') {
+        await page.locator('[data-nav-group="assets"] summary').click();
+        await page.locator(`.nav-item[data-view="${view}"]`).click();
+      }
+      const text = page.locator(view === 'browsers' ? '.browser-node.app' : '.view.active .card-head h3');
+      assert.equal((await text.textContent()).length, 64, 'the full unbroken reference or title remains available');
+      for (const width of [390, 1440]) {
+        await page.setViewportSize({ width, height: 1000 });
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), width, `${view} should wrap long text at ${width}px`);
+        assert.equal(await text.evaluate((element) => element.scrollWidth <= element.clientWidth), true, 'long text should fit its own container');
+      }
+    } finally {
+      await browser.close();
+      await gui.close();
+    }
+  });
 }
 
 test('dashboard layout is compact and keeps actions reachable at desktop and mobile widths', async () => {
