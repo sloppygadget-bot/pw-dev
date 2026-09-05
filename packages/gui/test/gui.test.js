@@ -1143,6 +1143,208 @@ test('gui registers its bound origin and monitor request-host aliases', async ()
   }
 });
 
+function staticMonitorHub(preview) {
+  return {
+    async stream(browserId, pageId, req, res) {
+      res.writeHead(200, {
+        'cache-control': 'no-store',
+        'content-type': 'text/event-stream; charset=utf-8',
+      });
+      res.write(`data: ${JSON.stringify({
+        type: 'connected', browserId, sessionId: 'mobile-session', pageId: pageId ?? 'mobile-page',
+        pages: [{ id: 'mobile-page', title: 'Mobile target', url: 'https://target.test/', lease: { owner: 'test-agent' } }],
+      })}\n\n`);
+      res.write(`data: ${JSON.stringify({
+        type: 'page', browserId, url: 'https://target.test/', title: 'Mobile target',
+        viewport: { width: 1920, height: 1080, devicePixelRatio: 1 }, scroll: { x: 0, y: 0 },
+      })}\n\n`);
+      req.once('close', () => res.end());
+    },
+    async preview() { return preview; },
+    async action() { return { ok: true }; },
+    async close() {},
+  };
+}
+
+test('monitor stays compact on mobile and loads all same-origin assets', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const hub = staticMonitorHub(preview);
+  const stream = hub.stream;
+  let events;
+  hub.stream = (...args) => { events = args[3]; return stream(...args); };
+  const actions = [];
+  hub.action = async (_browserId, _pageId, payload) => { actions.push(payload); return { ok: true }; };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: hub });
+  const failures = [];
+  const pageErrors = [];
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    page.on('response', (response) => {
+      if (new URL(response.url()).origin === gui.origin && response.status() >= 400) failures.push(response.url());
+    });
+    await page.goto(`${gui.origin}/monitor/mobile-browser?pageId=mobile-page`);
+    await page.waitForFunction(() => document.querySelector('#mirror-image')?.naturalWidth > 0);
+    const issues = [];
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      const header = await page.locator('.monitor-topbar').boundingBox();
+      const controls = await page.locator('.browser-controls').boundingBox();
+      const address = await page.locator('.browser-address').boundingBox();
+      const wrap = await page.locator('#mirror-frame-wrap').boundingBox();
+      if (header.height >= 150) issues.push(`${width}px header is ${header.height}px tall`);
+      if (Math.abs(controls.y - address.y) >= 12) issues.push(`${width}px toolbar stacks its address`);
+      if (wrap.height >= 300) issues.push(`${width}px mirror reserves ${wrap.height}px height`);
+      assert.ok(address.width > 90, 'the address remains usable beside navigation');
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      const box = await page.locator('#mirror-image').boundingBox();
+      const previousDowns = actions.filter((action) => action.type === 'down').length;
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await waitFor(() => actions.filter((action) => action.type === 'down').length === previousDowns + 1);
+      const pointerDown = actions.filter((action) => action.type === 'down').at(-1);
+      assert.ok(Math.abs(pointerDown.x - 960) < 1);
+      assert.ok(Math.abs(pointerDown.y - 540) < 1);
+      // Measure the painted 16:9 content inside the image's one-pixel border.
+      const paintedWidth = Math.min(box.width - 2, (box.height - 2) * 16 / 9);
+      await page.mouse.click(box.x + box.width / 2 - paintedWidth / 4, box.y + box.height / 2 + paintedWidth * 9 / 64);
+      await waitFor(() => actions.filter((action) => action.type === 'down').length === previousDowns + 2);
+      const quarterClick = actions.filter((action) => action.type === 'down').at(-1);
+      assert.ok(Math.abs(quarterClick.x - 480) < 5, 'quarter-width click maps into the remote 1920px viewport');
+      assert.ok(Math.abs(quarterClick.y - 810) < 5, 'three-quarter-height click excludes letterbox space');
+    }
+    const icon = await page.locator('link[rel="icon"]').getAttribute('href', { timeout: 1000 }).catch(() => null);
+    if (icon !== '/favicon.svg') issues.push('monitor has no explicit SVG favicon');
+    if (icon) assert.equal(await page.evaluate(async (url) => (await fetch(url)).status, icon), 200);
+    if (await page.locator('#monitor-status').getAttribute('role') !== 'status') issues.push('live status role missing');
+    if (await page.locator('#monitor-status').getAttribute('aria-live') !== 'polite') issues.push('polite status announcement missing');
+    assert.equal(await page.locator('#monitor-status').textContent(), 'Live');
+    events.write(`data: ${JSON.stringify({ type: 'disconnected' })}\n\n`);
+    await page.waitForFunction(() => document.querySelector('#monitor-status').textContent === 'Browser disconnected');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const desktop = await page.locator('#mirror-frame-wrap').boundingBox();
+    assert.ok(desktop.height >= 600 && desktop.height <= 710, `desktop mirror should use available height, got ${desktop.height}`);
+    assert.deepEqual(issues, []);
+    assert.deepEqual(failures, []);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('monitor keeps its decoded screenshot through pending decode and capture failures', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const firstPreview = await seedPage.screenshot({ type: 'jpeg' });
+  await seedPage.setViewportSize({ width: 120, height: 90 });
+  const secondPreview = await seedPage.screenshot({ type: 'jpeg' });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: staticMonitorHub(firstPreview) });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    await page.addInitScript(() => {
+      const nativeDecode = HTMLImageElement.prototype.decode;
+      const nativeRevoke = URL.revokeObjectURL;
+      window.__revokedUrls = [];
+      URL.revokeObjectURL = (url) => { window.__revokedUrls.push(url); nativeRevoke(url); };
+      HTMLImageElement.prototype.decode = function () {
+        if (!window.__holdDecode) return nativeDecode.call(this);
+        return new Promise((resolve, reject) => {
+          window.__pendingDecodeUrl = this.src;
+          window.__releaseDecode = () => nativeDecode.call(this).then(resolve, reject);
+          window.__rejectDecode = () => reject(new Error('test decode failure'));
+        });
+      };
+    });
+    await page.goto(`${gui.origin}/monitor/mobile-browser?pageId=mobile-page`);
+    await page.waitForFunction(() => document.querySelector('#mirror-image')?.naturalWidth > 0);
+    const mirror = page.locator('#mirror-image');
+    const firstSrc = await mirror.getAttribute('src');
+    await page.evaluate(() => { window.__holdDecode = true; });
+    await page.route('**/api/monitor/*/preview*', (route) => route.fulfill({ contentType: 'image/jpeg', body: secondPreview }));
+    await page.locator('#refresh-screenshot').click();
+    await page.waitForFunction(() => window.__releaseDecode || !document.querySelector('#refresh-screenshot').disabled);
+    assert.equal(await mirror.getAttribute('src'), firstSrc, 'retain the current screenshot while the next image decodes');
+    assert.equal(await page.locator('#mirror-frame-wrap').evaluate((element) => element.style.getPropertyValue('--mirror-aspect')), '160 / 90');
+    assert.deepEqual(await page.evaluate(() => window.__revokedUrls), []);
+    await page.evaluate(() => window.__releaseDecode());
+    await page.waitForFunction((previous) => document.querySelector('#mirror-image').src !== previous && !document.querySelector('#refresh-screenshot').disabled, firstSrc);
+    const secondSrc = await mirror.getAttribute('src');
+    assert.equal(await page.locator('#mirror-frame-wrap').evaluate((element) => element.style.getPropertyValue('--mirror-aspect')), '120 / 90');
+    assert.ok(await page.evaluate((url) => window.__revokedUrls.includes(url), firstSrc));
+
+    await page.evaluate(() => { window.__pendingDecodeUrl = undefined; });
+    await page.locator('#refresh-screenshot').click();
+    await page.waitForFunction(() => window.__pendingDecodeUrl);
+    const rejectedUrl = await page.evaluate(() => window.__pendingDecodeUrl);
+    await page.evaluate(() => window.__rejectDecode());
+    await page.waitForFunction(() => !document.querySelector('#refresh-screenshot').disabled);
+    assert.equal(await mirror.getAttribute('src'), secondSrc, 'decode failure retains the last good screenshot');
+    assert.ok(await page.evaluate((url) => window.__revokedUrls.includes(url), rejectedUrl));
+    await page.route('**/api/monitor/*/preview*', (route) => route.fulfill({ status: 503, body: 'capture unavailable' }));
+    await page.locator('#refresh-screenshot').click();
+    await page.waitForFunction(() => !document.querySelector('#refresh-screenshot').disabled);
+    assert.equal(await mirror.getAttribute('src'), secondSrc, 'capture failure retains the last good screenshot');
+    assert.equal(await mirror.evaluate((element) => element.complete && element.naturalWidth > 0), true);
+    assert.equal(await page.locator('#mirror-empty').isVisible(), false);
+    assert.equal(await page.evaluate((url) => window.__revokedUrls.includes(url), secondSrc), false);
+    await page.evaluate(() => { window.__holdDecode = false; });
+    await page.route('**/api/monitor/*/preview*', (route) => route.fulfill({ contentType: 'image/jpeg', body: firstPreview }));
+    await page.locator('#refresh-screenshot').click();
+    await page.waitForFunction((previous) => document.querySelector('#mirror-image').src !== previous, secondSrc);
+    assert.equal(await page.locator('#mirror-frame-wrap').evaluate((element) => element.style.getPropertyValue('--mirror-aspect')), '160 / 90');
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('monitor and dashboard tab dots retain small indicators within larger touch targets', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: staticMonitorHub(preview) });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    await page.goto(`${gui.origin}/monitor/mobile-browser?pageId=mobile-page`);
+    await page.locator('.page-dot').waitFor();
+    const monitorDot = await page.locator('.page-dot').evaluate(tabDotGeometry);
+    await routeDashboardSnapshot(page, browserPreviewSnapshot());
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json', body: JSON.stringify({ ok: true, sessionId: 'preview-session', pages: [
+        { id: 'preview-page', type: 'page', title: 'Preview', url: 'https://preview.test/', lease: { owner: 'test-agent' } },
+        { id: 'other-page', type: 'page', title: 'Other', url: 'https://preview.test/other' },
+      ] }),
+    }));
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => route.fulfill({ contentType: 'image/jpeg', body: preview }));
+    await page.goto(gui.origin);
+    await page.locator('.browser-preview-dot.selected').waitFor();
+    await page.locator('.browser-preview-dot.selected').scrollIntoViewIfNeeded();
+    const dashboardDot = await page.locator('.browser-preview-dot.selected').evaluate(tabDotGeometry);
+    for (const [name, dot] of [['monitor', monitorDot], ['dashboard', dashboardDot]]) {
+      assert.ok(dot.width >= 28 && dot.height >= 28, `${name} dot needs a 28px touch target, got ${dot.width}×${dot.height}`);
+      assert.ok(dot.indicatorWidth <= 12 && dot.indicatorWidth > 0, `${name} indicator stays small`);
+      assert.notEqual(dot.background, 'rgba(0, 0, 0, 0)', `${name} selected indicator is filled`);
+      assert.notEqual(dot.shadow, 'none', `${name} leased indicator has a ring`);
+      assert.equal(dot.outerHit, true, `${name} touch target includes space outside the indicator`);
+    }
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+function tabDotGeometry(element) {
+  const box = element.getBoundingClientRect();
+  const style = getComputedStyle(element, '::before');
+  return {
+    width: box.width, height: box.height, indicatorWidth: parseFloat(style.width),
+    background: style.backgroundColor, shadow: style.boxShadow,
+    outerHit: document.elementFromPoint(box.x + 2, box.y + box.height / 2) === element,
+  };
+}
+
 test('screenshot monitor forwards mapped mouse, keyboard, and paste input', async () => {
   const browser = await chromium.launch({ headless: true });
   const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
@@ -1235,6 +1437,7 @@ test('screenshot monitor forwards mapped mouse, keyboard, and paste input', asyn
     await waitFor(() => actions.some((action) => action.action === 'keyboard' && action.type === 'insertText'));
     await waitFor(() => actions.filter((action) => action.action === 'navigation').length === 3);
     await waitFor(() => actions.some((action) => action.action === 'pointer' && action.type === 'up' && action.x < 1));
+    await waitFor(() => actions.some((action) => action.action === 'pointer' && action.type === 'wheel' && action.deltaY === 48));
     const pointerDown = actions.find((action) => action.action === 'pointer' && action.type === 'down');
     assert.ok(Math.abs(pointerDown.x - 960) < 1);
     assert.ok(Math.abs(pointerDown.y - 540) < 1);

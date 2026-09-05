@@ -121,6 +121,19 @@ function updatePageState(event) {
   placeClickMarker(state.lastClick);
 }
 
+async function decodedObjectUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  const candidate = new Image();
+  candidate.src = url;
+  try {
+    await candidate.decode();
+    return { url, width: candidate.naturalWidth, height: candidate.naturalHeight };
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
+}
+
 async function refreshScreenshot() {
   if (state.refreshing) return;
   if (state.refreshTimer) {
@@ -132,10 +145,11 @@ async function refreshScreenshot() {
   try {
     const response = await fetch(monitorUrl('preview'), { cache: 'no-store' });
     if (!response.ok) throw new Error(`Screenshot capture failed: ${response.status}`);
-    const nextUrl = URL.createObjectURL(await response.blob());
+    const next = await decodedObjectUrl(await response.blob());
     const previousUrl = state.previewUrl;
-    state.previewUrl = nextUrl;
-    image.src = nextUrl;
+    state.previewUrl = next.url;
+    image.src = next.url;
+    imageWrap.style.setProperty('--mirror-aspect', `${next.width} / ${next.height}`);
     if (previousUrl) URL.revokeObjectURL(previousUrl);
     document.querySelector('#update-meta').textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch {

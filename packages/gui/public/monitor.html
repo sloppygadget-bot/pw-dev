@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>pw-dev screenshot monitor</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="stylesheet" href="/monitor.css">
   </head>
   <body>
@@ -14,7 +15,7 @@
         <div id="monitor-subtitle" class="muted">Connecting…</div>
       </div>
       <nav class="monitor-nav" aria-label="Monitor navigation">
-        <span id="monitor-status" class="status-pill neutral">Connecting</span>
+        <span id="monitor-status" class="status-pill neutral" role="status" aria-live="polite">Connecting</span>
         <a href="/" target="_blank" rel="noopener noreferrer">Dashboard</a>
         <button id="refresh-screenshot" type="button">Refresh screenshot</button>
       </nav>

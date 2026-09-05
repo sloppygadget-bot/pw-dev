@@ -711,9 +711,10 @@ body.modal-open { overflow: hidden; }
   .browser-preview img.preview-updated { animation: none; }
 }
 .browser-preview-pages { display: flex; min-height: 32px; align-items: center; justify-content: center; gap: 6px; padding: 5px 8px; border-top: 1px solid var(--line); background: var(--surface); }
-.browser-preview-dot { min-height: 12px; width: 12px; padding: 0; border: 2px solid #7b8794; border-radius: 50%; background: transparent; }
-.browser-preview-dot.selected { border-color: var(--blue); background: var(--blue); }
-.browser-preview-dot.leased { box-shadow: 0 0 0 2px #f0b429; }
+.browser-preview-dot { position: relative; min-height: 28px; width: 28px; padding: 0; border: 0; background: transparent; }
+.browser-preview-dot::before { content: ''; position: absolute; inset: 8px; border: 2px solid #7b8794; border-radius: 50%; }
+.browser-preview-dot.selected::before { border-color: var(--blue); background: var(--blue); }
+.browser-preview-dot.leased::before { box-shadow: 0 0 0 2px #f0b429; }
 .browser-preview-picker { min-height: 24px; max-width: 130px; padding: 0 4px; color: var(--muted); font-size: 12px; }
 
 @media (max-width: 720px) {
