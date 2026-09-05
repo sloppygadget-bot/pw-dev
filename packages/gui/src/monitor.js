@@ -31,6 +31,7 @@ export class BrowserMonitorHub {
     this.fetchJson = fetchJsonImpl;
     /** @type {Set<string>} */
     this.guiOrigins = new Set();
+    this.dialogPages = new WeakSet();
     /** @type {Map<string, MonitorConnection>} */
     this.connections = new Map();
     /** @type {Map<string, Promise<Buffer>>} */
@@ -241,6 +242,10 @@ export class BrowserMonitorHub {
       }
     }
     const browser = await connectOverCDP(session.cdpUrl);
+    for (const context of browser.contexts()) {
+      context.on('page', (page) => this.observeDialog(page));
+      for (const page of context.pages()) this.observeDialog(page);
+    }
     const pages = await this.monitorablePages(browser);
     const selected = pageId ? pages.find((entry) => entry.id === pageId) : pages[0];
     const page = selected?.page;
@@ -364,14 +369,23 @@ export class BrowserMonitorHub {
     return localPages;
   }
 
-  observePage(connection, page) {
-    if (connection.observedPages.has(page)) return;
-    connection.observedPages.add(page);
+  observeDialog(page) {
+    if (this.dialogPages.has(page)) return;
+    this.dialogPages.add(page);
     page.on('dialog', (dialog) => {
+      // Owning GUI dialogs without handling them suppresses Playwright's default
+      // auto-dismissal, leaving the operator in charge even after navigation.
+      if (this.isGuiPage({ url: page.url() })) return;
       void dialog.dismiss().catch(() => {
         // Another CDP client may have handled the browser-wide dialog first.
       });
     });
+  }
+
+  observePage(connection, page) {
+    if (connection.observedPages.has(page)) return;
+    connection.observedPages.add(page);
+    this.observeDialog(page);
     // Navigation events can arrive while a previous evaluate is still in
     // flight. Route each event through one serialized, non-throwing refresh
     // so an execution-context race cannot become an unhandled rejection.

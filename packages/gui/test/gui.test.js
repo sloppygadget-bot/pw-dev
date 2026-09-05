@@ -73,8 +73,14 @@ test('monitor owns popup dialogs once while excluding GUI pages', async () => {
     await hub.refreshPageInventory(connection);
     assert.equal(popup.listenerCount('dialog'), 1);
     assert.equal(browserDouble.page('target').listenerCount('dialog'), 1);
-    assert.equal(browserDouble.page('gui').listenerCount('dialog'), 0);
+    assert.equal(browserDouble.page('gui').listenerCount('dialog'), 1);
     let dismissals = 0;
+    browserDouble.page('gui').emit('dialog', { dismiss: async () => { dismissals += 1; } });
+    popup.navigateTo('http://127.0.0.1:9797/');
+    popup.emit('dialog', { dismiss: async () => { dismissals += 1; } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dismissals, 0, 'GUI confirmations remain owned by their operator after navigation');
+    popup.navigateTo('https://dialog.test/popup');
     popup.emit('dialog', { dismiss: async () => { dismissals += 1; } });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(dismissals, 1);
@@ -121,6 +127,49 @@ test('monitor remains usable when a second CDP client handles a real confirm dia
     } finally {
       await launched.close();
     }
+  }
+});
+
+test('monitor leaves GUI confirmations to their operator across existing and newly opened tabs', async () => {
+  const launched = await launchCdpBrowser();
+  const gui = await startJsonServer({ '/gui': { ok: true } });
+  const hub = new BrowserMonitorHub({
+    pwDevUrl: 'http://pw-dev.test',
+    connectOverCDP: (endpoint) => chromium.connectOverCDP(endpoint),
+    fetchJson: async () => ({
+      ok: true, statusCode: 200,
+      body: { browser: { runtime: { sessionId: 'gui-dialogs', cdpUrl: launched.wsEndpoint } } },
+    }),
+  });
+  hub.addGuiOrigin(gui.origin);
+  let operator;
+  try {
+    operator = await chromium.connectOverCDP(launched.wsEndpoint);
+    const context = operator.contexts()[0];
+    const existingGui = await context.newPage();
+    await existingGui.goto(`${gui.origin}/gui`);
+    await hub.ensureConnection('gui-dialog-browser');
+
+    for (const createPage of [async () => existingGui, () => context.newPage()]) {
+      const page = await createPage();
+      if (page !== existingGui) await page.goto(`${gui.origin}/gui`);
+      let finishHandling;
+      const handled = new Promise((resolve) => { finishHandling = resolve; });
+      page.once('dialog', (dialog) => {
+        // Leave a deterministic window for an incorrect monitor auto-dismissal.
+        setTimeout(() => void dialog.accept().then(() => finishHandling(), finishHandling), 25);
+      });
+      const accepted = await page.evaluate(() => confirm('Delete this temporary browser?'));
+      const handlingError = await handled;
+      assert.equal(accepted, true, 'the operator must own its GUI confirmation');
+      assert.equal(handlingError, undefined);
+      assert.ok((await hub.preview('gui-dialog-browser')).length > 0);
+    }
+  } finally {
+    await hub.close();
+    await operator?.close();
+    await launched.close();
+    await gui.close();
   }
 });
 
@@ -2392,10 +2441,12 @@ async function launchCdpBrowser() {
 function createMonitorBrowserDouble(initialPages) {
   const pages = [];
   const browserEvents = new EventEmitter();
+  const contextEvents = new EventEmitter();
   let deferredPageDescription;
   let connected = true;
   let closeCalls = 0;
   const context = {
+    on: contextEvents.on.bind(contextEvents),
     pages: () => pages.filter((page) => !page.isClosed()),
     newCDPSession: async (page) => ({
       send: async (method) => {
@@ -2485,6 +2536,7 @@ function createMonitorBrowserDouble(initialPages) {
     open(rawPage) {
       const page = makePage(rawPage);
       pages.push(page);
+      contextEvents.emit('page', page);
       return page;
     },
     closePage(id) {
