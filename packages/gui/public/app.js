@@ -763,10 +763,10 @@ function openBrowserMonitor(browser, pageId = state.previewPageIds.get(browser.i
   );
 }
 
-function isGuiPage(page) {
+function isGuiPage(page, guiOrigins = []) {
   try {
     const url = new URL(page.url);
-    if (url.origin === location.origin) return true;
+    if (url.origin === location.origin || guiOrigins.includes(url.origin)) return true;
     const localAliases = new Set(['localhost', '127.0.0.1']);
     return localAliases.has(url.hostname) && localAliases.has(location.hostname)
       && url.protocol === location.protocol && url.port === location.port;
@@ -775,8 +775,8 @@ function isGuiPage(page) {
   }
 }
 
-function monitorablePreviewPages(pages) {
-  return pages.filter((page) => !isGuiPage(page));
+function monitorablePreviewPages(pages, guiOrigins) {
+  return pages.filter((page) => !isGuiPage(page, guiOrigins));
 }
 
 async function refreshBrowserPreviews(browsers) {
@@ -809,7 +809,7 @@ async function refreshBrowserPreviews(browsers) {
       if (pageResponse.ok) {
         const body = await pageResponse.json();
         if (!isLatestRefresh()) return;
-        const pages = monitorablePreviewPages(Array.isArray(body.pages) ? body.pages : []);
+        const pages = monitorablePreviewPages(Array.isArray(body.pages) ? body.pages : [], Array.isArray(body.guiOrigins) ? body.guiOrigins : []);
         state.previewPages.set(browser.id, pages);
         const selectedPageId = state.previewPageIds.get(browser.id);
         if (!pages.some((page) => page.id === selectedPageId)) state.previewPageIds.set(browser.id, pages[0]?.id);

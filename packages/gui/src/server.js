@@ -53,6 +53,17 @@ export async function startPwDevGuiServer(options = {}) {
         writeJson(res, 200, await collectSnapshot({ pwDevUrl, brokerUrl, proxyManagerUrl, brokerDiscovery }));
         return;
       }
+      // Attach the current exclusion set to each inventory response: origins
+      // can be registered after the dashboard's initial configuration load.
+      if (req.method === 'GET' && /^\/api\/pwdev\/sessions\/[^/]+\/pages$/.test(requestUrl.pathname)) {
+        registerMonitorGuiOrigin(monitorHub, req, host);
+        const result = await fetchJsonFrom(`${pwDevUrl}/_pwdev${requestUrl.pathname.slice('/api/pwdev'.length)}${requestUrl.search}`);
+        writeJson(res, result.statusCode || 502, {
+          ...(result.body ?? { ok: false, error: result.error }),
+          guiOrigins: [...(monitorHub.guiOrigins ?? [])],
+        });
+        return;
+      }
       const monitorEvents = /^\/api\/monitor\/([^/]+)\/events$/.exec(requestUrl.pathname);
       if (monitorEvents) {
         registerMonitorGuiOrigin(monitorHub, req, host);

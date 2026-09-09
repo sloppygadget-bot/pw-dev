@@ -246,6 +246,8 @@ export function createProxyManager(options = {}) {
       }
 
       let app;
+      let attachmentAttempted = false;
+      let previousProxyId;
       try {
         if (child) {
           await applyRulesImpl({
@@ -276,11 +278,24 @@ export function createProxyManager(options = {}) {
           updatedAt: rules.updatedAt,
         }));
         if (request.appId) {
+          const apps = await registryClient.listApps();
+          previousProxyId = apps.find((candidate) => candidate.id === request.appId)?.proxyId ?? null;
+          attachmentAttempted = true;
           app = await registryClient.updateApp(request.appId, { proxyId: request.id });
         }
         await writeManagedRuleFiles({ storageDir, rules });
         await writeProxyProfile(record);
       } catch (error) {
+        if (attachmentAttempted) {
+          try {
+            const apps = await registryClient.listApps();
+            if (apps.find((candidate) => candidate.id === request.appId)?.proxyId === request.id) {
+              await registryClient.updateApp(request.appId, { proxyId: previousProxyId });
+            }
+          } catch (restoreError) {
+            if (!quiet) console.error(`proxy attachment rollback failed: ${request.id}: ${restoreError.message}`);
+          }
+        }
         let terminated = false;
         try {
           await terminateManagedProxyProcesses({
@@ -380,29 +395,35 @@ export function createProxyManager(options = {}) {
       if (!stored) throw httpError(404, `Unknown managed proxy: ${id}`);
       await this.getProxyStatus(id);
       if (stored.running) return { ok: true, proxy: stripChild(stored), alreadyRunning: true };
-      proxies.delete(id);
+      // Starting an existing profile must never invoke destructive creation
+      // rollback or rewrite its saved rules. Apply the complete rules once.
+      const usedPorts = runningPorts(new Map([...proxies].filter(([proxyId]) => proxyId !== id)));
+      await selectPort({ requested: stored.proxyPort, range: proxyPortRange, usedPorts, portAvailable, name: 'proxyPort' });
+      await selectPort({ requested: stored.uiPort, range: uiPortRange, usedPorts: new Set([...usedPorts, stored.proxyPort]), portAvailable, name: 'uiPort' });
+      const args = [...whistle.argsPrefix, 'run', '-p', String(stored.proxyPort),
+        '--uiport', String(stored.uiPort), '-S', stored.storageDir, '-M', 'enableHttps'];
+      const child = spawnManagedProcess(spawnImpl, whistle.command, args, { quiet });
+      Object.assign(stored, { child, command: whistle.command, args, pid: child.pid,
+        running: true, startedAt: new Date().toISOString() });
+      const onExit = () => { if (stored.child === child) markProxyStopped(stored); };
+      child.once?.('error', onExit);
+      child.once?.('exit', onExit);
       try {
-        const started = await this.createProxy({
-          id: stored.id,
-          name: stored.name,
-          appId: stored.appId,
-          taskId: stored.taskId,
-          owner: stored.owner,
-          purpose: stored.purpose,
-          labels: stored.labels,
-          ruleset: stored.rules?.defaultRuleset ?? '',
-          proxyPort: stored.proxyPort,
-          uiPort: stored.uiPort,
-          storageDir: stored.storageDir,
-        }, { start: true });
-        if (!stored.rules?.overrideRuleset) return started;
-        return this.replaceProxyRules(id, {
-          baseVersion: started.proxy.rules.version,
-          defaultRuleset: started.proxy.rules.defaultRuleset,
-          overrideRuleset: stored.rules.overrideRuleset,
-        });
+        await applyRulesImpl({ guiUrl: stored.guiUrl, ruleName: stored.whistleRuleName,
+          rulesText: stored.rules.effectiveRuleset });
+        if (!stored.running) throw new Error(`Proxy process exited while starting: ${id}`);
+        await registryClient.updateProxy(omitUndefined({ ...stripChild(stored), managed: true }));
+        return { ok: true, proxy: stripChild(stored) };
       } catch (error) {
-        proxies.set(id, stored);
+        try {
+          await terminateManagedProxyProcesses({ proxy: stored, root: w2StorageRoot,
+            processListImpl, killProcessImpl, graceMs: proxyStopGraceMs,
+            killGraceMs: proxyKillGraceMs, pollMs: proxyStopPollMs });
+          markProxyStopped(stored);
+        } catch (terminationError) {
+          if (!quiet) console.error(`proxy start rollback termination failed: ${id}: ${terminationError.message}`);
+        }
+        await registryClient.updateProxy(omitUndefined({ ...stripChild(stored), managed: true })).catch(() => {});
         throw error;
       }
     },
@@ -1119,9 +1140,7 @@ async function cleanupManagedProxy(record, quiet, registryClient) {
       await cleanupProcessRecord(record, quiet);
       try {
         await registryClient.deleteProxy?.(record.id);
-        if (record.appId) {
-          await registryClient.updateApp(record.appId, { proxyId: null });
-        }
+        await detachOwnedProxy(record, registryClient);
       } catch (error) {
         if (!quiet) console.error(`proxy registry cleanup failed: ${record.id}: ${error.message}`);
       }
@@ -1457,7 +1476,7 @@ async function cleanupOrphanedProxies({
         if (!quiet) console.error(`orphan proxy registry cleanup failed: ${record.id}: ${error.message}`);
       });
       if (record.appId) {
-        await Promise.resolve(registryClient.updateApp?.(record.appId, { proxyId: null })).catch((error) => {
+        await detachOwnedProxy(record, registryClient).catch((error) => {
           if (!quiet) console.error(`orphan proxy app cleanup failed: ${record.appId}: ${error.message}`);
         });
       }
@@ -1488,10 +1507,17 @@ async function removeStaleRegistryRecord(record, registryClient, quiet) {
     if (!quiet) console.error(`stale proxy registry cleanup failed: ${record.id}: ${error.message}`);
   });
   if (record.appId) {
-    await Promise.resolve(registryClient.updateApp?.(record.appId, { proxyId: null })).catch((error) => {
+    await detachOwnedProxy(record, registryClient).catch((error) => {
       if (!quiet) console.error(`stale proxy app cleanup failed: ${record.appId}: ${error.message}`);
     });
   }
+}
+
+async function detachOwnedProxy(record, registryClient) {
+  if (!record.appId) return;
+  const apps = await registryClient.listApps();
+  const app = apps.find((candidate) => candidate.id === record.appId);
+  if (app?.proxyId === record.id) await registryClient.updateApp(record.appId, { proxyId: null });
 }
 
 function extractManagedStorageDir(commandLine, root) {

@@ -344,6 +344,100 @@ test('manager fully rolls back a started proxy when app registration fails', asy
   }
 });
 
+for (const stubborn of [false, true]) {
+test(`failed creation preserves another proxy attachment when termination ${stubborn ? 'fails' : 'succeeds'}`, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-rollback-owner-'));
+  const spawned = [];
+  const registry = fakeRegistryClient({ apps: [{ id: 'app', proxyId: 'proxy-a' }] });
+  const manager = createProxyManager({
+    w2StorageRoot: root, registryClient: registry, quiet: true,
+    portAvailable: async () => true, processListImpl: async () => [],
+    proxyStopGraceMs: 1, proxyKillGraceMs: 1, proxyStopPollMs: 1,
+    spawnImpl: (...args) => {
+      const child = fakeSpawn(spawned)(...args);
+      if (stubborn) child.kill = () => {};
+      return child;
+    },
+    applyRulesImpl: async () => { throw new Error('apply failed'); },
+  });
+  try {
+    await assert.rejects(manager.createProxy({ id: 'proxy-b', appId: 'app', ruleset: '' }, { start: true }), /apply failed/);
+    assert.equal(registry.apps[0].proxyId, 'proxy-a');
+    assert.deepEqual(registry.appPatches, []);
+    const storage = spawned[0].args[spawned[0].args.indexOf('-S') + 1];
+    assert.equal(fs.existsSync(storage), stubborn);
+  } finally {
+    spawned[0]?.child.emit('exit', 0);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+}
+
+test('deleting a proxy preserves an app that has switched to a replacement', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-delete-owner-'));
+  const registry = fakeRegistryClient({ apps: [{ id: 'app' }] });
+  const manager = createProxyManager({ w2StorageRoot: root, registryClient: registry,
+    quiet: true, portAvailable: async () => true, processListImpl: async () => [] });
+  try {
+    await manager.createProxy({ id: 'old', appId: 'app', ruleset: '' });
+    registry.apps[0].proxyId = 'replacement';
+    await manager.deleteProxy('old');
+    assert.equal(registry.apps[0].proxyId, 'replacement');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('failed attachment restores the previous proxy after a partially successful registry call', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-attach-rollback-'));
+  const registry = fakeRegistryClient({ apps: [{ id: 'app', proxyId: 'proxy-a' }] });
+  const updateApp = registry.updateApp.bind(registry);
+  registry.updateApp = async (id, patch) => {
+    const app = await updateApp(id, patch);
+    if (patch.proxyId === 'proxy-b') throw new Error('lost attachment response');
+    return app;
+  };
+  const manager = createProxyManager({ w2StorageRoot: root, registryClient: registry,
+    quiet: true, portAvailable: async () => true, processListImpl: async () => [] });
+  try {
+    await assert.rejects(manager.createProxy({ id: 'proxy-b', appId: 'app', ruleset: '' }), /lost attachment response/);
+    assert.equal(registry.apps[0].proxyId, 'proxy-a');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('failed durable start preserves profile and complete rules for a later retry', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-dev-start-rollback-'));
+  const spawned = [];
+  const applied = [];
+  let fail = true;
+  const registry = fakeRegistryClient({ apps: [{ id: 'app' }] });
+  const options = { w2StorageRoot: root, registryClient: registry, quiet: true,
+    portAvailable: async () => true, processListImpl: async () => [],
+    spawnImpl: fakeSpawn(spawned),
+    applyRulesImpl: async ({ rulesText }) => { applied.push(rulesText); if (fail) throw new Error('start failed'); },
+  };
+  const manager = createProxyManager(options);
+  try {
+    const created = await manager.createProxy({ id: 'durable', appId: 'app', ruleset: 'a b' });
+    const replaced = await manager.replaceProxyRules('durable', { baseVersion: created.proxy.rules.version,
+      defaultRuleset: 'a b', overrideRuleset: 'c d' });
+    const profilePath = path.join(created.proxy.storageDir, 'pw-dev-proxy.json');
+    const savedProfile = fs.readFileSync(profilePath, 'utf8');
+    await assert.rejects(manager.startProxy('durable'), /start failed/);
+    assert.equal(fs.readFileSync(profilePath, 'utf8'), savedProfile);
+    assert.deepEqual((await manager.getProxy('durable')).proxy.rules, replaced.proxy.rules);
+    assert.equal((await manager.getProxyStatus('durable')).status.running, false);
+    assert.equal(registry.apps[0].proxyId, 'durable');
+    assert.deepEqual(registry.deletes, []);
+    assert.equal(spawned[0].child.killedSignal, 'SIGTERM');
+    fail = false;
+    const recovered = createProxyManager(options);
+    const started = await recovered.startProxy('durable');
+    assert.deepEqual(started.proxy.rules, replaced.proxy.rules);
+    assert.deepEqual(applied, ['a b\n\nc d', 'a b\n\nc d']);
+    assert.equal(fs.readFileSync(profilePath, 'utf8'), savedProfile);
+    await recovered.stopAll();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('manager creates Whistle instance from ruleset and attaches it to app', async () => {
   const spawned = [];
   const appliedRules = [];
@@ -608,6 +702,7 @@ test('proxy manager cleans orphaned Whistle processes on startup', async () => {
     },
   ];
   const registryClient = fakeRegistryClient({
+    apps: [{ id: 'react-login-portal', proxyId: 'react-login-portal-whistle' }],
     proxies: [{
       id: 'react-login-portal-whistle',
       appId: 'react-login-portal',

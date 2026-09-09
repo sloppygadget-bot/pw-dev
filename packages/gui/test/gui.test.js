@@ -1381,6 +1381,70 @@ test('monitor clears stale Live state and pending screenshots after an establish
   }
 });
 
+test('monitor recovers pointer input and metadata after an inventory error', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seed = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const preview = await seed.screenshot({ type: 'jpeg' });
+  const double = createMonitorBrowserDouble([{ id: 'target', title: 'Target', url: 'https://target.test/' }]);
+  double.page('target').screenshot = async () => preview;
+  const hub = createConnectedMonitorHub(double, 'recover-session');
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: hub });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${gui.origin}/monitor/recover-browser?pageId=target`);
+    await page.waitForFunction(() => document.querySelector('#mirror-image').naturalWidth > 0);
+    const connection = hub.connections.get('recover-browser:target');
+    hub.reportRefreshError(connection, new Error('Temporary inventory failure'));
+    await page.waitForFunction(() => document.querySelector('#monitor-status').textContent === 'Monitor error');
+    // The unchanged target recovers through the real periodic inventory stream.
+    await page.waitForFunction(() => document.querySelector('#monitor-status').textContent === 'Live');
+    await page.waitForFunction(() => document.querySelector('#mirror-image').naturalWidth > 0);
+    assert.equal(await page.locator('#nav-target-url').getAttribute('href'), 'https://target.test/');
+    await page.locator('#mirror-image').click();
+    await page.mouse.wheel(0, 100);
+    await waitFor(() => double.page('target').inputActions.some((action) => action.type === 'wheel'));
+    assert.ok(double.page('target').inputActions.some((action) => action.type === 'down'));
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('dashboard uses the backend GUI origins including newly registered hostnames', async () => {
+  const pages = [{ id: 'alias', title: 'Operator', url: 'http://workstation.test:9797/' },
+    { id: 'target', title: 'Target', url: 'https://target.test/' }];
+  const upstream = await startJsonServer({ '/_pwdev/sessions/preview-session/pages': { ok: true, pages } });
+  const hub = new BrowserMonitorHub({ pwDevUrl: upstream.origin });
+  const gui = await startPwDevGuiServer({ port: 0, pwDevUrl: upstream.origin, brokerDiscovery: false, monitorHub: hub });
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const seed = await browser.newPage({ viewport: { width: 160, height: 90 } });
+    const preview = await seed.screenshot({ type: 'jpeg' });
+    await routeDashboardSnapshot(page, browserPreviewSnapshot());
+    await page.unroute('**/api/pwdev/sessions/preview-session/pages');
+    const requestedTargets = [];
+    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+      requestedTargets.push(new URL(route.request().url()).searchParams.get('pageId'));
+      return route.fulfill({ contentType: 'image/jpeg', body: preview });
+    });
+    // Simulates a configured hostname registered by a GUI document request.
+    hub.addGuiOrigin('http://workstation.test:9797');
+    await page.goto(gui.origin);
+    await page.waitForFunction(() => document.querySelector('.browser-preview img')?.naturalWidth > 0);
+    assert.deepEqual(requestedTargets, ['target']);
+    hub.addGuiOrigin('http://another-workstation.test:9797');
+    pages.unshift({ id: 'late-alias', title: 'New operator', url: 'http://another-workstation.test:9797/' });
+    const response = await getJson(`${gui.origin}/api/pwdev/sessions/preview-session/pages`);
+    assert.ok(response.body.guiOrigins.includes('http://another-workstation.test:9797'));
+    assert.deepEqual(response.body.pages, pages, 'the control-plane inventory remains intact');
+  } finally {
+    await browser.close();
+    await gui.close();
+    await upstream.close();
+  }
+});
+
 test('monitor stays compact on mobile and loads all same-origin assets', async () => {
   const browser = await chromium.launch({ headless: true });
   const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });

@@ -105,13 +105,14 @@ function handleEvent(event) {
       history.replaceState(null, '', next);
     }
     renderPageDots(event.pages ?? [], event.pageId);
-    if (event.pageId) resumeTarget();
+    if (event.pageState) updatePageState(event.pageState);
+    if (event.pageId && state.viewport) resumeTarget();
     return;
   }
   if (event.type === 'page' || event.type === 'viewport') {
-    if (event.type === 'page') resumeTarget();
-    if (!state.hasTarget) return;
+    if (event.type !== 'page' && !state.hasTarget) return;
     updatePageState(event);
+    if (event.type === 'page' && state.viewport) resumeTarget();
     return;
   }
   if (event.type === 'click') {

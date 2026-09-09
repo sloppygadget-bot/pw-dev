@@ -83,7 +83,7 @@ export class BrowserMonitorHub {
     const pageInventory = setInterval(() => {
       void this.refreshPageInventory(connection)
         .then((pages) => {
-          if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'pages', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages });
+          if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'pages', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages, pageState: connection.lastPageState });
         })
         .catch((error) => {
           if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'error', error: error?.message ?? String(error) });
