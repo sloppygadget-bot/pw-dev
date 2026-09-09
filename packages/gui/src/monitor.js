@@ -471,6 +471,10 @@ export class BrowserMonitorHub {
 
   handlePageEvent(connection, event) {
     if (!event || typeof event !== 'object') return;
+    if (connection.lastPageState) {
+      if (event.viewport) connection.lastPageState.viewport = event.viewport;
+      if (event.scroll) connection.lastPageState.scroll = event.scroll;
+    }
     this.broadcast(connection, { ...event, browserId: connection.browserId });
   }
 

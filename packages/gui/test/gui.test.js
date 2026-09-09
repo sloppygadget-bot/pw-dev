@@ -1394,12 +1394,17 @@ test('monitor recovers pointer input and metadata after an inventory error', asy
     await page.goto(`${gui.origin}/monitor/recover-browser?pageId=target`);
     await page.waitForFunction(() => document.querySelector('#mirror-image').naturalWidth > 0);
     const connection = hub.connections.get('recover-browser:target');
+    await double.page('target').setViewportSize({ width: 2560, height: 1440 });
+    hub.handlePageEvent(connection, { type: 'viewport', viewport: { width: 2560, height: 1440 }, scroll: { x: 0, y: 300 } });
+    await page.waitForFunction(() => document.querySelector('#viewport-meta').textContent === 'Viewport 2560 × 1440');
     hub.reportRefreshError(connection, new Error('Temporary inventory failure'));
     await page.waitForFunction(() => document.querySelector('#monitor-status').textContent === 'Monitor error');
     // The unchanged target recovers through the real periodic inventory stream.
     await page.waitForFunction(() => document.querySelector('#monitor-status').textContent === 'Live');
     await page.waitForFunction(() => document.querySelector('#mirror-image').naturalWidth > 0);
     assert.equal(await page.locator('#nav-target-url').getAttribute('href'), 'https://target.test/');
+    assert.equal(await page.locator('#viewport-meta').textContent(), 'Viewport 2560 × 1440');
+    assert.equal(await page.locator('#scroll-meta').textContent(), 'Scroll 0, 300');
     await page.locator('#mirror-image').click();
     await page.mouse.wheel(0, 100);
     await waitFor(() => double.page('target').inputActions.some((action) => action.type === 'wheel'));
