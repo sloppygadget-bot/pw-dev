@@ -131,6 +131,9 @@ On first connect, the broker creates a detached OpenSSH control master:
 ssh -o ControlMaster=yes \
   -o ControlPersist=24h \
   -o ControlPath="$HOME/.pw-cdp-broker/ssh/%C" \
+  -o ConnectTimeout=10 \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=2 \
   -N \
   -f \
   user@code-server
@@ -145,6 +148,19 @@ ssh -o ControlPath="$HOME/.pw-cdp-broker/ssh/%C" \
   -R 18080:localhost:18080 \
   user@code-server
 ```
+
+The control master uses SSH keepalives, and the broker checks it every five
+seconds. If an intermittent network outage kills or strands the connection,
+the broker removes the stale control socket, recreates the master, and
+reapplies the reverse broker forward and every dynamic `ssh-peer` proxy
+forward. Forward IDs and local proxy URLs remain stable. Failed reconnects
+continue with bounded exponential backoff; the local broker and Chrome
+sessions stay alive during the outage.
+
+Unattended reconnection requires non-interactive OpenSSH authentication, such
+as a loaded SSH agent or key. The initial connection may still prompt normally;
+the background recovery loop never stores a password or repeatedly opens an
+authentication prompt.
 
 The broker does not ask for, store, or cache SSH passwords. Any password,
 passphrase, MFA, or host-key prompt comes from OpenSSH.

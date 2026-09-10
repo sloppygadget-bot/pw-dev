@@ -51,26 +51,14 @@ class ProxyForwardManager {
       localPort: normalizedLocalPort,
       proxyServer: `http://127.0.0.1:${normalizedLocalPort}`,
       createdAt: new Date().toISOString(),
+      active: false,
+      generation: 0,
     };
-    const args = buildProxySshArgs({
-      target: this.sshTarget,
-      localPort: forward.localPort,
-      remotePort: forward.remotePort,
-      controlPersist: this.controlPersist,
-      controlPath: this.controlPath,
-    });
     this.log(
       `Starting SSH proxy forward: local ${forward.localPort} -> remote ${forward.remotePort}`
     );
-    const child = this.spawnImpl('ssh', args, { stdio: this.quiet ? 'ignore' : 'inherit' });
-    forward.child = child;
+    this.startForward(forward);
     this.forwards.set(forward.forwardId, forward);
-
-    child.on?.('exit', () => {
-      if (this.forwards.get(forward.forwardId) === forward && !forward.expectedStop) {
-        this.forwards.delete(forward.forwardId);
-      }
-    });
 
     return describeForward(forward);
   }
@@ -82,7 +70,10 @@ class ProxyForwardManager {
   async ensure({ remotePort, name } = {}) {
     const normalizedRemotePort = normalizePort(remotePort, 'remotePort');
     const existing = [...this.forwards.values()].find((forward) => forward.remotePort === normalizedRemotePort);
-    if (existing) return describeForward(existing);
+    if (existing) {
+      if (!existing.active) this.startForward(existing);
+      return describeForward(existing);
+    }
     return this.create({ remotePort: normalizedRemotePort, name });
   }
 
@@ -138,6 +129,72 @@ class ProxyForwardManager {
     }
     this.forwards.clear();
     return count;
+  }
+
+  /**
+   * Mark every dynamic forward inactive without dropping its stable ID. This
+   * is called when the shared SSH control master is known to be dead.
+   */
+  disconnectAll() {
+    let count = 0;
+    for (const forward of this.forwards.values()) {
+      forward.generation += 1;
+      forward.active = false;
+      const child = forward.child;
+      forward.child = undefined;
+      if (child && !child.killed) child.kill('SIGTERM');
+      count += 1;
+    }
+    return count;
+  }
+
+  /** Recreate inactive forwarding children while preserving IDs and ports. */
+  restoreAll() {
+    let count = 0;
+    for (const forward of this.forwards.values()) {
+      if (forward.active) continue;
+      this.log(
+        `Restoring SSH proxy forward: local ${forward.localPort} -> remote ${forward.remotePort}`
+      );
+      this.startForward(forward);
+      count += 1;
+    }
+    return count;
+  }
+
+  startForward(forward) {
+    const generation = ++forward.generation;
+    const args = buildProxySshArgs({
+      target: this.sshTarget,
+      localPort: forward.localPort,
+      remotePort: forward.remotePort,
+      controlPersist: this.controlPersist,
+      controlPath: this.controlPath,
+    });
+    let child;
+    try {
+      child = this.spawnImpl('ssh', args, { stdio: this.quiet ? 'ignore' : 'inherit' });
+    } catch (error) {
+      forward.active = false;
+      forward.lastError = error?.message || String(error);
+      throw error;
+    }
+    forward.child = child;
+    forward.active = true;
+    delete forward.lastError;
+
+    const deactivate = (detail) => {
+      if (forward.generation !== generation || forward.child !== child) return;
+      forward.child = undefined;
+      forward.active = false;
+      if (!forward.expectedStop && detail) forward.lastError = detail;
+    };
+    child.once?.('error', (error) => {
+      deactivate(error?.message || 'SSH proxy forward failed');
+    });
+    child.once?.('exit', (code, signal) => {
+      deactivate(`SSH proxy forward exited: code=${code} signal=${signal}`);
+    });
   }
 
   assertNoPortConflict({ remotePort, localPort }) {

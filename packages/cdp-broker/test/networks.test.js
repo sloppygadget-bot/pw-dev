@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
 import { createNetworkManager } from '../src/networks.js';
+import { createProxyForwardManager } from '../src/proxy-forwards.js';
 
 test('creates ssh-peer networks through proxy forwards', async () => {
   const creates = [];
@@ -97,4 +99,37 @@ test('reports active ssh-peer probe results', async () => {
     statusCode: 407,
     target: 'proxy-check.invalid:80',
   });
+});
+
+test('ssh-peer networks keep stable resolved forwards across tunnel recovery', async () => {
+  const children = [];
+  const proxyForwardManager = createProxyForwardManager({
+    sshTarget: 'user@code-server',
+    controlPath: '/tmp/control-%C',
+    spawnImpl: () => {
+      const child = new EventEmitter();
+      child.killed = false;
+      child.kill = (signal) => {
+        child.killed = true;
+        child.emit('exit', null, signal);
+      };
+      children.push(child);
+      return child;
+    },
+    quiet: true,
+  });
+  const manager = createNetworkManager({ proxyForwardManager });
+  await manager.upsert({
+    id: 'recovering-network',
+    proxy: { mode: 'ssh-peer', remotePort: 8899, localPort: 18899 },
+  });
+  const before = manager.resolve('recovering-network');
+
+  proxyForwardManager.disconnectAll();
+  proxyForwardManager.restoreAll();
+  const after = manager.resolve('recovering-network');
+
+  assert.deepEqual(after, before);
+  assert.equal(proxyForwardManager.get(before.proxyForwardId).forwardId, before.proxyForwardId);
+  assert.equal(children.length, 2);
 });

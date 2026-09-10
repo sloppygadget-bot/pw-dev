@@ -1,4 +1,5 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import { isIP } from 'node:net';
@@ -14,6 +15,9 @@ import { validateProfileName } from './profiles.js';
 const DEFAULT_BROKER_PORT = 18080;
 const DEFAULT_PROFILE = 'default';
 const DEFAULT_SSH_CONTROL_PERSIST = '24h';
+const DEFAULT_SSH_HEALTH_CHECK_INTERVAL_MS = 5_000;
+const DEFAULT_SSH_RECONNECT_INITIAL_DELAY_MS = 1_000;
+const DEFAULT_SSH_RECONNECT_MAX_DELAY_MS = 30_000;
 const SHUTDOWN_GRACE_MS = 1_000;
 
 export async function main(argv) {
@@ -192,6 +196,8 @@ export async function main(argv) {
       controlPersist: sshControlPersist,
       controlPath: sshControlPath,
       proxyForward: sshProxyForward,
+      disconnectDynamicForwards: () => proxyForwardManager.disconnectAll(),
+      restoreDynamicForwards: () => proxyForwardManager.restoreAll(),
       quiet: Boolean(options.quiet),
     });
     children.add(ssh);
@@ -340,6 +346,8 @@ function startSshTunnel({
   controlPersist,
   controlPath,
   proxyForward,
+  disconnectDynamicForwards,
+  restoreDynamicForwards,
   quiet,
 }) {
   assertPort(remotePort, '--ssh-remote-port');
@@ -369,42 +377,190 @@ function startSshTunnel({
   if (result.status !== 0) {
     throw new Error(`ssh forward request exited with status ${result.status}`);
   }
-  return makeSshForwardHandle({
+  return createSshTunnelSupervisor({
     target,
     localPort,
     remotePort,
+    controlPersist,
     controlPath,
     proxyForward,
+    disconnectImpl: disconnectDynamicForwards,
+    reconcileImpl: restoreDynamicForwards,
     quiet,
   });
 }
 
-function makeSshForwardHandle({ target, localPort, remotePort, controlPath, proxyForward, quiet }) {
-  return {
-    killed: false,
-    on() {
-      return this;
-    },
-    kill() {
-      if (this.killed) return;
-      this.killed = true;
-      const result = spawnSync(
-        'ssh',
-        buildSshArgs({
-          target,
-          localPort,
-          remotePort,
-          controlPath,
-          proxyForward,
-          controlCommand: 'cancel',
-        }),
-        { stdio: quiet ? 'ignore' : 'inherit' }
-      );
-      if (result.error && !quiet) {
-        console.error(`ssh forward cancel failed: ${result.error.message}`);
-      }
-    },
+export function createSshTunnelSupervisor({
+  target,
+  localPort,
+  remotePort,
+  controlPersist,
+  controlPath,
+  proxyForward,
+  quiet = false,
+  healthCheckIntervalMs = DEFAULT_SSH_HEALTH_CHECK_INTERVAL_MS,
+  reconnectInitialDelayMs = DEFAULT_SSH_RECONNECT_INITIAL_DELAY_MS,
+  reconnectMaxDelayMs = DEFAULT_SSH_RECONNECT_MAX_DELAY_MS,
+  checkImpl,
+  reconnectImpl,
+  cancelImpl,
+  disconnectImpl = () => undefined,
+  reconcileImpl = () => undefined,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+}) {
+  const events = new EventEmitter();
+  let killed = false;
+  let checking = false;
+  let timer;
+  let reconnectAttempts = 0;
+  let reconnectPending = false;
+  const log = (...args) => {
+    if (!quiet) console.log(...args);
   };
+  const reportError = (error) => {
+    if (!quiet) console.error(error?.message || String(error));
+  };
+
+  const check = checkImpl ?? (async () => {
+    const result = await runSsh(buildSshControlCheckArgs({ target, controlPath }), { quiet: true });
+    return result.status === 0;
+  });
+  const reconnect = reconnectImpl ?? (async () => {
+    const currentMaster = await runSsh(
+      buildSshControlCheckArgs({ target, controlPath }),
+      { quiet: true }
+    );
+    if (currentMaster.status !== 0) {
+      removeStaleSshControlSocket({ target, controlPath, quiet });
+      const master = await runSsh(
+        buildSshControlMasterArgs({ target, controlPersist, controlPath, batchMode: true }),
+        { quiet }
+      );
+      if (master.status !== 0) {
+        throw new Error(`ssh control master exited with status ${master.status}`);
+      }
+    }
+    const forward = await runSsh(buildSshArgs({
+      target,
+      localPort,
+      remotePort,
+      controlPath,
+      proxyForward,
+      controlCommand: 'forward',
+    }), { quiet });
+    if (forward.status !== 0) {
+      throw new Error(`ssh forward request exited with status ${forward.status}`);
+    }
+  });
+  const cancel = cancelImpl ?? (() => spawnSync(
+    'ssh',
+    buildSshArgs({
+      target,
+      localPort,
+      remotePort,
+      controlPath,
+      proxyForward,
+      controlCommand: 'cancel',
+    }),
+    { stdio: quiet ? 'ignore' : 'inherit' }
+  ));
+  const cancelForward = () => {
+    const result = cancel();
+    if (result?.error && !quiet) {
+      console.error(`ssh forward cancel failed: ${result.error.message}`);
+    }
+  };
+
+  const schedule = (delayMs) => {
+    if (killed) return;
+    clearTimeoutImpl(timer);
+    timer = setTimeoutImpl(() => void checkNow(), delayMs);
+    timer?.unref?.();
+  };
+
+  const checkNow = async () => {
+    if (killed || checking) return;
+    checking = true;
+    try {
+      if (!reconnectPending) {
+        let healthy = false;
+        try {
+          healthy = await check();
+        } catch (error) {
+          reportError(`SSH tunnel health check failed: ${error?.message || error}`);
+        }
+        if (healthy) {
+          reconnectAttempts = 0;
+          try {
+            await reconcileImpl();
+          } catch (error) {
+            reportError(`SSH proxy forward reconciliation failed: ${error?.message || error}`);
+          }
+          schedule(healthCheckIntervalMs);
+          return;
+        }
+        reconnectPending = true;
+        try {
+          await disconnectImpl();
+        } catch (error) {
+          reportError(`SSH proxy forward disconnect cleanup failed: ${error?.message || error}`);
+        }
+      }
+
+      events.emit('reconnecting');
+      log(`SSH tunnel unavailable; reconnecting to ${target}`);
+      try {
+        await reconnect();
+        if (killed) {
+          // Shutdown may race the asynchronous reconnect. Cancel once more so
+          // a forward created after kill() cannot survive as a zombie.
+          cancelForward();
+          return;
+        }
+        reconnectPending = false;
+        reconnectAttempts = 0;
+        await reconcileImpl();
+        log(`SSH tunnel reconnected: ${target} remote ${remotePort} -> local ${localPort}`);
+        events.emit('ready');
+        schedule(healthCheckIntervalMs);
+      } catch (error) {
+        if (killed) return;
+        reconnectAttempts += 1;
+        const delayMs = Math.min(
+          reconnectInitialDelayMs * (2 ** (reconnectAttempts - 1)),
+          reconnectMaxDelayMs
+        );
+        reportError(`SSH tunnel reconnect failed; retrying in ${delayMs}ms: ${error?.message || error}`);
+        events.emit('retry', error);
+        schedule(delayMs);
+      }
+    } finally {
+      checking = false;
+    }
+  };
+
+  events.checkNow = checkNow;
+  events.kill = () => {
+    if (killed) return;
+    killed = true;
+    clearTimeoutImpl(timer);
+    cancelForward();
+    events.emit('exit', null, 'SIGTERM');
+  };
+  Object.defineProperty(events, 'killed', { enumerable: true, get: () => killed });
+  schedule(healthCheckIntervalMs);
+  return events;
+}
+
+function runSsh(args, { quiet }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('ssh', args, {
+      stdio: quiet ? 'ignore' : ['ignore', 'inherit', 'inherit'],
+    });
+    child.once('error', reject);
+    child.once('exit', (status, signal) => resolve({ status, signal }));
+  });
 }
 
 function ensureSshControlMaster({ target, controlPersist, controlPath, quiet }) {
@@ -533,7 +689,7 @@ export function buildSshConfigArgs({ target, controlPath }) {
   return ['-G', '-o', `ControlPath=${controlPath}`, target];
 }
 
-export function buildSshControlMasterArgs({ target, controlPersist, controlPath }) {
+export function buildSshControlMasterArgs({ target, controlPersist, controlPath, batchMode = false }) {
   return [
     '-o',
     'ControlMaster=yes',
@@ -541,6 +697,13 @@ export function buildSshControlMasterArgs({ target, controlPersist, controlPath 
     `ControlPersist=${controlPersist}`,
     '-o',
     `ControlPath=${controlPath}`,
+    ...(batchMode ? ['-o', 'BatchMode=yes'] : []),
+    '-o',
+    'ConnectTimeout=10',
+    '-o',
+    'ServerAliveInterval=15',
+    '-o',
+    'ServerAliveCountMax=2',
     '-N',
     '-f',
     target,

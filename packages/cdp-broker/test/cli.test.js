@@ -7,6 +7,7 @@ import {
   buildSshControlMasterArgs,
   buildSshConfigArgs,
   buildSshRemoteMachineArgs,
+  createSshTunnelSupervisor,
   parseSshRemoteMachine,
   parseSshConfigValue,
   parseArgs,
@@ -145,11 +146,152 @@ test('builds detached SSH control master args', () => {
       'ControlPersist=12h',
       '-o',
       'ControlPath=/tmp/control-%C',
+      '-o',
+      'ConnectTimeout=10',
+      '-o',
+      'ServerAliveInterval=15',
+      '-o',
+      'ServerAliveCountMax=2',
       '-N',
       '-f',
       'user@code-server',
     ]
   );
+
+  const unattended = buildSshControlMasterArgs({
+    target: 'user@code-server',
+    controlPersist: '12h',
+    controlPath: '/tmp/control-%C',
+    batchMode: true,
+  });
+  assert.deepEqual(unattended.slice(6, 8), ['-o', 'BatchMode=yes']);
+});
+
+test('reconnects an inward SSH tunnel after its control master dies', async () => {
+  const scheduled = [];
+  const events = [];
+  let reconnects = 0;
+  let disconnects = 0;
+  let reconciliations = 0;
+  const supervisor = createSshTunnelSupervisor({
+    target: 'user@code-server',
+    localPort: 18080,
+    remotePort: 18080,
+    controlPersist: '24h',
+    controlPath: '/tmp/control-%C',
+    quiet: true,
+    healthCheckIntervalMs: 50,
+    checkImpl: async () => false,
+    reconnectImpl: async () => { reconnects += 1; },
+    disconnectImpl: () => { disconnects += 1; },
+    reconcileImpl: () => { reconciliations += 1; },
+    cancelImpl: () => ({ status: 0 }),
+    setTimeoutImpl: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return { unref() {} };
+    },
+    clearTimeoutImpl() {},
+  });
+  supervisor.on('reconnecting', () => events.push('reconnecting'));
+  supervisor.on('ready', () => events.push('ready'));
+
+  assert.equal(scheduled.shift().delayMs, 50);
+  await supervisor.checkNow();
+
+  assert.equal(reconnects, 1);
+  assert.equal(disconnects, 1);
+  assert.equal(reconciliations, 1);
+  assert.deepEqual(events, ['reconnecting', 'ready']);
+  assert.equal(scheduled.at(-1).delayMs, 50);
+  supervisor.kill();
+});
+
+test('reconciles inactive dynamic forwards while the SSH master stays healthy', async () => {
+  let reconciliations = 0;
+  const supervisor = createSshTunnelSupervisor({
+    target: 'user@code-server',
+    localPort: 18080,
+    remotePort: 18080,
+    controlPersist: '24h',
+    controlPath: '/tmp/control-%C',
+    quiet: true,
+    checkImpl: async () => true,
+    reconcileImpl: () => { reconciliations += 1; },
+    cancelImpl: () => ({ status: 0 }),
+    setTimeoutImpl: () => ({ unref() {} }),
+    clearTimeoutImpl() {},
+  });
+
+  await supervisor.checkNow();
+
+  assert.equal(reconciliations, 1);
+  supervisor.kill();
+});
+
+test('backs off failed inward SSH reconnects and recovers on a later check', async () => {
+  const scheduled = [];
+  let checks = 0;
+  let reconnects = 0;
+  const supervisor = createSshTunnelSupervisor({
+    target: 'user@code-server',
+    localPort: 18080,
+    remotePort: 18080,
+    controlPersist: '24h',
+    controlPath: '/tmp/control-%C',
+    quiet: true,
+    reconnectInitialDelayMs: 10,
+    reconnectMaxDelayMs: 20,
+    checkImpl: async () => {
+      checks += 1;
+      return checks > 1;
+    },
+    reconnectImpl: async () => {
+      reconnects += 1;
+      if (reconnects < 3) throw new Error('network unavailable');
+    },
+    cancelImpl: () => ({ status: 0 }),
+    setTimeoutImpl: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return { unref() {} };
+    },
+    clearTimeoutImpl() {},
+  });
+
+  await supervisor.checkNow();
+  assert.equal(scheduled.at(-1).delayMs, 10);
+  await supervisor.checkNow();
+  assert.equal(scheduled.at(-1).delayMs, 20);
+  await supervisor.checkNow();
+  assert.equal(scheduled.at(-1).delayMs, 5_000);
+  assert.equal(checks, 1);
+  assert.equal(reconnects, 3);
+  supervisor.kill();
+});
+
+test('cancels a forward restored concurrently with broker shutdown', async () => {
+  let finishReconnect;
+  let cancels = 0;
+  const supervisor = createSshTunnelSupervisor({
+    target: 'user@code-server',
+    localPort: 18080,
+    remotePort: 18080,
+    controlPersist: '24h',
+    controlPath: '/tmp/control-%C',
+    quiet: true,
+    checkImpl: async () => false,
+    reconnectImpl: () => new Promise((resolve) => { finishReconnect = resolve; }),
+    cancelImpl: () => { cancels += 1; return { status: 0 }; },
+    setTimeoutImpl: () => ({ unref() {} }),
+    clearTimeoutImpl() {},
+  });
+
+  const checking = supervisor.checkNow();
+  await new Promise((resolve) => setImmediate(resolve));
+  supervisor.kill();
+  finishReconnect();
+  await checking;
+
+  assert.equal(cancels, 2);
 });
 
 test('builds SSH config inspection args', () => {

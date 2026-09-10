@@ -77,6 +77,14 @@ For an SSH-backed broker, run the broker entrypoint directly:
 node packages/cdp-broker/bin/pw-cdp-broker.js --standby --ssh user@target-server
 ```
 
+The broker supervises this inward SSH reverse tunnel. SSH keepalives detect a
+half-open connection, and the broker recreates the control master and reapplies
+the broker tunnel plus active dynamic proxy forwards with bounded backoff after
+network recovery. Forward IDs and local proxy URLs remain stable, so the broker
+process, its Chrome sessions, the server, and the GUI recover without restart.
+Unattended recovery requires key- or agent-based SSH authentication; passwords
+are never retained for reconnect attempts.
+
 Connect from Playwright:
 
 ```js

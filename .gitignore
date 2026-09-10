@@ -5,3 +5,5 @@ coverage/
 .pw-dev/
 packages/proxy/.runtime/
 .agent/tasks/
+.playwright-cli/
+.playwright/

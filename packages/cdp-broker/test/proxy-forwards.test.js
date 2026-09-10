@@ -167,6 +167,32 @@ test('deletes unused proxy forward', async () => {
   assert.deepEqual(manager.list(), []);
 });
 
+test('preserves and restores dynamic forwards after the shared SSH master dies', async () => {
+  const children = [];
+  const manager = createProxyForwardManager({
+    sshTarget: 'user@code-server',
+    controlPersist: '24h',
+    controlPath: '/tmp/control-%C',
+    spawnImpl: () => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    },
+    quiet: true,
+  });
+  const first = await manager.create({ name: 'network-a', remotePort: 8899, localPort: 18899 });
+  const second = await manager.create({ name: 'network-b', remotePort: 8900, localPort: 18900 });
+
+  children[0].emit('exit', 255, null);
+  assert.deepEqual(manager.list().map((forward) => forward.forwardId), [first.forwardId, second.forwardId]);
+
+  assert.equal(manager.disconnectAll(), 2);
+  assert.equal(manager.restoreAll(), 2);
+  assert.equal(children.length, 4);
+  assert.deepEqual(manager.list(), [first, second]);
+  assert.equal(children[1].killed, true);
+});
+
 test('probes the forwarded HTTP proxy', async () => {
   const probeServer = http.createServer();
   probeServer.on('connect', (req, socket) => {
