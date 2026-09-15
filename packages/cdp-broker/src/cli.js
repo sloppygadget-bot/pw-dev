@@ -339,7 +339,7 @@ function prepareSshControlPath() {
   return path.join(controlDir, '%C');
 }
 
-function startSshTunnel({
+export function startSshTunnel({
   target,
   localPort,
   remotePort,
@@ -349,6 +349,8 @@ function startSshTunnel({
   disconnectDynamicForwards,
   restoreDynamicForwards,
   quiet,
+  spawnSyncImpl = spawnSync,
+  supervisorImpl = createSshTunnelSupervisor,
 }) {
   assertPort(remotePort, '--ssh-remote-port');
   const log = (...args) => {
@@ -370,14 +372,14 @@ function startSshTunnel({
     );
   }
   log(`SSH ControlPersist: ${controlPersist}`);
-  const result = spawnSync('ssh', args, { stdio: 'inherit' });
+  const result = spawnSyncImpl('ssh', args, { stdio: quiet ? 'ignore' : 'inherit' });
   if (result.error) {
     throw result.error;
   }
   if (result.status !== 0) {
-    throw new Error(`ssh forward request exited with status ${result.status}`);
+    log(`SSH forward request exited with status ${result.status}; retrying in background`);
   }
-  return createSshTunnelSupervisor({
+  return supervisorImpl({
     target,
     localPort,
     remotePort,
@@ -387,6 +389,7 @@ function startSshTunnel({
     disconnectImpl: disconnectDynamicForwards,
     reconcileImpl: restoreDynamicForwards,
     quiet,
+    initiallyConnected: result.status === 0,
   });
 }
 
@@ -398,6 +401,7 @@ export function createSshTunnelSupervisor({
   controlPath,
   proxyForward,
   quiet = false,
+  initiallyConnected = true,
   healthCheckIntervalMs = DEFAULT_SSH_HEALTH_CHECK_INTERVAL_MS,
   reconnectInitialDelayMs = DEFAULT_SSH_RECONNECT_INITIAL_DELAY_MS,
   reconnectMaxDelayMs = DEFAULT_SSH_RECONNECT_MAX_DELAY_MS,
@@ -414,7 +418,10 @@ export function createSshTunnelSupervisor({
   let checking = false;
   let timer;
   let reconnectAttempts = 0;
-  let reconnectPending = false;
+  // A live control socket does not imply that our reverse forward exists.
+  // In particular, startup can fail while an old remote listener still owns
+  // the port after a network reset. Keep retrying until forwarding succeeds.
+  let reconnectPending = !initiallyConnected;
   const log = (...args) => {
     if (!quiet) console.log(...args);
   };
@@ -549,7 +556,7 @@ export function createSshTunnelSupervisor({
     events.emit('exit', null, 'SIGTERM');
   };
   Object.defineProperty(events, 'killed', { enumerable: true, get: () => killed });
-  schedule(healthCheckIntervalMs);
+  schedule(initiallyConnected ? healthCheckIntervalMs : reconnectInitialDelayMs);
   return events;
 }
 

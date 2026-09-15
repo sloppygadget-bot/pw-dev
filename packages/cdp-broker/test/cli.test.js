@@ -12,6 +12,7 @@ import {
   parseSshConfigValue,
   parseArgs,
   resolveSshControlPath,
+  startSshTunnel,
 } from '../src/cli.js';
 
 test('parses proxy and SSL options', () => {
@@ -165,6 +166,51 @@ test('builds detached SSH control master args', () => {
     batchMode: true,
   });
   assert.deepEqual(unattended.slice(6, 8), ['-o', 'BatchMode=yes']);
+});
+
+test('retries a refused initial reverse forward even when the master is healthy', async () => {
+  const scheduled = [];
+  let checks = 0;
+  let attempts = 0;
+  let reconciliations = 0;
+  let cancels = 0;
+  const supervisor = startSshTunnel({
+    target: 'user@code-server',
+    localPort: 18080,
+    remotePort: 18080,
+    controlPersist: '24h',
+    controlPath: '/tmp/control-%C',
+    quiet: true,
+    spawnSyncImpl: (command, args) => {
+      assert.equal(command, 'ssh');
+      assert.ok(args.includes('forward'));
+      return { status: 255 };
+    },
+    restoreDynamicForwards: () => { reconciliations += 1; },
+    supervisorImpl: (options) => createSshTunnelSupervisor({
+      ...options,
+      checkImpl: async () => { checks += 1; return true; },
+      reconnectImpl: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('remote port still occupied');
+      },
+      cancelImpl: () => { cancels += 1; return { status: 0 }; },
+      setTimeoutImpl: (callback, delay) => { scheduled.push(delay); return { unref() {} }; },
+      clearTimeoutImpl() {},
+    }),
+  });
+  assert.equal(scheduled[0], 1000);
+  await supervisor.checkNow();
+  assert.equal(reconciliations, 0);
+  await supervisor.checkNow();
+  assert.equal(checks, 0);
+  assert.equal(attempts, 2);
+  assert.equal(reconciliations, 1);
+  assert.equal(scheduled.at(-1), 5000);
+  await supervisor.checkNow();
+  assert.equal(checks, 1);
+  supervisor.kill();
+  assert.equal(cancels, 1);
 });
 
 test('reconnects an inward SSH tunnel after its control master dies', async () => {
