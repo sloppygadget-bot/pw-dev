@@ -1203,6 +1203,7 @@ export function createProxyRegistry(initialProxies = [], options = {}) {
         ...proxy,
         updatedAt: new Date().toISOString(),
       };
+      if (saved.running === false) delete saved.pid;
       if (!existing?.createdAt) saved.createdAt = saved.updatedAt;
       proxies.set(saved.id, saved);
       persist();

@@ -6,6 +6,9 @@ import path from 'node:path';
 import { buildChromeArgs, getFreePort, waitForChrome } from './chrome.js';
 import { profileDirForName, validateProfileName } from './profiles.js';
 
+const CHROME_STOP_GRACE_MS = 5_000;
+const CHROME_KILL_GRACE_MS = 1_000;
+
 export function createBrowserManager(options) {
   return new BrowserManager(options);
 }
@@ -145,9 +148,7 @@ class BrowserManager {
     }
 
     instance.expectedStop = true;
-    if (!instance.child.killed) {
-      instance.child.kill('SIGTERM');
-    }
+    await terminateChromeChild(instance.child);
     this.instances.delete(instance.id);
     return { stopped: true, instanceId: instance.id };
   }
@@ -156,9 +157,7 @@ class BrowserManager {
     const instances = [...this.instances.values()];
     for (const instance of instances) {
       instance.expectedStop = true;
-      if (!instance.child.killed) {
-        instance.child.kill('SIGTERM');
-      }
+      await terminateChromeChild(instance.child);
       this.instances.delete(instance.id);
     }
     return instances.length;
@@ -235,6 +234,37 @@ class BrowserManager {
       }
     }
   }
+}
+
+async function terminateChromeChild(child) {
+  if (child.exitCode !== undefined && child.exitCode !== null) return;
+  if (child.signalCode) return;
+  if (await signalAndWaitForExit(child, 'SIGTERM', CHROME_STOP_GRACE_MS)) return;
+  if (await signalAndWaitForExit(child, 'SIGKILL', CHROME_KILL_GRACE_MS)) return;
+  throw new Error('Chrome did not exit after SIGTERM and SIGKILL');
+}
+
+function signalAndWaitForExit(child, signal, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off?.('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+    try {
+      child.kill(signal);
+    } catch (error) {
+      clearTimeout(timer);
+      child.off?.('exit', onExit);
+      reject(error);
+    }
+  });
 }
 
 function describeInstance(instance) {

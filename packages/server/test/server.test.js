@@ -861,7 +861,7 @@ test('browsers reserve durable managed proxies from a reusable pool', async () =
     { id: 'traffic-a', kind: 'whistle', proxyUrl: 'http://127.0.0.1:8888', guiUrl: 'http://127.0.0.1:9800', managed: true, running: false },
     { id: 'traffic-b', kind: 'whistle', proxyUrl: 'http://127.0.0.1:8889', guiUrl: 'http://127.0.0.1:9801', managed: true, running: false },
   ];
-  const manager = await startMockProxyManager({ proxies: proxyRecords });
+  const manager = await startMockProxyManager({ proxies: proxyRecords, pidOnStart: 4101 });
   const server = await startPwDevServer({
     root,
     port: 0,
@@ -918,6 +918,9 @@ test('browsers reserve durable managed proxies from a reusable pool', async () =
     assert.equal(stopped.statusCode, 200);
     assert.equal(stopped.body.browser.proxyId, 'traffic-a');
     assert.equal(stopped.body.proxyStop.proxy.running, false);
+    assert.equal(stopped.body.browser.components.proxy.pid, undefined);
+    const stoppedProxy = await getJson(`${server.origin}/_pwdev/proxies/traffic-a`);
+    assert.equal(stoppedProxy.body.proxy.pid, undefined);
 
     const stillReserved = await postJson(`${server.origin}/_pwdev/browsers/task-c/start`, {});
     assert.equal(stillReserved.statusCode, 409);
@@ -2340,6 +2343,7 @@ function startMockProxyManager(options = {}) {
         return;
       }
       proxy.running = true;
+      if (options.pidOnStart) proxy.pid = options.pidOnStart;
       writeTestJson(res, 200, { ok: true, proxy, alreadyRunning: true });
       return;
     }

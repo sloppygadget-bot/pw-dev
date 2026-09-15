@@ -6,6 +6,13 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const MAX_PATH_LENGTH = 80;
 const ALLOWED_ACTIONS = new Set(['click', 'focus', 'highlight', 'scrollIntoView']);
+const POINTER_ACTION_TYPES = new Set(['move', 'down', 'up', 'wheel']);
+const POINTER_BUTTONS = new Set(['left', 'middle', 'right']);
+const KEYBOARD_ACTION_TYPES = new Set(['down', 'up', 'insertText']);
+const NAVIGATION_ACTION_TYPES = new Set(['back', 'forward', 'reload']);
+const MIN_VIEWPORT_WIDTH = 1_920;
+const MIN_VIEWPORT_HEIGHT = 1_080;
+const MONITOR_NAVIGATION_OPTIONS = { waitUntil: 'commit', timeout: 10_000 };
 const NAVIGATION_RETRY_DELAY_MS = 25;
 const MAX_NAVIGATION_RETRIES = 3;
 const PREVIEW_TIMEOUT_MS = 2_000;
@@ -22,10 +29,35 @@ export class BrowserMonitorHub {
     this.pwDevUrl = pwDevUrl;
     this.connectOverCDP = connectOverCDP;
     this.fetchJson = fetchJsonImpl;
+    /** @type {Set<string>} */
+    this.guiOrigins = new Set();
+    this.dialogPages = new WeakSet();
     /** @type {Map<string, MonitorConnection>} */
     this.connections = new Map();
     /** @type {Map<string, Promise<Buffer>>} */
     this.previewPromises = new Map();
+    /** @type {Map<string, Promise<void>>} */
+    this.actionPromises = new Map();
+  }
+
+  addGuiOrigin(origin) {
+    try {
+      this.guiOrigins.add(new URL(origin).origin);
+    } catch {
+      // Ignore malformed request-host aliases; the bound origin is registered separately.
+    }
+  }
+
+  isGuiPage(page) {
+    try {
+      return this.guiOrigins.has(new URL(page.url).origin);
+    } catch {
+      return false;
+    }
+  }
+
+  async monitorablePages(browser) {
+    return (await this.describePages(browser)).filter((entry) => !this.isGuiPage(entry));
   }
 
   async stream(browserId, pageId, req, res) {
@@ -35,6 +67,7 @@ export class BrowserMonitorHub {
     // the browser navigated elsewhere. Refresh before sending the cached page
     // metadata so a newly opened tab never starts with stale dimensions.
     await this.refresh(connection);
+    const initialPages = await this.refreshPageInventory(connection);
     res.writeHead(200, {
       'cache-control': 'no-store',
       'connection': 'keep-alive',
@@ -42,7 +75,6 @@ export class BrowserMonitorHub {
       'x-accel-buffering': 'no',
     });
     connection.subscribers.add(res);
-    const initialPages = await this.refreshPageInventory(connection);
     this.writeEvent(res, { type: 'connected', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages: initialPages });
     this.writeEvent(res, connection.lastPageState ?? { type: 'state', status: 'connecting', browserId });
     const keepAlive = setInterval(() => {
@@ -51,7 +83,7 @@ export class BrowserMonitorHub {
     const pageInventory = setInterval(() => {
       void this.refreshPageInventory(connection)
         .then((pages) => {
-          if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'pages', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages });
+          if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'pages', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages, pageState: connection.lastPageState });
         })
         .catch((error) => {
           if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'error', error: error?.message ?? String(error) });
@@ -62,44 +94,87 @@ export class BrowserMonitorHub {
       cleaned = true;
       clearInterval(keepAlive);
       clearInterval(pageInventory);
+      req.off('close', cleanup);
+      res.off('close', cleanup);
+      res.off('finish', cleanup);
       connection.subscribers.delete(res);
       if (connection.subscribers.size === 0) void this.closeConnection(connection);
     };
     let cleaned = false;
     req.once('close', cleanup);
     res.once('close', cleanup);
+    res.once('finish', cleanup);
   }
 
-  async action(browserId, pageId, payload) {
+  action(browserId, pageId, payload) {
+    const key = browserId;
+    return enqueueMonitorActionRequest(this.actionPromises, key, () => this.performAction(browserId, pageId, payload));
+  }
+
+  async performAction(browserId, pageId, payload) {
     const connection = await this.ensureConnection(browserId, pageId);
     const action = payload?.action;
+    if (action === 'pointer') {
+      const input = validatePointerAction(
+        payload,
+        connection.page.viewportSize?.() ?? connection.lastPageState?.viewport
+      );
+      return enqueueMonitorAction(connection, async () => {
+        await connection.page.mouse.move(input.x, input.y);
+        if (input.type === 'down') await connection.page.mouse.down({ button: input.button });
+        else if (input.type === 'up') await connection.page.mouse.up({ button: input.button });
+        else if (input.type === 'wheel') await connection.page.mouse.wheel(input.deltaX, input.deltaY);
+        return { ok: true, action, type: input.type };
+      });
+    }
+    if (action === 'keyboard') {
+      const input = validateKeyboardAction(payload);
+      return enqueueMonitorAction(connection, async () => {
+        if (input.type === 'down') await connection.page.keyboard.down(input.key);
+        else if (input.type === 'up') await connection.page.keyboard.up(input.key);
+        else await connection.page.keyboard.insertText(input.text);
+        return { ok: true, action, type: input.type };
+      });
+    }
+    if (action === 'navigation') {
+      const type = validateNavigationAction(payload);
+      return enqueueMonitorAction(connection, async () => {
+        let response;
+        if (type === 'back') response = await connection.page.goBack(MONITOR_NAVIGATION_OPTIONS);
+        else if (type === 'forward') response = await connection.page.goForward(MONITOR_NAVIGATION_OPTIONS);
+        else response = await connection.page.reload(MONITOR_NAVIGATION_OPTIONS);
+        return { ok: true, action, type, navigated: response !== null };
+      });
+    }
     if (!ALLOWED_ACTIONS.has(action)) throw httpError(400, `Unsupported monitor action: ${action}`);
     const path = validateNodePath(payload?.path);
     if (action === 'scrollIntoView' && payload?.behavior !== undefined && !['auto', 'smooth'].includes(payload.behavior)) {
       throw httpError(400, 'behavior must be auto or smooth');
     }
-    const result = await connection.page.evaluate(({ action: requestedAction, path: nodePath, behavior }) => {
-      let node = document.documentElement;
-      for (const index of nodePath) {
-        if (!node?.childNodes?.[index]) throw new Error('DOM path no longer exists');
-        node = node.childNodes[index];
-      }
-      if (!(node instanceof Element)) throw new Error('DOM path does not point to an element');
-      if (requestedAction === 'click') node.click();
-      else if (requestedAction === 'focus') node.focus();
-      else if (requestedAction === 'scrollIntoView') node.scrollIntoView({ behavior: behavior ?? 'smooth', block: 'center', inline: 'center' });
-      else {
-        node.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-        const previous = node.getAttribute('data-pwdev-monitor-highlight');
-        node.setAttribute('data-pwdev-monitor-highlight', 'true');
-        setTimeout(() => {
-          if (previous === null) node.removeAttribute('data-pwdev-monitor-highlight');
-          else node.setAttribute('data-pwdev-monitor-highlight', previous);
-        }, 1500);
-      }
-      return { tagName: node.tagName, text: (node.textContent ?? '').trim().slice(0, 240) };
-    }, { action, path, behavior: payload?.behavior });
-    return { ok: true, action, path, result };
+    return enqueueMonitorAction(connection, async () => {
+      const result = await connection.page.evaluate(({ action: requestedAction, path: nodePath, behavior }) => {
+        let node = document.documentElement;
+        for (const index of nodePath) {
+          if (!node?.childNodes?.[index]) throw new Error('DOM path no longer exists');
+          node = node.childNodes[index];
+        }
+        if (!(node instanceof Element)) throw new Error('DOM path does not point to an element');
+        if (requestedAction === 'click') node.click();
+        else if (requestedAction === 'focus') node.focus();
+        else if (requestedAction === 'scrollIntoView') node.scrollIntoView({ behavior: behavior ?? 'smooth', block: 'center', inline: 'center' });
+        else {
+          node.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+          const previous = node.getAttribute('data-pwdev-monitor-highlight');
+          node.setAttribute('data-pwdev-monitor-highlight', 'true');
+          setTimeout(() => {
+            if (previous === null) node.removeAttribute('data-pwdev-monitor-highlight');
+            else node.setAttribute('data-pwdev-monitor-highlight', previous);
+          }, 1500);
+        }
+        return { tagName: node.tagName, text: (node.textContent ?? '').trim().slice(0, 240) };
+      }, { action, path, behavior: payload?.behavior });
+      return { ok: true, action, path, result };
+    });
   }
 
   preview(browserId, pageId) {
@@ -118,6 +193,7 @@ export class BrowserMonitorHub {
   async capturePreview(browserId, pageId) {
     const connection = await this.ensureConnection(browserId, pageId);
     if (connection.page.isClosed()) throw httpError(409, 'Browser session has no page to monitor');
+    await ensureMinimumViewport(connection.page);
     return connection.page.screenshot({
       type: 'jpeg',
       quality: 60,
@@ -130,16 +206,8 @@ export class BrowserMonitorHub {
     const connections = [...new Set(this.connections.values())];
     this.connections.clear();
     this.previewPromises.clear();
-    await Promise.all(connections.map(async (connection) => {
-      for (const subscriber of connection.subscribers) subscriber.end();
-      connection.subscribers.clear();
-      if (connection.idleTimer) clearTimeout(connection.idleTimer);
-      try {
-        await connection.browser.close();
-      } catch {
-        // The browser session may already have disconnected or stopped.
-      }
-    }));
+    this.actionPromises.clear();
+    await Promise.all(connections.map((connection) => this.closeConnection(connection)));
   }
 
   async ensureConnection(browserId, pageId) {
@@ -147,6 +215,7 @@ export class BrowserMonitorHub {
     const existing = this.connections.get(key);
     if (existing?.browser.isConnected()) {
       if (existing.idleTimer) clearTimeout(existing.idleTimer);
+      if (this.guiOrigins.size) await this.selectMonitorablePage(existing);
       return existing;
     }
     if (existing) this.connections.delete(key);
@@ -168,13 +237,18 @@ export class BrowserMonitorHub {
       }
     }
     const browser = await connectOverCDP(session.cdpUrl);
-    const pages = await this.describePages(browser);
+    for (const context of browser.contexts()) {
+      context.on('page', (page) => this.observeDialog(page));
+      for (const page of context.pages()) this.observeDialog(page);
+    }
+    const pages = await this.monitorablePages(browser);
     const selected = pageId ? pages.find((entry) => entry.id === pageId) : pages[0];
     const page = selected?.page;
     if (!page) {
       await browser.close();
-      throw httpError(409, 'Browser session has no page to monitor');
+      throw httpError(409, 'Browser session has no monitorable page');
     }
+    await ensureMinimumViewport(page);
     const connection = {
       browserId,
       sessionId: session.sessionId,
@@ -184,16 +258,17 @@ export class BrowserMonitorHub {
       subscribers: new Set(),
       observedPages: new WeakSet(),
       lastPageState: undefined,
+      actionQueue: Promise.resolve(),
       bindingName: `__pwdevMonitor_${browserId.replace(/[^A-Za-z0-9_$]/g, '_')}_${Date.now()}`,
     };
     this.connections.set(key, connection);
     if (!pageId) this.connections.set(monitorKey(browserId, selected.id), connection);
     browser.on('disconnected', () => {
       if (![...this.connections.values()].includes(connection)) return;
-      this.forgetConnection(connection);
       this.broadcast(connection, { type: 'disconnected', browserId, reason: 'browser disconnected' });
+      void this.closeConnection(connection);
     });
-    this.observePage(connection, page);
+    for (const entry of pages) this.observePage(connection, entry.page);
     await this.refresh(connection);
     return connection;
   }
@@ -214,6 +289,7 @@ export class BrowserMonitorHub {
     while (connection.refreshRequested && this.isConnectionActive(connection)) {
       connection.refreshRequested = false;
       try {
+        if (this.guiOrigins.size) await this.selectMonitorablePage(connection);
         const pageState = await this.attachPageObserver(connection);
         connection.lastPageState = { type: 'page', browserId: connection.browserId, ...pageState };
         this.broadcast(connection, connection.lastPageState);
@@ -252,33 +328,61 @@ export class BrowserMonitorHub {
   async describeSessionPages(connection) {
     if (connection.sessionId) {
       const result = await this.fetchJson(`${this.pwDevUrl}/_pwdev/sessions/${encodeURIComponent(connection.sessionId)}/pages`);
-      if (result.ok && Array.isArray(result.body?.pages)) return result.body.pages;
+      if (result.ok && Array.isArray(result.body?.pages)) return result.body.pages.filter((page) => !this.isGuiPage(page));
     }
-    return (await this.describePages(connection.browser)).map(({ page, ...description }) => description);
+    return (await this.monitorablePages(connection.browser)).map(({ page, ...description }) => description);
   }
 
   async refreshPageInventory(connection) {
-    const localPages = await this.describePages(connection.browser);
+    const previousPage = connection.page;
+    const localPages = await this.selectMonitorablePage(connection);
+    if (connection.page !== previousPage) await this.refresh(connection);
+    const remotePages = await this.describeSessionPages(connection);
+    const remoteById = new Map(remotePages.map((page) => [page.id, page]));
+    return localPages.map(({ page, ...description }) => ({ ...description, ...remoteById.get(description.id) }));
+  }
+
+  async selectMonitorablePage(connection) {
+    const localPages = await this.monitorablePages(connection.browser);
+    for (const entry of localPages) this.observePage(connection, entry.page);
     let selected = localPages.find((entry) => entry.id === connection.pageId);
-    if (!selected && localPages.length) {
+    if (!selected) {
       selected = localPages[0];
+      if (!selected) {
+        connection.lastPageState = undefined;
+        this.broadcast(connection, { type: 'no-target', browserId: connection.browserId, pageId: null, pages: [] });
+        await this.closeConnection(connection);
+        throw httpError(409, 'Browser session has no monitorable page');
+      }
       const oldPageKey = monitorKey(connection.browserId, connection.pageId);
       connection.page = selected.page;
       connection.pageId = selected.id;
       if (this.connections.get(oldPageKey) === connection) this.connections.delete(oldPageKey);
       const nextPageKey = monitorKey(connection.browserId, selected.id);
       if (!this.connections.has(nextPageKey)) this.connections.set(nextPageKey, connection);
+      await ensureMinimumViewport(connection.page);
       this.observePage(connection, selected.page);
-      await this.refresh(connection);
     }
-    const remotePages = await this.describeSessionPages(connection);
-    const remoteById = new Map(remotePages.map((page) => [page.id, page]));
-    return localPages.map(({ page, ...description }) => ({ ...description, ...remoteById.get(description.id) }));
+    return localPages;
+  }
+
+  observeDialog(page) {
+    if (this.dialogPages.has(page)) return;
+    this.dialogPages.add(page);
+    page.on('dialog', (dialog) => {
+      // Owning GUI dialogs without handling them suppresses Playwright's default
+      // auto-dismissal, leaving the operator in charge even after navigation.
+      if (this.isGuiPage({ url: page.url() })) return;
+      void dialog.dismiss().catch(() => {
+        // Another CDP client may have handled the browser-wide dialog first.
+      });
+    });
   }
 
   observePage(connection, page) {
     if (connection.observedPages.has(page)) return;
     connection.observedPages.add(page);
+    this.observeDialog(page);
     // Navigation events can arrive while a previous evaluate is still in
     // flight. Route each event through one serialized, non-throwing refresh
     // so an execution-context race cannot become an unhandled rejection.
@@ -302,6 +406,8 @@ export class BrowserMonitorHub {
     connection.closing = true;
     if (connection.idleTimer) clearTimeout(connection.idleTimer);
     this.forgetConnection(connection);
+    for (const subscriber of connection.subscribers) subscriber.end();
+    connection.subscribers.clear();
     try {
       await connection.browser.close();
     } catch {
@@ -365,6 +471,10 @@ export class BrowserMonitorHub {
 
   handlePageEvent(connection, event) {
     if (!event || typeof event !== 'object') return;
+    if (connection.lastPageState) {
+      if (event.viewport) connection.lastPageState.viewport = event.viewport;
+      if (event.scroll) connection.lastPageState.scroll = event.scroll;
+    }
     this.broadcast(connection, { ...event, browserId: connection.browserId });
   }
 
@@ -383,11 +493,85 @@ export class BrowserMonitorHub {
   }
 }
 
+function validateNavigationAction(payload) {
+  if (!NAVIGATION_ACTION_TYPES.has(payload?.type)) {
+    throw httpError(400, 'navigation type must be back, forward, or reload');
+  }
+  return payload.type;
+}
+
 function validateNodePath(rawPath) {
   if (!Array.isArray(rawPath) || rawPath.length > MAX_PATH_LENGTH || rawPath.some((value) => !Number.isInteger(value) || value < 0 || value > 100000)) {
     throw httpError(400, 'path must be an array of DOM child indexes');
   }
   return rawPath;
+}
+
+function validatePointerAction(payload, viewport) {
+  const type = payload?.type;
+  if (!POINTER_ACTION_TYPES.has(type)) throw httpError(400, 'pointer type must be move, down, up, or wheel');
+  const x = finiteNumber(payload?.x, 'x');
+  const y = finiteNumber(payload?.y, 'y');
+  if (x < 0 || y < 0) throw httpError(400, 'pointer coordinates must be non-negative');
+  if (viewport && (x >= viewport.width || y >= viewport.height)) {
+    throw httpError(400, 'pointer coordinates must be within the target viewport');
+  }
+  const button = payload?.button ?? 'left';
+  if (!POINTER_BUTTONS.has(button)) throw httpError(400, 'button must be left, middle, or right');
+  return {
+    type,
+    x,
+    y,
+    button,
+    deltaX: type === 'wheel' ? finiteNumber(payload?.deltaX ?? 0, 'deltaX') : 0,
+    deltaY: type === 'wheel' ? finiteNumber(payload?.deltaY ?? 0, 'deltaY') : 0,
+  };
+}
+
+function validateKeyboardAction(payload) {
+  const type = payload?.type;
+  if (!KEYBOARD_ACTION_TYPES.has(type)) throw httpError(400, 'keyboard type must be down, up, or insertText');
+  if (type === 'insertText') {
+    if (typeof payload?.text !== 'string' || payload.text.length > 10_000) {
+      throw httpError(400, 'text must be a string of at most 10000 characters');
+    }
+    return { type, text: payload.text };
+  }
+  if (typeof payload?.key !== 'string' || payload.key.length === 0 || payload.key.length > 64) {
+    throw httpError(400, 'key must be a non-empty string of at most 64 characters');
+  }
+  return { type, key: payload.key };
+}
+
+function finiteNumber(value, name) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw httpError(400, `${name} must be a finite number`);
+  return value;
+}
+
+function enqueueMonitorAction(connection, operation) {
+  const result = connection.actionQueue.then(operation);
+  connection.actionQueue = result.catch(() => undefined);
+  return result;
+}
+
+function enqueueMonitorActionRequest(actionPromises, key, operation) {
+  const previous = actionPromises.get(key) ?? Promise.resolve();
+  const result = previous.then(operation);
+  const tail = result.catch(() => undefined);
+  actionPromises.set(key, tail);
+  return result.finally(() => {
+    if (actionPromises.get(key) === tail) actionPromises.delete(key);
+  });
+}
+
+async function ensureMinimumViewport(page) {
+  const reported = page.viewportSize?.() ?? await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  const width = Number.isFinite(reported?.width) ? Math.max(reported.width, MIN_VIEWPORT_WIDTH) : MIN_VIEWPORT_WIDTH;
+  const height = Number.isFinite(reported?.height) ? Math.max(reported.height, MIN_VIEWPORT_HEIGHT) : MIN_VIEWPORT_HEIGHT;
+  if (reported?.width !== width || reported?.height !== height) {
+    await page.setViewportSize({ width, height });
+  }
+  return { width, height };
 }
 
 function httpError(statusCode, message) {

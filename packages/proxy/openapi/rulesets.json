@@ -1,1 +1,40 @@
-{"openapi":"3.1.1","info":{"title":"pw-dev managed proxy ruleset API","version":"1.0.0","description":"Rules replacement is full-state: send the complete desired ruleset. The result is stored in the durable Whistle profile and survives process or manager restarts."},"servers":[{"url":"/_proxy"}],"paths":{"/proxies/{id}/rules":{"put":{"operationId":"replaceManagedProxyRules","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"Durable proxy profile with effective ruleset"}}}}}}
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "pw-dev managed proxy ruleset API",
+    "version": "1.0.0",
+    "description": "Rules replacement is full-state: send the complete desired ruleset. The result is stored in the durable Whistle profile and survives process or manager restarts."
+  },
+  "servers": [{ "url": "/_proxy" }],
+  "paths": {
+    "/proxies/{id}/rules": {
+      "put": {
+        "operationId": "replaceManagedProxyRules",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ReplaceManagedProxyRules" }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Durable proxy profile with effective ruleset" } }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ReplaceManagedProxyRules": {
+        "type": "object",
+        "required": ["baseVersion", "defaultRuleset", "overrideRuleset"],
+        "properties": {
+          "baseVersion": { "type": "integer", "minimum": 1 },
+          "defaultRuleset": { "type": "string" },
+          "overrideRuleset": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

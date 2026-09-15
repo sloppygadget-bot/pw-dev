@@ -3,6 +3,7 @@ const state = {
   intervalMs: 5000,
   refreshPromise: undefined,
   pwDevUrl: '',
+  configured: false,
   currentView: 'browsers',
   navCollapsed: false,
   last: undefined,
@@ -10,7 +11,11 @@ const state = {
   previewUrls: new Map(),
   previewPages: new Map(),
   previewPageIds: new Map(),
+  previewRefreshGenerations: new Map(),
+  previewTransitionUrls: new Map(),
+  nextPreviewRefreshGeneration: 0,
   markdownModalText: '',
+  markdownModalInvoker: undefined,
   editingBrowserId: undefined,
   editingBrowserConfigId: undefined,
   editingProxyId: undefined,
@@ -19,6 +24,7 @@ const state = {
 const els = {
   interval: document.querySelector('#interval'),
   refresh: document.querySelector('#refresh'),
+  refreshStatus: document.querySelector('#refresh-status'),
   layout: document.querySelector('.layout'),
   navToggle: document.querySelector('#nav-toggle'),
   serverState: document.querySelector('#server-state'),
@@ -77,6 +83,7 @@ const els = {
   proxyPurpose: document.querySelector('#proxy-purpose'),
   proxyLabels: document.querySelector('#proxy-labels'),
   proxyEditorError: document.querySelector('#proxy-editor-error'),
+  pageShell: document.querySelector('#page-shell'),
   markdownModal: document.querySelector('#markdown-modal'),
   markdownModalTitle: document.querySelector('#markdown-modal-title'),
   markdownModalSubtitle: document.querySelector('#markdown-modal-subtitle'),
@@ -93,7 +100,9 @@ for (const button of document.querySelectorAll('[data-browser-view]')) {
   button.addEventListener('click', () => {
     state.browserView = button.dataset.browserView;
     for (const item of document.querySelectorAll('[data-browser-view]')) {
-      item.classList.toggle('active', item.dataset.browserView === state.browserView);
+      const active = item.dataset.browserView === state.browserView;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-pressed', String(active));
     }
     if (state.last) renderBrowsers(state.last.browsers);
   });
@@ -104,7 +113,12 @@ for (const button of document.querySelectorAll('.nav-item')) {
 }
 
 els.navToggle.addEventListener('click', () => setNavCollapsed(!state.navCollapsed));
-els.refresh.addEventListener('click', () => void refresh());
+els.refresh.addEventListener('click', async () => {
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = undefined;
+  await refresh();
+  schedule();
+});
 els.brokerCard.addEventListener('click', () => showView('broker'));
 els.newBrowser.addEventListener('click', () => openBrowserEditor());
 els.cancelBrowser.addEventListener('click', closeBrowserEditor);
@@ -130,7 +144,22 @@ els.markdownModal.addEventListener('click', (event) => {
 });
 els.copyMarkdownModal.addEventListener('click', copyMarkdownModal);
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !els.markdownModal.classList.contains('hidden')) closeMarkdownModal();
+  if (els.markdownModal.classList.contains('hidden')) return;
+  if (event.key === 'Escape') {
+    closeMarkdownModal();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = modalFocusableElements();
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && (document.activeElement === first || !els.markdownModal.contains(document.activeElement))) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !els.markdownModal.contains(document.activeElement))) {
+    event.preventDefault();
+    first?.focus();
+  }
 });
 els.interval.addEventListener('change', () => {
   state.intervalMs = Number(els.interval.value);
@@ -140,25 +169,37 @@ els.interval.addEventListener('change', () => {
 void init();
 
 async function init() {
-  const config = await fetchJson('/api/config');
-  state.pwDevUrl = config.pwDevUrl;
   await refresh();
-  els.newBrowser.disabled = false;
-  els.newBrowserConfig.disabled = false;
-  els.newProxy.disabled = false;
   schedule();
 }
 
 function schedule() {
   if (state.timer) clearTimeout(state.timer);
   state.timer = undefined;
-  if (state.intervalMs > 0) {
-    state.timer = setTimeout(async () => {
-      state.timer = undefined;
+  if (state.intervalMs <= 0) return;
+  state.timer = setTimeout(async () => {
+    state.timer = undefined;
+    try {
       await refresh();
+    } finally {
       schedule();
-    }, state.intervalMs);
-  }
+    }
+  }, state.intervalMs);
+}
+
+function setRefreshStatus(kind, message) {
+  els.refreshStatus.dataset.state = kind;
+  els.refreshStatus.textContent = message;
+}
+
+async function ensureConfig() {
+  if (state.configured) return;
+  const config = await fetchJson('/api/config');
+  state.pwDevUrl = config.pwDevUrl;
+  state.configured = true;
+  els.newBrowser.disabled = false;
+  els.newBrowserConfig.disabled = false;
+  els.newProxy.disabled = false;
 }
 
 function setNavCollapsed(collapsed) {
@@ -172,9 +213,18 @@ function setNavCollapsed(collapsed) {
 function showView(view) {
   state.currentView = view;
   const navItem = document.querySelector(`.nav-item[data-view="${view}"]`);
-  navItem?.closest('details.nav-group')?.setAttribute('open', '');
+  const activeGroup = navItem?.closest('details.nav-group');
+  if (activeGroup) activeGroup.open = true;
+  if (matchMedia('(max-width: 850px)').matches) {
+    for (const group of document.querySelectorAll('details.nav-group')) {
+      if (group !== activeGroup) group.open = false;
+    }
+  }
   for (const item of document.querySelectorAll('.nav-item')) {
-    item.classList.toggle('active', item.dataset.view === view);
+    const active = item.dataset.view === view;
+    item.classList.toggle('active', active);
+    if (active) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
   }
   for (const panel of document.querySelectorAll('.view')) {
     panel.classList.toggle('active', panel.id === `view-${view}`);
@@ -240,10 +290,28 @@ async function refresh() {
 
 async function performRefresh() {
   els.refresh.disabled = true;
+  setRefreshStatus('loading', state.last ? 'Refreshing…' : 'Loading…');
+  const previous = state.last;
+  let renderStarted = false;
   try {
+    await ensureConfig();
     const snapshot = normalizeSnapshot(await fetchJson('/api/snapshot'));
     state.last = snapshot;
+    renderStarted = true;
     await render(snapshot);
+    setRefreshStatus('ok', 'Up to date');
+    return true;
+  } catch (error) {
+    state.last = previous;
+    if (renderStarted && previous) {
+      try {
+        await render(previous);
+      } catch {
+        // The original refresh error remains the actionable status.
+      }
+    }
+    setRefreshStatus('error', `Refresh failed: ${error.message}`);
+    return false;
   } finally {
     els.refresh.disabled = false;
   }
@@ -464,8 +532,8 @@ async function render(snapshot) {
   renderBrowserConfigs(snapshot.browserConfigs, snapshot.sessions, snapshot.browsers, snapshot.brokers);
   renderSessions(snapshot.sessions, snapshot.relationships, snapshot.browsers);
   renderProxies(snapshot.proxies, snapshot.relationships, snapshot.browsers, snapshot.apps, snapshot.sessions);
-  renderCards(els.remoteHosts, snapshot.remoteHosts.map((host) => ({ title: host.name ?? host.id, subtitle: host.id, rows: { Target: host.target, 'SSH key': host.sshKeyId } })));
-  renderCards(els.sshKeys, snapshot.sshKeys.map((key) => ({ title: key.name ?? key.id, subtitle: key.id, rows: { Fingerprint: key.fingerprint, Updated: formatDate(key.updatedAt) } })));
+  renderCards(els.remoteHosts, snapshot.remoteHosts.map((host) => ({ title: host.name ?? host.id, subtitle: host.id, rows: { Target: host.target, 'SSH key': host.sshKeyId } })), { emptyMessage: 'No remote hosts' });
+  renderCards(els.sshKeys, snapshot.sshKeys.map((key) => ({ title: key.name ?? key.id, subtitle: key.id, rows: { Fingerprint: key.fingerprint, Updated: formatDate(key.updatedAt) } })), { emptyMessage: 'No SSH keys' });
   void refreshBrowserPreviews(snapshot.browsers).then(() => {
     if (state.last === snapshot) renderBrowsers(snapshot.browsers);
   });
@@ -668,7 +736,7 @@ function browserActions(browser) {
   const deleteBlocked = Boolean(agentLease);
   return actionGroup([
     { label: 'Edit', onClick: () => openBrowserEditor(browser) },
-    browser.sessionId
+    browser.sessionId && state.previewPageIds.get(browser.id)
       ? { label: 'Monitor', onClick: () => openBrowserMonitor(browser) }
       : undefined,
     browser.sessionId
@@ -677,6 +745,7 @@ function browserActions(browser) {
     {
       label: 'Delete',
       disabled: deleteBlocked,
+      kind: 'danger',
       title: deleteBlocked
         ? `Cannot delete: occupied by ${agentLease.owner}${agentLease.taskId ? `, task ${agentLease.taskId}` : ''}`
         : 'Delete browser',
@@ -686,41 +755,108 @@ function browserActions(browser) {
 }
 
 function openBrowserMonitor(browser, pageId = state.previewPageIds.get(browser.id)) {
-  const query = pageId ? `?pageId=${encodeURIComponent(pageId)}` : '';
-  window.open(`/monitor/${encodeURIComponent(browser.id)}${query}`, '_blank', 'noopener,noreferrer');
+  if (!pageId) return;
+  window.open(
+    `/monitor/${encodeURIComponent(browser.id)}?pageId=${encodeURIComponent(pageId)}`,
+    '_blank',
+    'noopener,noreferrer',
+  );
+}
+
+function isGuiPage(page, guiOrigins = []) {
+  try {
+    const url = new URL(page.url);
+    if (url.origin === location.origin || guiOrigins.includes(url.origin)) return true;
+    const localAliases = new Set(['localhost', '127.0.0.1']);
+    return localAliases.has(url.hostname) && localAliases.has(location.hostname)
+      && url.protocol === location.protocol && url.port === location.port;
+  } catch {
+    return false;
+  }
+}
+
+function monitorablePreviewPages(pages, guiOrigins) {
+  return pages.filter((page) => !isGuiPage(page, guiOrigins));
 }
 
 async function refreshBrowserPreviews(browsers) {
-  const activeIds = new Set(browsers.filter((browser) => browser.sessionId).map((browser) => browser.id));
-  for (const [browserId, url] of state.previewUrls) {
+  const knownBrowsers = state.last?.browsers ?? browsers;
+  const activeIds = new Set(knownBrowsers.filter((browser) => browser.sessionId).map((browser) => browser.id));
+  const trackedIds = new Set([
+    ...state.previewUrls.keys(),
+    ...state.previewPages.keys(),
+    ...state.previewPageIds.keys(),
+    ...state.previewRefreshGenerations.keys(),
+    ...state.previewTransitionUrls.keys(),
+  ]);
+  for (const browserId of trackedIds) {
     if (activeIds.has(browserId)) continue;
-    URL.revokeObjectURL(url);
+    const url = state.previewUrls.get(browserId);
+    if (url) URL.revokeObjectURL(url);
     state.previewUrls.delete(browserId);
     state.previewPages.delete(browserId);
     state.previewPageIds.delete(browserId);
+    state.previewRefreshGenerations.delete(browserId);
+    state.previewTransitionUrls.delete(browserId);
   }
   await Promise.all(browsers.filter((browser) => browser.sessionId).map(async (browser) => {
+    const generation = ++state.nextPreviewRefreshGeneration;
+    state.previewRefreshGenerations.set(browser.id, generation);
+    const isLatestRefresh = () => state.previewRefreshGenerations.get(browser.id) === generation;
     try {
       const pageResponse = await fetch(`/api/pwdev/sessions/${encodeURIComponent(browser.sessionId)}/pages`, { cache: 'no-store' });
+      if (!isLatestRefresh()) return;
       if (pageResponse.ok) {
         const body = await pageResponse.json();
-        const pages = Array.isArray(body.pages) ? body.pages : [];
+        if (!isLatestRefresh()) return;
+        const pages = monitorablePreviewPages(Array.isArray(body.pages) ? body.pages : [], Array.isArray(body.guiOrigins) ? body.guiOrigins : []);
         state.previewPages.set(browser.id, pages);
         const selectedPageId = state.previewPageIds.get(browser.id);
         if (!pages.some((page) => page.id === selectedPageId)) state.previewPageIds.set(browser.id, pages[0]?.id);
       }
       const pageId = state.previewPageIds.get(browser.id);
-      const query = pageId ? `?pageId=${encodeURIComponent(pageId)}` : '';
-      const response = await fetch(`/api/monitor/${encodeURIComponent(browser.id)}/preview${query}`, { cache: 'no-store' });
-      if (!response.ok) return;
-      const url = URL.createObjectURL(await response.blob());
+      if (!pageId) {
+        const previous = state.previewUrls.get(browser.id);
+        if (previous) URL.revokeObjectURL(previous);
+        state.previewUrls.delete(browser.id);
+        state.previewTransitionUrls.delete(browser.id);
+        return;
+      }
+      const response = await fetch(
+        `/api/monitor/${encodeURIComponent(browser.id)}/preview?pageId=${encodeURIComponent(pageId)}`,
+        { cache: 'no-store' },
+      );
+      if (!response.ok || !isLatestRefresh()) return;
+      const url = await createDecodedImageUrl(await response.blob());
+      if (!isLatestRefresh()) {
+        URL.revokeObjectURL(url);
+        return;
+      }
       const previous = state.previewUrls.get(browser.id);
       state.previewUrls.set(browser.id, url);
-      if (previous) URL.revokeObjectURL(previous);
+      if (previous) {
+        state.previewTransitionUrls.set(browser.id, url);
+        URL.revokeObjectURL(previous);
+      } else {
+        state.previewTransitionUrls.delete(browser.id);
+      }
     } catch {
       // Keep the previous preview when a transient monitor capture fails.
     }
   }));
+}
+
+async function createDecodedImageUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  const image = new Image();
+  image.src = url;
+  try {
+    await image.decode();
+    return url;
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
 }
 
 async function selectBrowserPreviewPage(browser, pageId) {
@@ -781,6 +917,7 @@ function createActionButtons(actions = []) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = action.label;
+    if (action.kind) button.classList.add(`button-${action.kind}`);
     button.disabled = Boolean(action.disabled);
     if (action.title) button.title = action.title;
     button.addEventListener('click', async () => {
@@ -812,7 +949,7 @@ function renderBrowsers(browsers) {
       browser.profile,
       sessionLink(browser.sessionId),
       browserActions(browser),
-    ]), { rowKeys: browsers.map((browser) => browser.id), rowKeyAttribute: 'browserId' });
+    ]), { rowKeys: browsers.map((browser) => browser.id), rowKeyAttribute: 'browserId', emptyMessage: 'No browsers', tableClass: 'entity-table-dense' });
     return;
   }
   els.browsersTable.classList.add('hidden');
@@ -864,7 +1001,7 @@ function renderBrowserDiagram(root, browsers) {
     controls.className = 'browser-diagram-controls';
     controls.append(createActionButtons(browserActions(browser).actions));
     titleInfo.append(titleGroup, occupancyLabel);
-    heading.append(controls, titleInfo);
+    heading.append(titleInfo, controls);
     details.append(heading);
     const flowColumn = document.createElement('div');
     flowColumn.className = 'browser-flow-column';
@@ -914,13 +1051,22 @@ function renderBrowserDiagram(root, browsers) {
       const image = document.createElement('img');
       image.alt = `Latest browser preview for ${browser.name ?? browser.id}`;
       image.src = previewUrl;
+      if (state.previewTransitionUrls.get(browser.id) === previewUrl) {
+        image.classList.add('preview-updated');
+        state.previewTransitionUrls.delete(browser.id);
+      }
       previewMedia.append(image);
       preview.append(previewMedia);
       const tabs = renderBrowserPreviewTabs(browser);
       if (tabs) preview.append(tabs);
     } else {
       preview.classList.add('empty');
-      preview.textContent = browser.sessionId ? 'Loading preview…' : 'Start the browser to load a preview.';
+      const pages = state.previewPages.get(browser.id);
+      preview.textContent = !browser.sessionId
+        ? 'Start the browser to load a preview.'
+        : pages && pages.length === 0
+          ? 'Open a target page to load a preview.'
+          : 'Loading preview…';
     }
     content.append(details, preview);
     card.append(content);
@@ -957,7 +1103,7 @@ function renderApps(apps, relationships, browsers) {
     app.branch,
     usedBy(browsers, 'appId', app.id),
     app.readme ? markdownView(app.readme, app.name ?? app.id) : undefined,
-  ]), { rowKeys: apps.map((app) => app.id), rowKeyAttribute: 'appId' });
+  ]), { rowKeys: apps.map((app) => app.id), rowKeyAttribute: 'appId', emptyMessage: 'No apps' });
 }
 
 function renderBroker(snapshot) {
@@ -973,7 +1119,7 @@ function renderBroker(snapshot) {
     const remoteOs = [remoteMachine?.platform, remoteMachine?.release].filter(Boolean).join(' ');
     return {
       broker: true,
-      title: `BROKER${index + 1}`,
+      title: `Broker ${index + 1}`,
       subtitle: entry.url,
       badge: [
         badge(broker ? (active ? 'Active' : 'Idle') : 'Offline', broker ? (active ? 'good' : 'neutral') : 'bad'),
@@ -997,7 +1143,7 @@ function renderBroker(snapshot) {
         Instances: broker?.instanceCount ?? broker?.instances?.length ?? 0,
       },
     };
-  }));
+  }), { emptyMessage: 'No brokers' });
 }
 
 function renderBrowserConfigs(browserConfigs, sessions, browsers, brokers) {
@@ -1014,7 +1160,7 @@ function renderBrowserConfigs(browserConfigs, sessions, browsers, brokers) {
       activeSessions.join(' · ') || 'None',
       browserConfigActions(browserConfig, usage),
     ];
-  }), { rowKeys: browserConfigs.map((browserConfig) => browserConfig.id), rowKeyAttribute: 'browserConfigId' });
+  }), { rowKeys: browserConfigs.map((browserConfig) => browserConfig.id), rowKeyAttribute: 'browserConfigId', emptyMessage: 'No browser configs' });
 }
 
 function brokerForBrowserConfig(browserConfig, brokers) {
@@ -1046,6 +1192,7 @@ function browserConfigActions(browserConfig, usage) {
     },
     {
       label: 'Delete config',
+      kind: 'danger',
       disabled: referenced || occupied,
       title: occupied
         ? `Cannot delete: occupied by ${usage.occupiedBy.join(', ')}`
@@ -1076,7 +1223,7 @@ function renderSessions(sessions, relationships, browsers) {
     formatSessionLease(session),
     usedBy(browsers, 'sessionId', session.sessionId),
     session.browserInstanceId,
-  ]), { rowKeys: sessions.map((session) => session.sessionId) });
+  ]), { rowKeys: sessions.map((session) => session.sessionId), emptyMessage: 'No sessions', tableClass: 'entity-table-dense' });
 }
 
 function formatBrowserOccupancy(browser) {
@@ -1303,6 +1450,7 @@ function proxyActions(proxy, usage) {
     },
     {
       label: 'Delete proxy',
+      kind: 'danger',
       disabled: referenced || occupied,
       title: occupied
         ? `Cannot delete: occupied by ${usage.occupiedBy.join(', ')}`
@@ -1328,7 +1476,7 @@ function renderProxies(proxies, relationships, browsers, apps, sessions) {
     usage.occupiedBy.join(', ') || '—',
     proxyActions(proxy, usage),
   ];
-  }), { rowKeys: proxies.map((proxy) => proxy.id), rowKeyAttribute: 'proxyId' });
+  }), { rowKeys: proxies.map((proxy) => proxy.id), rowKeyAttribute: 'proxyId', emptyMessage: 'No proxies', tableClass: 'entity-table-dense' });
 }
 
 function proxyGuiLink(proxyId) {
@@ -1348,14 +1496,15 @@ function usedBy(browsers = [], field, id) {
     .join(', ') || '—';
 }
 
-function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'sessionId' } = {}) {
+function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'sessionId', emptyMessage = 'No records', tableClass } = {}) {
   root.replaceChildren();
   if (!rows.length) {
-    root.append(emptyState());
+    root.append(emptyState(emptyMessage));
     return;
   }
   const table = document.createElement('table');
   table.className = 'entity-table';
+  if (tableClass) table.classList.add(tableClass);
   const head = document.createElement('thead');
   const headerRow = document.createElement('tr');
   for (const column of columns) {
@@ -1410,10 +1559,10 @@ function renderTable(root, columns, rows, { rowKeys = [], rowKeyAttribute = 'ses
   root.append(scroll);
 }
 
-function renderCards(root, cards) {
+function renderCards(root, cards, { emptyMessage = 'No records' } = {}) {
   root.replaceChildren();
   if (!cards.length) {
-    root.append(emptyState());
+    root.append(emptyState(emptyMessage));
     return;
   }
 
@@ -1508,6 +1657,7 @@ function renderCards(root, cards) {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = action.label;
+        if (action.kind) button.classList.add(`button-${action.kind}`);
         button.addEventListener('click', async () => {
           button.disabled = true;
           try {
@@ -1545,24 +1695,36 @@ function createMarkdownViewer(value) {
   button.type = 'button';
   button.className = 'readme-button';
   button.textContent = 'View README';
-  button.addEventListener('click', () => openMarkdownModal(value.title, value.text));
+  button.addEventListener('click', () => openMarkdownModal(value.title, value.text, button));
   return button;
 }
 
-function openMarkdownModal(title, text) {
+function modalFocusableElements() {
+  return [...els.markdownModal.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter((element) => !element.hidden && element.getClientRects().length > 0);
+}
+
+function openMarkdownModal(title, text, invoker) {
+  state.markdownModalInvoker = invoker;
   state.markdownModalText = text;
   els.markdownModalTitle.textContent = 'README';
   els.markdownModalSubtitle.textContent = title ?? '';
   renderMarkdown(els.markdownModalContent, text);
   els.copyMarkdownModal.textContent = 'Copy README';
   els.markdownModal.classList.remove('hidden');
+  els.pageShell.inert = true;
   document.body.classList.add('modal-open');
   els.closeMarkdownModal.focus();
 }
 
 function closeMarkdownModal() {
+  if (els.markdownModal.classList.contains('hidden')) return;
   els.markdownModal.classList.add('hidden');
+  els.pageShell.inert = false;
   document.body.classList.remove('modal-open');
+  const invoker = state.markdownModalInvoker;
+  state.markdownModalInvoker = undefined;
+  if (invoker?.isConnected) invoker.focus();
 }
 
 async function copyMarkdownModal() {
