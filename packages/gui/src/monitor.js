@@ -16,6 +16,9 @@ const MONITOR_NAVIGATION_OPTIONS = { waitUntil: 'commit', timeout: 10_000 };
 const NAVIGATION_RETRY_DELAY_MS = 25;
 const MAX_NAVIGATION_RETRIES = 3;
 const PREVIEW_TIMEOUT_MS = 2_000;
+const PREVIEW_RETRY_TIMEOUT_MS = 5_000;
+const THUMBNAIL_MAX_WIDTH = 480;
+const THUMBNAIL_QUALITY = 40;
 const PAGE_INVENTORY_INTERVAL_MS = 1_000;
 const IDLE_CONNECTION_TIMEOUT_MS = 5_000;
 
@@ -36,6 +39,7 @@ export class BrowserMonitorHub {
     this.connections = new Map();
     /** @type {Map<string, Promise<Buffer>>} */
     this.previewPromises = new Map();
+    this.thumbnailPromises = new Map();
     /** @type {Map<string, Promise<void>>} */
     this.actionPromises = new Map();
   }
@@ -190,22 +194,63 @@ export class BrowserMonitorHub {
     return capture;
   }
 
+  thumbnail(browserId, pageId) {
+    const key = monitorKey(browserId, pageId);
+    const existing = this.thumbnailPromises.get(key);
+    if (existing) return existing;
+    const capture = this.captureThumbnail(browserId, pageId).finally(() => {
+      if (this.thumbnailPromises.get(key) === capture) this.thumbnailPromises.delete(key);
+    });
+    this.thumbnailPromises.set(key, capture);
+    return capture;
+  }
+
+  async captureThumbnail(browserId, pageId) {
+    const connection = await this.ensureConnection(browserId, pageId);
+    if (connection.page.isClosed()) throw httpError(409, 'Browser session has no page to monitor');
+    const session = await connection.page.context().newCDPSession(connection.page);
+    try {
+      const { cssVisualViewport } = await session.send('Page.getLayoutMetrics');
+      const width = cssVisualViewport.clientWidth;
+      const height = cssVisualViewport.clientHeight;
+      const result = await session.send('Page.captureScreenshot', {
+        format: 'webp',
+        quality: THUMBNAIL_QUALITY,
+        clip: {
+          x: cssVisualViewport.pageX,
+          y: cssVisualViewport.pageY,
+          width,
+          height,
+          scale: Math.min(1, THUMBNAIL_MAX_WIDTH / width),
+        },
+      });
+      return Buffer.from(result.data, 'base64');
+    } finally {
+      await session.detach().catch(() => undefined);
+    }
+  }
+
   async capturePreview(browserId, pageId) {
     const connection = await this.ensureConnection(browserId, pageId);
     if (connection.page.isClosed()) throw httpError(409, 'Browser session has no page to monitor');
     await ensureMinimumViewport(connection.page);
-    return connection.page.screenshot({
-      type: 'jpeg',
-      quality: 60,
-      scale: 'css',
-      timeout: PREVIEW_TIMEOUT_MS,
-    });
+    try {
+      return await connection.page.screenshot({
+        type: 'jpeg', quality: 60, scale: 'css', timeout: PREVIEW_TIMEOUT_MS,
+      });
+    } catch (error) {
+      if (error?.name !== 'TimeoutError') throw error;
+      return connection.page.screenshot({
+        type: 'jpeg', quality: 60, scale: 'css', timeout: PREVIEW_RETRY_TIMEOUT_MS,
+      });
+    }
   }
 
   async close() {
     const connections = [...new Set(this.connections.values())];
     this.connections.clear();
     this.previewPromises.clear();
+    this.thumbnailPromises.clear();
     this.actionPromises.clear();
     await Promise.all(connections.map((connection) => this.closeConnection(connection)));
   }
@@ -338,8 +383,20 @@ export class BrowserMonitorHub {
     const localPages = await this.selectMonitorablePage(connection);
     if (connection.page !== previousPage) await this.refresh(connection);
     const remotePages = await this.describeSessionPages(connection);
-    const remoteById = new Map(remotePages.map((page) => [page.id, page]));
-    return localPages.map(({ page, ...description }) => ({ ...description, ...remoteById.get(description.id) }));
+    const localById = new Map(localPages.map(({ page, ...description }) => [description.id, description]));
+    const remoteIds = new Set(remotePages.map((page) => page.id));
+    // The dashboard uses the control-plane inventory order. A separate CDP
+    // client is allowed to enumerate identical targets in another order, so
+    // retain that authoritative order here as well. Keep any locally visible
+    // target absent from a stale control-plane response at the end.
+    return [
+      ...remotePages
+        .filter((page) => localById.has(page.id))
+        .map((page) => ({ ...localById.get(page.id), ...page })),
+      ...localPages
+        .map(({ page, ...description }) => description)
+        .filter((page) => !remoteIds.has(page.id)),
+    ];
   }
 
   async selectMonitorablePage(connection) {

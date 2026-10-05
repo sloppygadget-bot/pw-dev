@@ -14,6 +14,10 @@ const state = {
   previewRefreshGenerations: new Map(),
   previewTransitionUrls: new Map(),
   nextPreviewRefreshGeneration: 0,
+  previewRefreshCycle: 0,
+  previewFetchedCycles: new Map(),
+  previewVisibilityObserver: undefined,
+  visiblePreviewBrowserIds: new Set(),
   markdownModalText: '',
   markdownModalInvoker: undefined,
   editingBrowserId: undefined,
@@ -229,6 +233,7 @@ function showView(view) {
   for (const panel of document.querySelectorAll('.view')) {
     panel.classList.toggle('active', panel.id === `view-${view}`);
   }
+  if (view === 'browsers' && state.last) renderBrowsers(state.last.browsers);
 }
 
 function showApp(appId) {
@@ -534,9 +539,11 @@ async function render(snapshot) {
   renderProxies(snapshot.proxies, snapshot.relationships, snapshot.browsers, snapshot.apps, snapshot.sessions);
   renderCards(els.remoteHosts, snapshot.remoteHosts.map((host) => ({ title: host.name ?? host.id, subtitle: host.id, rows: { Target: host.target, 'SSH key': host.sshKeyId } })), { emptyMessage: 'No remote hosts' });
   renderCards(els.sshKeys, snapshot.sshKeys.map((key) => ({ title: key.name ?? key.id, subtitle: key.id, rows: { Fingerprint: key.fingerprint, Updated: formatDate(key.updatedAt) } })), { emptyMessage: 'No SSH keys' });
-  void refreshBrowserPreviews(snapshot.browsers).then(() => {
-    if (state.last === snapshot) renderBrowsers(snapshot.browsers);
-  });
+  state.previewRefreshCycle += 1;
+  // Invalidate pending captures for stopped browsers even when no card is
+  // visible, so a late image decode cannot resurrect an old thumbnail.
+  void refreshBrowserPreviews([]);
+  refreshVisibleBrowserPreviews();
 }
 
 function openBrowserEditor(browser) {
@@ -823,7 +830,7 @@ async function refreshBrowserPreviews(browsers) {
         return;
       }
       const response = await fetch(
-        `/api/monitor/${encodeURIComponent(browser.id)}/preview?pageId=${encodeURIComponent(pageId)}`,
+        `/api/monitor/${encodeURIComponent(browser.id)}/thumbnail?pageId=${encodeURIComponent(pageId)}`,
         { cache: 'no-store' },
       );
       if (!response.ok || !isLatestRefresh()) return;
@@ -844,6 +851,18 @@ async function refreshBrowserPreviews(browsers) {
       // Keep the previous preview when a transient monitor capture fails.
     }
   }));
+}
+
+function refreshVisibleBrowserPreviews() {
+  if (state.currentView !== 'browsers' || state.browserView !== 'diagram') return;
+  const browsers = (state.last?.browsers ?? []).filter((browser) => browser.sessionId
+    && state.visiblePreviewBrowserIds.has(browser.id)
+    && state.previewFetchedCycles.get(browser.id) !== state.previewRefreshCycle);
+  if (!browsers.length) return;
+  for (const browser of browsers) state.previewFetchedCycles.set(browser.id, state.previewRefreshCycle);
+  void refreshBrowserPreviews(browsers).then(() => {
+    if (state.last) renderBrowsers(state.last.browsers);
+  });
 }
 
 async function createDecodedImageUrl(blob) {
@@ -934,6 +953,8 @@ function createActionButtons(actions = []) {
 }
 
 function renderBrowsers(browsers) {
+  state.previewVisibilityObserver?.disconnect();
+  state.visiblePreviewBrowserIds.clear();
   if (state.browserView === 'table') {
     els.browsersDiagram.classList.add('hidden');
     els.browsersTable.classList.remove('hidden');
@@ -966,6 +987,7 @@ function renderBrowserDiagram(root, browsers) {
   for (const browser of browsers) {
     const card = document.createElement('article');
     card.className = 'browser-diagram card';
+    card.dataset.browserId = browser.id;
     const content = document.createElement('div');
     content.className = 'browser-diagram-content';
     const details = document.createElement('div');
@@ -1072,6 +1094,21 @@ function renderBrowserDiagram(root, browsers) {
     card.append(content);
     root.append(card);
   }
+  if (!globalThis.IntersectionObserver) {
+    for (const browser of browsers) state.visiblePreviewBrowserIds.add(browser.id);
+    refreshVisibleBrowserPreviews();
+    return;
+  }
+  state.previewVisibilityObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const browserId = entry.target.dataset.browserId;
+      if (!browserId) continue;
+      if (entry.isIntersecting) state.visiblePreviewBrowserIds.add(browserId);
+      else state.visiblePreviewBrowserIds.delete(browserId);
+    }
+    refreshVisibleBrowserPreviews();
+  }, { rootMargin: '240px 0px' });
+  for (const card of root.querySelectorAll('.browser-diagram[data-browser-id]')) state.previewVisibilityObserver.observe(card);
 }
 
 function brokerLabel(status) {

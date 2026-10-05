@@ -202,7 +202,7 @@ test('monitor keeps click telemetry attached across a navigation-context race wi
   assert.equal(connection.refreshPromise, undefined);
 });
 
-test('monitor preview uses a short timeout and coalesces concurrent captures', async () => {
+test('monitor preview coalesces concurrent captures', async () => {
   const hub = new BrowserMonitorHub({ pwDevUrl: 'http://127.0.0.1:9696' });
   const captures = [];
   let finishCapture;
@@ -232,6 +232,50 @@ test('monitor preview uses a short timeout and coalesces concurrent captures', a
   finishCapture(Buffer.from('preview'));
   assert.deepEqual(await Promise.all([first, second]), [Buffer.from('preview'), Buffer.from('preview')]);
   assert.equal(hub.previewPromises.has(connection.browserId), false);
+});
+
+test('monitor preview retries a timed out screenshot once', async () => {
+  const hub = new BrowserMonitorHub({ pwDevUrl: 'http://127.0.0.1:9696' });
+  const captures = [];
+  const connection = {
+    browserId: 'preview-retry',
+    browser: { isConnected: () => true },
+    page: {
+      isClosed: () => false,
+      viewportSize: () => ({ width: 1920, height: 1080 }),
+      screenshot: async (options) => {
+        captures.push(options);
+        if (captures.length === 1) throw Object.assign(new Error('screenshot timed out'), { name: 'TimeoutError' });
+        return Buffer.from('recovered');
+      },
+    },
+    subscribers: new Set(),
+  };
+  hub.connections.set(connection.browserId, connection);
+
+  assert.deepEqual(await hub.preview(connection.browserId), Buffer.from('recovered'));
+  assert.deepEqual(captures, [
+    { type: 'jpeg', quality: 60, scale: 'css', timeout: 2_000 },
+    { type: 'jpeg', quality: 60, scale: 'css', timeout: 5_000 },
+  ]);
+});
+
+test('monitor thumbnails use scaled WebP without resizing the browser viewport', async () => {
+  const browserDouble = createMonitorBrowserDouble([
+    { id: 'thumbnail-page', title: 'Thumbnail', url: 'https://thumb.test/', viewport: { width: 1920, height: 1080 } },
+  ]);
+  const hub = createConnectedMonitorHub(browserDouble, 'thumbnail-session');
+  try {
+    const image = await hub.thumbnail('thumbnail-browser', 'thumbnail-page');
+    assert.deepEqual(image, Buffer.from('thumbnail-page'));
+    assert.deepEqual(browserDouble.page('thumbnail-page').viewportSize(), { width: 1920, height: 1080 });
+    assert.deepEqual(browserDouble.cdpCaptures, [{
+      format: 'webp', quality: 40,
+      clip: { x: 0, y: 0, width: 1920, height: 1080, scale: 0.25 },
+    }]);
+  } finally {
+    await hub.close();
+  }
 });
 
 test('monitor restores the 1080p minimum before every screenshot', async () => {
@@ -894,7 +938,7 @@ test('dashboard restores the last rendered snapshot after a later renderer fails
       contentType: 'application/json',
       body: JSON.stringify({ pages: [{ id: 'preview-page', title: 'Preview', url: 'https://preview.test/' }] }),
     }));
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
       previewRequests += 1;
       return previewRequests === 1
         ? route.fulfill({ contentType: 'image/jpeg', body: preview })
@@ -941,7 +985,10 @@ test('two-tab monitor resolves targets, routes actions, discovers popups, falls 
         return {
           ok: true,
           statusCode: 200,
-          body: { pages: browserDouble.livePages().map((page) => ({ id: page.id, title: page.titleValue, url: page.url(), ...(page.lease ? { lease: page.lease } : {}) })) },
+          // The server inventory is intentionally the opposite order from the
+          // monitor's local CDP client. Both views must retain this order so a
+          // dot means the same tab in the dashboard and Monitor.
+          body: { pages: browserDouble.livePages().slice().reverse().map((page) => ({ id: page.id, title: page.titleValue, url: page.url(), ...(page.lease ? { lease: page.lease } : {}) })) },
         };
       }
       return { ok: false, statusCode: 404, body: {} };
@@ -966,12 +1013,12 @@ test('two-tab monitor resolves targets, routes actions, discovers popups, falls 
 
     browserDouble.open({ id: 'page-c', title: 'Bird popup', url: 'https://shop.test/birds/cockatiel', lease: { owner: 'popup-agent' } });
     const withPopup = await hub.refreshPageInventory(selected);
-    assert.deepEqual(withPopup.map((page) => page.id), ['page-a', 'page-b', 'page-c']);
-    assert.equal(withPopup[2].lease.owner, 'popup-agent');
+    assert.deepEqual(withPopup.map((page) => page.id), ['page-c', 'page-b', 'page-a']);
+    assert.equal(withPopup[0].lease.owner, 'popup-agent');
 
     browserDouble.closePage('page-b');
     const afterClose = await hub.refreshPageInventory(selected);
-    assert.deepEqual(afterClose.map((page) => page.id), ['page-a', 'page-c']);
+    assert.deepEqual(afterClose.map((page) => page.id), ['page-c', 'page-a']);
     assert.equal(selected.pageId, 'page-a');
     assert.equal(selected.page, browserDouble.page('page-a'));
     assert.equal(hub.connections.get('shared-browser:page-a'), selected);
@@ -1170,7 +1217,9 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /\/api\/pwdev\/sessions\/\$\{encodeURIComponent\(browser\.sessionId\)\}\/pages/);
     assert.match(appScript.body, /browser-preview-dot/);
     assert.doesNotMatch(appScript.body, /setInterval\(\(\) => void refresh\(\)/);
-    assert.match(appScript.body, /renderBrowsers\(snapshot\.browsers\);[\s\S]*?void refreshBrowserPreviews\(snapshot\.browsers\)/);
+    assert.match(appScript.body, /renderBrowsers\(snapshot\.browsers\);[\s\S]*?refreshVisibleBrowserPreviews\(\)/);
+    assert.match(appScript.body, /IntersectionObserver/);
+    assert.match(appScript.body, /\/thumbnail\?pageId=/);
     assert.match(appScript.body, /openBrowserMonitor\(browser\)/);
     assert.match(appScript.body, /scroll\.className = 'table-scroll'/);
     const styles = await get(`${server.origin}/styles.css`);
@@ -1429,7 +1478,7 @@ test('dashboard uses the backend GUI origins including newly registered hostname
     await routeDashboardSnapshot(page, browserPreviewSnapshot());
     await page.unroute('**/api/pwdev/sessions/preview-session/pages');
     const requestedTargets = [];
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
       requestedTargets.push(new URL(route.request().url()).searchParams.get('pageId'));
       return route.fulfill({ contentType: 'image/jpeg', body: preview });
     });
@@ -1601,7 +1650,7 @@ test('monitor and dashboard tab dots retain small indicators within larger touch
         { id: 'other-page', type: 'page', title: 'Other', url: 'https://preview.test/other' },
       ] }),
     }));
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => route.fulfill({ contentType: 'image/jpeg', body: preview }));
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => route.fulfill({ contentType: 'image/jpeg', body: preview }));
     await page.goto(gui.origin);
     await page.locator('.browser-preview-dot.selected').waitFor();
     await page.locator('.browser-preview-dot.selected').scrollIntoViewIfNeeded();
@@ -1852,7 +1901,7 @@ test(`dashboard previews exclude mixed-host GUI tabs when opened through ${opera
         { id: 'monitor', title: 'Monitor', url: `${gui.origin}/monitor/preview-browser` },
       ] }),
     }));
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
       previewRequests += 1;
       assert.match(route.request().url(), /pageId=target/);
       return route.fulfill({ contentType: 'image/jpeg', body: preview });
@@ -1886,7 +1935,7 @@ test('dashboard shows a target-page empty state for a GUI-only session', async (
         { id: 'monitor', title: 'Monitor', url: `${gui.origin}/monitor/preview-browser` },
       ] }),
     }));
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
       previewRequests += 1;
       return route.abort();
     });
@@ -1919,7 +1968,7 @@ test('browser thumbnail clears when the remaining session tabs are GUI-only', as
         : [{ id: 'target', title: 'Target', url: 'http://127.0.0.1:3000/' }],
       }),
     }));
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
       previewRequests += 1;
       return route.fulfill({ contentType: 'image/jpeg', body: preview });
     });
@@ -1989,7 +2038,7 @@ test('dashboard stale preview controls cannot open an unscoped monitor while ano
         : [{ id: 'pending-target', title: 'Pending target', url: 'http://127.0.0.1:3001/' }];
       return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ pages }) });
     });
-    await page.route('**/api/monitor/*/preview*', (route) => route.fulfill({
+    await page.route('**/api/monitor/*/thumbnail*', (route) => route.fulfill({
       contentType: 'image/jpeg',
       body: preview,
     }));
@@ -2061,7 +2110,7 @@ test('browser thumbnail replaces decoded images without a blank frame', async ()
       contentType: 'application/json',
       body: JSON.stringify({ ok: true, sessionId: 'preview-session', pages: [{ id: 'preview-page', type: 'page', title: 'Preview', url: 'https://preview.test/' }] }),
     }));
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
       previewRequests += 1;
       return route.fulfill({
         contentType: 'image/jpeg',
@@ -2158,7 +2207,7 @@ test('browser thumbnail ignores an older decode that finishes after a newer refr
       contentType: 'application/json',
       body: JSON.stringify({ ok: true, sessionId: 'preview-session', pages: [{ id: 'preview-page', type: 'page', title: 'Preview', url: 'https://preview.test/' }] }),
     }));
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
       const preview = previews[Math.min(previewRequests, previews.length - 1)];
       previewRequests += 1;
       return route.fulfill({ contentType: 'image/jpeg', body: preview });
@@ -2229,7 +2278,7 @@ test('browser thumbnail discards an initial preview if the browser stops before 
       contentType: 'application/json',
       body: JSON.stringify({ ok: true, sessionId: 'preview-session', pages: [{ id: 'preview-page', type: 'page', title: 'Preview', url: 'https://preview.test/' }] }),
     }));
-    await page.route('**/api/monitor/preview-browser/preview*', (route) => {
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
       previewRequests += 1;
       return route.fulfill({ contentType: 'image/jpeg', body: preview });
     });
@@ -2692,11 +2741,20 @@ function createMonitorBrowserDouble(initialPages) {
   let deferredPageDescription;
   let connected = true;
   let closeCalls = 0;
+  const cdpCaptures = [];
   const context = {
     on: contextEvents.on.bind(contextEvents),
     pages: () => pages.filter((page) => !page.isClosed()),
     newCDPSession: async (page) => ({
-      send: async (method) => {
+      send: async (method, params) => {
+        if (method === 'Page.getLayoutMetrics') {
+          const viewport = page.viewportSize();
+          return { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: viewport.width, clientHeight: viewport.height } };
+        }
+        if (method === 'Page.captureScreenshot') {
+          cdpCaptures.push(params);
+          return { data: Buffer.from(page.id).toString('base64') };
+        }
         assert.equal(method, 'Target.getTargetInfo');
         if (deferredPageDescription) {
           const deferred = deferredPageDescription;
@@ -2802,6 +2860,7 @@ function createMonitorBrowserDouble(initialPages) {
       return { started, release };
     },
     get closeCalls() { return closeCalls; },
+    get cdpCaptures() { return cdpCaptures; },
   };
   for (const page of initialPages) double.open(page);
   return double;

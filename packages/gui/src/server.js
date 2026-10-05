@@ -78,6 +78,14 @@ export async function startPwDevGuiServer(options = {}) {
         res.end(image);
         return;
       }
+      const monitorThumbnail = /^\/api\/monitor\/([^/]+)\/thumbnail$/.exec(requestUrl.pathname);
+      if (monitorThumbnail) {
+        registerMonitorGuiOrigin(monitorHub, req, host);
+        const image = await monitorHub.thumbnail(decodePathSegment(monitorThumbnail[1]), requestUrl.searchParams.get('pageId') ?? undefined);
+        res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'image/webp' });
+        res.end(image);
+        return;
+      }
       const monitorAction = /^\/api\/monitor\/([^/]+)\/action$/.exec(requestUrl.pathname);
       if (monitorAction) {
         registerMonitorGuiOrigin(monitorHub, req, host);
