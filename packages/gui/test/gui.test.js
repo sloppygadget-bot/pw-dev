@@ -1231,19 +1231,19 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /flex-direction: column/);
     assert.match(styles.body, /align-items: flex-start/);
     assert.match(styles.body, /\.browser-flow-column/);
-    assert.match(styles.body, /--browser-node-width: min\(100%, 260px\)/);
+    assert.match(styles.body, /--browser-node-width: min\(100%, 220px\)/);
     assert.match(styles.body, /text-align: center/);
-    assert.match(styles.body, /padding: 8px 14px/);
+    assert.match(styles.body, /padding: 6px 8px/);
     assert.match(styles.body, /\.browser-diagram-title/);
     assert.match(styles.body, /\.browser-diagram-content/);
     assert.match(styles.body, /\.browser-preview-pages/);
     assert.match(styles.body, /\.browser-preview-dot\.selected/);
-    assert.match(styles.body, /grid-template-columns: minmax\(240px, 34%\) minmax\(0, 1fr\)/);
+    assert.match(styles.body, /grid-template-columns: minmax\(180px, 24%\) minmax\(0, 1fr\)/);
     assert.match(styles.body, /\.browser-diagram-content[\s\S]*?gap: 12px/);
-    assert.match(styles.body, /@container \(max-width: 680px\)[\s\S]*?\.browser-diagram-content[\s\S]*?grid-template-columns: 1fr/);
+    assert.match(styles.body, /@container \(max-width: 480px\)[\s\S]*?\.browser-diagram-content[\s\S]*?grid-template-columns: 1fr/);
     assert.match(styles.body, /\.browser-preview/);
     assert.match(styles.body, /align-self: stretch/);
-    assert.match(styles.body, /min-height: 300px/);
+    assert.match(styles.body, /min-height: 340px/);
     assert.match(styles.body, /\.browser-preview img[\s\S]*?height: 100%/);
     assert.doesNotMatch(styles.body, /\.browser-preview-head/);
     assert.match(styles.body, /max-width: 100%/);
@@ -2985,6 +2985,49 @@ for (const view of ['browsers', 'remote-hosts', 'ssh-keys']) {
     }
   });
 }
+
+test('browser cards reserve less width for details and keep taller previews', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const snapshot = browserPreviewSnapshot();
+    snapshot.server.sessions.body.sessions = [];
+    snapshot.server.browsers.body.browsers = [
+      { id: 'airbnb', name: 'Airbnb', browserConfigId: 'preview-config', status: 'ready' },
+      { id: 'crawler', name: 'Crawler', browserConfigId: 'preview-config', status: 'ready' },
+    ];
+    await routeDashboardSnapshot(page, snapshot);
+    await page.goto(gui.origin);
+    await page.locator('.browser-diagram').first().waitFor();
+    await page.locator('#interval').selectOption('0');
+    const nav = await page.locator('.nav').boundingBox();
+    assert.ok(nav.width <= 160, 'expanded navigation should be narrower');
+    for (const card of await page.locator('.browser-diagram').all()) {
+      const details = await card.locator('.browser-diagram-details').boundingBox();
+      const preview = await card.locator('.browser-preview').boundingBox();
+      assert.ok(preview.x > details.x, 'medium desktop cards should keep a side-by-side preview');
+      assert.ok(details.width <= 220, 'details should leave more width for the preview');
+      assert.ok(preview.height >= 340, 'stopped browsers should have the same taller preview area');
+      assert.ok(preview.width > details.width);
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const card of await page.locator('.browser-diagram').all()) {
+      const details = await card.locator('.browser-diagram-details').boundingBox();
+      const preview = await card.locator('.browser-preview').boundingBox();
+      assert.ok(preview.y >= details.y + details.height, 'mobile cards should stack');
+      assert.ok(preview.height >= 260);
+      assert.ok(preview.x + preview.width <= 390);
+      for (const action of await card.locator('.browser-diagram-controls button').all()) {
+        assert.ok((await action.boundingBox()).height >= 34, 'mobile actions remain easy to tap');
+      }
+    }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
 
 test('dashboard layout is compact and keeps actions reachable at desktop and mobile widths', async () => {
   const browser = await chromium.launch({ headless: true });
