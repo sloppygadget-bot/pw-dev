@@ -1134,7 +1134,8 @@ test('gui serves static app and read-only config', async () => {
     assert.doesNotMatch(monitorScript.body, /Rendering DOM snapshot/);
     assert.match(monitorScript.body, /click\.x \* scale/);
     assert.match(monitorScript.body, /image\.getBoundingClientRect/);
-    assert.match(monitorScript.body, /pageMeta\.title = meta/);
+    assert.match(monitorScript.body, /navTargetUrl\.title = meta/);
+    assert.doesNotMatch(monitor.body, /id="page-meta"/);
     const monitorSource = await fs.readFile(new URL('../src/monitor.js', import.meta.url), 'utf8');
     assert.match(monitorSource, /browserRecord\.body\?\.browser\?\.runtime/);
     assert.match(monitorSource, /browserRecord\.body\?\.browser\?\.sessions\?\.\[0\]/);
@@ -1148,7 +1149,7 @@ test('gui serves static app and read-only config', async () => {
     assert.match(monitorStyle.body, /mirror-image/);
     assert.match(monitorStyle.body, /object-fit: contain/);
     assert.match(monitorStyle.body, /\.browser-address/);
-    assert.match(monitorStyle.body, /\.mirror-head #page-meta/);
+    assert.doesNotMatch(monitorStyle.body, /#page-meta/);
 
     const appScript = await get(`${server.origin}/app.js`);
     assert.equal(appScript.statusCode, 200);
@@ -1408,7 +1409,7 @@ test('monitor clears stale Live state and pending screenshots after an establish
     assert.equal(await page.locator('#mirror-image').isVisible(), false, 'the vanished screenshot does not leave a broken image');
     assert.equal(await page.locator('.page-dot, .page-picker').count(), 0);
     assert.equal(await page.locator('#nav-target-url').getAttribute('href'), null);
-    assert.doesNotMatch(await page.locator('#page-meta').textContent(), /target\.test/);
+    assert.doesNotMatch(await page.locator('#nav-target-url').getAttribute('title'), /target\.test/);
     assert.match(await page.locator('#mirror-empty').textContent(), /open a target page/i);
     assert.equal(await page.locator('#mirror-empty').isVisible(), true);
     for (const id of ['refresh-screenshot', 'nav-back', 'nav-forward', 'nav-reload']) {
@@ -1561,6 +1562,52 @@ test('monitor stays compact on mobile and loads all same-origin assets', async (
     assert.deepEqual(issues, []);
     assert.deepEqual(failures, []);
     assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('monitor maximizes to the window and restores with its button or Escape', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seed = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const hub = staticMonitorHub(await seed.screenshot({ type: 'jpeg' }));
+  const actions = [];
+  hub.action = async (_browserId, _pageId, payload) => { actions.push(payload); return { ok: true }; };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: hub });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.goto(`${gui.origin}/monitor/mobile-browser?pageId=mobile-page`);
+    await page.waitForFunction(() => document.querySelector('#mirror-image')?.naturalWidth > 0);
+    assert.equal(await page.locator('#refresh-screenshot + #maximize-monitor').count(), 1);
+    assert.equal(await page.locator('#page-meta').count(), 0);
+    assert.equal(await page.locator('#nav-target-url').getAttribute('title'), 'Mobile target · https://target.test/');
+    const original = await page.locator('#mirror-frame-wrap').boundingBox();
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await page.getByRole('button', { name: 'Maximize', exact: true }).click();
+      assert.equal(await page.locator('#maximize-monitor').getAttribute('aria-pressed'), 'true');
+      assert.deepEqual(await page.locator('#mirror-frame-wrap').boundingBox(), { x: 0, y: 0, ...viewport });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), viewport.width);
+      const restore = await page.getByRole('button', { name: 'Restore', exact: true }).boundingBox();
+      assert.ok(restore.x >= 0 && restore.x + restore.width <= viewport.width);
+      await page.mouse.click(viewport.width / 2, viewport.height / 2);
+      await waitFor(() => actions.some((action) => action.type === 'down'));
+      const down = actions.filter((action) => action.type === 'down').at(-1);
+      assert.ok(Math.abs(down.x - 960) < 1 && Math.abs(down.y - 540) < 1);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#maximize-monitor').getAttribute('aria-pressed'), 'false');
+      assert.equal(await page.locator('#maximize-monitor').evaluate((element) => element === document.activeElement), true);
+      assert.ok(!actions.some((action) => action.key === 'Escape'), 'restore Escape is not sent to the remote browser');
+      actions.length = 0;
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.getByRole('button', { name: 'Maximize', exact: true }).click();
+    await page.getByRole('button', { name: 'Restore', exact: true }).click();
+    assert.deepEqual(await page.locator('#mirror-frame-wrap').boundingBox(), original);
+    assert.deepEqual(errors, []);
   } finally {
     await browser.close();
     await gui.close();

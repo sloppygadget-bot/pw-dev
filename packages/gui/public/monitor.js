@@ -9,9 +9,9 @@ const clickMarker = document.querySelector('#mirror-click-marker');
 const status = document.querySelector('#monitor-status');
 const title = document.querySelector('#monitor-title');
 const subtitle = document.querySelector('#monitor-subtitle');
-const pageMeta = document.querySelector('#page-meta');
 const navTargetUrl = document.querySelector('#nav-target-url');
 const refreshButton = document.querySelector('#refresh-screenshot');
+const maximizeButton = document.querySelector('#maximize-monitor');
 const backButton = document.querySelector('#nav-back');
 const forwardButton = document.querySelector('#nav-forward');
 const reloadButton = document.querySelector('#nav-reload');
@@ -53,6 +53,21 @@ eventSource.addEventListener('message', (event) => {
 });
 eventSource.onerror = () => clearTarget('Disconnected', 'Waiting to reconnect…');
 refreshButton.addEventListener('click', () => void refreshScreenshot());
+maximizeButton.addEventListener('click', () => setMaximized(!document.body.classList.contains('monitor-maximized')));
+let restoreEscape = false;
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !document.body.classList.contains('monitor-maximized')) return;
+  restoreEscape = true;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  setMaximized(false);
+}, true);
+document.addEventListener('keyup', (event) => {
+  if (event.key !== 'Escape' || !restoreEscape) return;
+  restoreEscape = false;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
 backButton.addEventListener('click', () => sendAction({ action: 'navigation', type: 'back' }));
 forwardButton.addEventListener('click', () => sendAction({ action: 'navigation', type: 'forward' }));
 reloadButton.addEventListener('click', () => sendAction({ action: 'navigation', type: 'reload' }));
@@ -78,6 +93,17 @@ window.addEventListener('beforeunload', () => {
   if (state.inputErrorTimer) clearTimeout(state.inputErrorTimer);
   if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
 });
+
+function setMaximized(maximized) {
+  releasePressedKeys();
+  document.body.classList.toggle('monitor-maximized', maximized);
+  maximizeButton.textContent = maximized ? 'Restore' : 'Maximize';
+  maximizeButton.title = maximized ? 'Restore view (Escape)' : 'Fill window';
+  maximizeButton.setAttribute('aria-pressed', String(maximized));
+  if (maximized) imageWrap.focus({ preventScroll: true });
+  else maximizeButton.focus({ preventScroll: true });
+  placeClickMarker(state.lastClick);
+}
 
 function handleEvent(event) {
   if (event.type === 'no-target') {
@@ -158,10 +184,8 @@ function clearTarget(label, message) {
   clickMarker.classList.remove('visible');
   pageDots.replaceChildren();
   pageSummary.textContent = 'No available target';
-  pageMeta.textContent = message;
-  pageMeta.removeAttribute('title');
   navTargetUrl.textContent = 'No target page';
-  navTargetUrl.removeAttribute('title');
+  navTargetUrl.title = message;
   navTargetUrl.removeAttribute('href');
   for (const name of ['viewport', 'scroll', 'click', 'update']) {
     document.querySelector(`#${name}-meta`).textContent = `${name === 'update' ? 'Updated' : name[0].toUpperCase() + name.slice(1)} —`;
@@ -177,10 +201,8 @@ function updatePageState(event) {
   if (event.viewport) state.viewport = event.viewport;
   if (event.url !== undefined) {
     const meta = `${event.title || '(untitled)'} · ${event.url}`;
-    pageMeta.textContent = meta;
-    pageMeta.title = meta;
     navTargetUrl.textContent = event.url;
-    navTargetUrl.title = event.url;
+    navTargetUrl.title = meta;
     navTargetUrl.href = event.url;
   }
   const viewport = event.viewport ?? state.viewport;

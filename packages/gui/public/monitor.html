@@ -18,6 +18,7 @@
         <span id="monitor-status" class="status-pill neutral" role="status" aria-live="polite">Connecting</span>
         <a href="/" target="_blank" rel="noopener noreferrer">Dashboard</a>
         <button id="refresh-screenshot" type="button">Refresh screenshot</button>
+        <button id="maximize-monitor" type="button" aria-pressed="false" aria-controls="mirror-frame-wrap" title="Fill window">Maximize</button>
       </nav>
     </header>
 
@@ -34,7 +35,6 @@
               <a id="nav-target-url" href="#" target="_blank" rel="noopener noreferrer">Waiting for target…</a>
             </div>
           </div>
-          <div id="page-meta" class="muted">Waiting for page state…</div>
         </div>
         <div id="mirror-frame-wrap" class="mirror-frame-wrap" tabindex="0" role="application" aria-label="Interactive live browser; click to focus, then use mouse and keyboard">
           <img id="mirror-image" alt="Live browser screenshot" draggable="false">
