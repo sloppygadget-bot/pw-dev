@@ -1124,10 +1124,13 @@ test('gui serves static app and read-only config', async () => {
     assert.match(monitor.body, /id="mirror-click-marker"/);
     assert.match(monitor.body, /id="refresh-screenshot"/);
     assert.match(monitor.body, /id="page-summary"/);
+    assert.match(monitor.body, /id="page-tabs"[^>]*role="group"/);
     const monitorScript = await get(`${server.origin}/monitor.js`);
     assert.equal(monitorScript.statusCode, 200);
     assert.match(monitorScript.body, /EventSource/);
     assert.match(monitorScript.body, /refreshScreenshot/);
+    assert.match(monitorScript.body, /function renderPageTabs/);
+    assert.doesNotMatch(monitorScript.body, /page-picker/);
     assert.match(monitorScript.body, /monitorUrl\('preview'\)/);
     assert.match(monitorScript.body, /placeClickMarker/);
     assert.doesNotMatch(monitorScript.body, /sanitizeHtml/);
@@ -1216,7 +1219,8 @@ test('gui serves static app and read-only config', async () => {
     assert.match(appScript.body, /function refreshBrowserPreviews/);
     assert.match(appScript.body, /function renderBrowserPreviewTabs/);
     assert.match(appScript.body, /\/api\/pwdev\/sessions\/\$\{encodeURIComponent\(browser\.sessionId\)\}\/pages/);
-    assert.match(appScript.body, /browser-preview-dot/);
+    assert.match(appScript.body, /browser-preview-tab/);
+    assert.doesNotMatch(appScript.body, /browser-preview-picker/);
     assert.doesNotMatch(appScript.body, /setInterval\(\(\) => void refresh\(\)/);
     assert.match(appScript.body, /renderBrowsers\(snapshot\.browsers\);[\s\S]*?refreshVisibleBrowserPreviews\(\)/);
     assert.match(appScript.body, /IntersectionObserver/);
@@ -1238,7 +1242,7 @@ test('gui serves static app and read-only config', async () => {
     assert.match(styles.body, /\.browser-diagram-title/);
     assert.match(styles.body, /\.browser-diagram-content/);
     assert.match(styles.body, /\.browser-preview-pages/);
-    assert.match(styles.body, /\.browser-preview-dot\.selected/);
+    assert.match(styles.body, /\.browser-preview-tab\.selected/);
     assert.match(styles.body, /grid-template-columns: minmax\(180px, 24%\) minmax\(0, 1fr\)/);
     assert.match(styles.body, /\.browser-diagram-content[\s\S]*?gap: 12px/);
     assert.match(styles.body, /@container \(max-width: 480px\)[\s\S]*?\.browser-diagram-content[\s\S]*?grid-template-columns: 1fr/);
@@ -1407,7 +1411,7 @@ test('monitor clears stale Live state and pending screenshots after an establish
     assert.equal(await page.locator('#monitor-status').textContent(), 'No target page');
     assert.equal(await page.locator('#mirror-image').getAttribute('src'), null);
     assert.equal(await page.locator('#mirror-image').isVisible(), false, 'the vanished screenshot does not leave a broken image');
-    assert.equal(await page.locator('.page-dot, .page-picker').count(), 0);
+    assert.equal(await page.locator('.page-tab, .page-tab-arrow').count(), 0);
     assert.equal(await page.locator('#nav-target-url').getAttribute('href'), null);
     assert.doesNotMatch(await page.locator('#nav-target-url').getAttribute('title'), /target\.test/);
     assert.match(await page.locator('#mirror-empty').textContent(), /open a target page/i);
@@ -1680,7 +1684,7 @@ test('monitor keeps its decoded screenshot through pending decode and capture fa
   }
 });
 
-test('monitor and dashboard tab dots retain small indicators within larger touch targets', async () => {
+test('monitor and dashboard tab numbers retain accessible touch targets and lease indicators', async () => {
   const browser = await chromium.launch({ headless: true });
   const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
   const preview = await seedPage.screenshot({ type: 'jpeg' });
@@ -1688,8 +1692,13 @@ test('monitor and dashboard tab dots retain small indicators within larger touch
   try {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
     await page.goto(`${gui.origin}/monitor/mobile-browser?pageId=mobile-page`);
-    await page.locator('.page-dot').waitFor();
-    const monitorDot = await page.locator('.page-dot').evaluate(tabDotGeometry);
+    const monitorTab = page.locator('.page-tab.selected');
+    await monitorTab.waitFor();
+    await monitorTab.scrollIntoViewIfNeeded();
+    assert.equal(await monitorTab.textContent(), '1');
+    assert.equal(await monitorTab.getAttribute('aria-pressed'), 'true');
+    assert.match(await monitorTab.getAttribute('title'), /Mobile target\nhttps:\/\/target.test\/\nLeased by test-agent/);
+    const monitorGeometry = await monitorTab.evaluate(tabNumberGeometry);
     await routeDashboardSnapshot(page, browserPreviewSnapshot());
     await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
       contentType: 'application/json', body: JSON.stringify({ ok: true, sessionId: 'preview-session', pages: [
@@ -1699,15 +1708,19 @@ test('monitor and dashboard tab dots retain small indicators within larger touch
     }));
     await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => route.fulfill({ contentType: 'image/jpeg', body: preview }));
     await page.goto(gui.origin);
-    await page.locator('.browser-preview-dot.selected').waitFor();
-    await page.locator('.browser-preview-dot.selected').scrollIntoViewIfNeeded();
-    const dashboardDot = await page.locator('.browser-preview-dot.selected').evaluate(tabDotGeometry);
-    for (const [name, dot] of [['monitor', monitorDot], ['dashboard', dashboardDot]]) {
-      assert.ok(dot.width >= 28 && dot.height >= 28, `${name} dot needs a 28px touch target, got ${dot.width}×${dot.height}`);
-      assert.ok(dot.indicatorWidth <= 12 && dot.indicatorWidth > 0, `${name} indicator stays small`);
-      assert.notEqual(dot.background, 'rgba(0, 0, 0, 0)', `${name} selected indicator is filled`);
-      assert.notEqual(dot.shadow, 'none', `${name} leased indicator has a ring`);
-      assert.equal(dot.outerHit, true, `${name} touch target includes space outside the indicator`);
+    const selectedTab = page.locator('.browser-preview-tab.selected');
+    await selectedTab.waitFor();
+    await selectedTab.scrollIntoViewIfNeeded();
+    assert.equal(await selectedTab.textContent(), '1');
+    assert.equal(await selectedTab.getAttribute('aria-pressed'), 'true');
+    assert.match(await selectedTab.getAttribute('title'), /Preview\nhttps:\/\/preview.test\/\nLeased by test-agent/);
+    const dashboardGeometry = await selectedTab.evaluate(tabNumberGeometry);
+    for (const [name, tab] of [['monitor', monitorGeometry], ['dashboard', dashboardGeometry]]) {
+      assert.ok(tab.width >= 28 && tab.height >= 28, `${name} tab retains a 28px touch target`);
+      assert.notEqual(tab.background, 'rgba(0, 0, 0, 0)', `${name} selected number is filled`);
+      assert.notEqual(tab.color, tab.background, `${name} selected number remains readable`);
+      assert.equal(tab.outline, 'solid', `${name} leased tab retains a ring`);
+      assert.equal(tab.outerHit, true, `${name} target extends to button edges`);
     }
   } finally {
     await browser.close();
@@ -1715,14 +1728,299 @@ test('monitor and dashboard tab dots retain small indicators within larger touch
   }
 });
 
-function tabDotGeometry(element) {
+function tabNumberGeometry(element) {
   const box = element.getBoundingClientRect();
-  const style = getComputedStyle(element, '::before');
+  const style = getComputedStyle(element);
   return {
-    width: box.width, height: box.height, indicatorWidth: parseFloat(style.width),
-    background: style.backgroundColor, shadow: style.boxShadow,
+    width: box.width, height: box.height, color: style.color,
+    background: style.backgroundColor, outline: style.outlineStyle,
     outerHit: document.elementFromPoint(box.x + 2, box.y + box.height / 2) === element,
   };
+}
+
+for (const width of [390, 1280]) {
+test(`monitor numbered tabs paginate and navigate exact targets at ${width}px`, async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const pages = Array.from({ length: 12 }, (_, index) => ({
+    id: `tab-${index + 1}`, title: `Page ${index + 1}`, url: `https://target.test/${index + 1}`,
+  }));
+  let sendInventory;
+  const hub = {
+    ...staticMonitorHub(preview),
+    async stream(browserId, pageId, req, res) {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
+      const send = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+      send({ type: 'connected', browserId, pageId, pages });
+      send({ type: 'page', viewport: { width: 1920, height: 1080 }, url: pages.find((page) => page.id === pageId)?.url });
+      sendInventory = () => send({ type: 'pages', pageId, pages });
+      req.once('close', () => res.end());
+    },
+  };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: hub });
+  try {
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
+    await page.goto(`${gui.origin}/monitor/pengxie?pageId=tab-1`);
+    await page.evaluate(() => { window.__monitorDocumentToken = 'same-document'; });
+    await page.locator('.page-tab.selected').waitFor();
+    const numbers = page.locator('.page-tab');
+    const next = page.getByRole('button', { name: 'Next tabs', exact: true });
+    assert.deepEqual(await numbers.allTextContents(), ['1', '2', '3']);
+    assert.equal(await page.locator('.page-picker').count(), 0);
+    for (let offset = 0; offset < 9; offset += 1) await next.click();
+    assert.deepEqual(await numbers.allTextContents(), ['10', '11', '12']);
+    assert.equal(await next.isDisabled(), true);
+    assert.match(page.url(), /pageId=tab-1$/);
+    pages[9].title = 'Updated page 10';
+    sendInventory();
+    await page.getByRole('button', { name: 'Monitor tab 10: Updated page 10', exact: true }).waitFor();
+    assert.deepEqual(await numbers.allTextContents(), ['10', '11', '12']);
+    const last = page.getByRole('button', { name: 'Monitor tab 12: Page 12', exact: true });
+    await last.hover();
+    assert.equal(await last.getAttribute('title'), 'Page 12\nhttps://target.test/12');
+    await last.focus();
+    await page.keyboard.press('Enter');
+    await page.waitForURL('**/monitor/pengxie?pageId=tab-12');
+    await page.waitForFunction(() => document.querySelector('.page-tab.selected')?.textContent === '12');
+    assert.equal(await page.evaluate(() => window.__monitorDocumentToken), 'same-document', 'tab selection keeps the current document');
+    assert.deepEqual(await numbers.allTextContents(), ['10', '11', '12']);
+    const box = await page.locator('#page-tabs').evaluate((element) => ({
+      overflowing: element.scrollWidth > element.clientWidth,
+      viewportOverflowing: document.documentElement.scrollWidth > window.innerWidth,
+    }));
+    assert.deepEqual(box, { overflowing: false, viewportOverflowing: false });
+    await page.getByRole('button', { name: 'Previous tabs', exact: true }).click();
+    assert.deepEqual(await numbers.allTextContents(), ['9', '10', '11']);
+    assert.match(page.url(), /pageId=tab-12$/);
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
+}
+
+test('monitor revisits cached screenshots without waiting for a new capture or reloading', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const pages = [1, 2, 3].map((index) => ({ id: `tab-${index}`, title: `Page ${index}`, url: `https://target.test/${index}` }));
+  const hub = {
+    ...staticMonitorHub(preview),
+    async stream(browserId, pageId, req, res) {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
+      res.write(`data: ${JSON.stringify({ type: 'connected', browserId, pageId, sessionId: 'session-1', pages })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'page', url: pages.find((page) => page.id === pageId)?.url, viewport: { width: 1920, height: 1080 } })}\n\n`);
+      req.once('close', () => res.end());
+    },
+  };
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: hub });
+  let holdCaptures = false;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  try {
+    const page = await browser.newPage();
+    await page.route('**/api/monitor/pengxie/preview*', async (route) => {
+      if (holdCaptures) await gate;
+      await route.fulfill({ contentType: 'image/jpeg', body: preview }).catch(() => {});
+    });
+    await page.goto(`${gui.origin}/monitor/pengxie?pageId=tab-1`);
+    await page.waitForFunction(() => document.querySelector('#mirror-image')?.naturalWidth > 0);
+    await page.evaluate(() => { window.__monitorDocumentToken = 'same-document'; });
+    const first = await page.locator('#mirror-image').getAttribute('src');
+    await page.getByRole('button', { name: 'Monitor tab 2: Page 2', exact: true }).click();
+    await page.waitForFunction((src) => {
+      const image = document.querySelector('#mirror-image');
+      return image?.naturalWidth > 0 && image.getAttribute('src') !== src;
+    }, first);
+    const second = await page.locator('#mirror-image').getAttribute('src');
+    holdCaptures = true;
+    await page.getByRole('button', { name: 'Monitor tab 1: Page 1', exact: true }).click();
+    assert.equal(await page.locator('#mirror-image').getAttribute('src'), first);
+    assert.equal(await page.locator('.page-tab.selected').textContent(), '1');
+    await page.getByRole('button', { name: 'Monitor tab 2: Page 2', exact: true }).click();
+    assert.equal(await page.locator('#mirror-image').getAttribute('src'), second);
+    await page.getByRole('button', { name: 'Monitor tab 3: Page 3', exact: true }).click();
+    assert.equal(await page.locator('#mirror-image').getAttribute('src'), null, 'a first-time tab never shows another tab screenshot');
+    assert.equal(await page.locator('#mirror-image').isVisible(), false);
+    await page.getByRole('button', { name: 'Monitor tab 1: Page 1', exact: true }).click();
+    assert.equal(await page.locator('#mirror-image').getAttribute('src'), first);
+    assert.equal(await page.evaluate(() => window.__monitorDocumentToken), 'same-document');
+    holdCaptures = false;
+    release();
+    await page.waitForFunction((src) => {
+      const image = document.querySelector('#mirror-image');
+      return image?.naturalWidth > 0 && image.getAttribute('src') !== src;
+    }, first);
+    assert.equal(await page.locator('.page-tab.selected').textContent(), '1');
+  } finally {
+    release();
+    await browser.close();
+    await gui.close();
+  }
+});
+
+test('dashboard reuses cached tab thumbnails immediately while new captures are pending', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+  const preview = await seedPage.screenshot({ type: 'jpeg' });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  let holdCaptures = false;
+  let releaseCaptures;
+  const gate = new Promise((resolve) => { releaseCaptures = resolve; });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await routeDashboardSnapshot(page, browserPreviewSnapshot());
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json', body: JSON.stringify({ pages: [
+        { id: 'first', title: 'First', url: 'https://target.test/first' },
+        { id: 'second', title: 'Second', url: 'https://target.test/second' },
+        { id: 'third', title: 'Third', url: 'https://target.test/third' },
+      ] }),
+    }));
+    await page.route('**/api/monitor/preview-browser/thumbnail*', async (route) => {
+      if (holdCaptures) await gate;
+      await route.fulfill({ contentType: 'image/jpeg', body: preview });
+    });
+    await page.goto(gui.origin);
+    await page.locator('.browser-preview img').waitFor();
+    await page.locator('#interval').selectOption('0');
+    const first = await page.locator('.browser-preview img').getAttribute('src');
+    await page.getByRole('button', { name: 'Preview tab 2: Second', exact: true }).click();
+    await page.waitForFunction((src) => {
+      const image = document.querySelector('.browser-preview img');
+      return image?.complete && image.src !== src;
+    }, first);
+    const second = await page.locator('.browser-preview img').getAttribute('src');
+    holdCaptures = true;
+    await page.getByRole('button', { name: 'Preview tab 1: First', exact: true }).click();
+    assert.equal(await page.locator('.browser-preview img').getAttribute('src'), first);
+    assert.equal(await page.locator('.browser-preview-tab.selected').textContent(), '1');
+    await page.getByRole('button', { name: 'Preview tab 2: Second', exact: true }).click();
+    assert.equal(await page.locator('.browser-preview img').getAttribute('src'), second);
+    await page.getByRole('button', { name: 'Preview tab 3: Third', exact: true }).click();
+    assert.equal(await page.locator('.browser-preview img').count(), 0, 'a new tab does not show another tab screenshot');
+    assert.equal(await page.locator('.browser-preview-tab.selected').textContent(), '3');
+    assert.equal(await page.locator('.browser-preview-tab').count(), 3, 'tabs remain usable during capture');
+    await page.getByRole('button', { name: 'Preview tab 1: First', exact: true }).click();
+    assert.equal(await page.locator('.browser-preview img').getAttribute('src'), first);
+    holdCaptures = false;
+    releaseCaptures();
+    await page.waitForFunction((src) => {
+      const image = document.querySelector('.browser-preview img');
+      return image?.complete && image.src !== src;
+    }, first);
+    assert.equal(await page.locator('.browser-preview-tab.selected').textContent(), '1');
+  } finally {
+    releaseCaptures();
+    await browser.close();
+    await gui.close();
+  }
+});
+
+for (const width of [390, 1280]) {
+test(`dashboard numbered tabs slide, select exact targets, and survive refresh at ${width}px`, async () => {
+  const browser = await chromium.launch({ headless: true });
+  const gui = await startPwDevGuiServer({ port: 0, brokerDiscovery: false, monitorHub: { async close() {} } });
+  let pages = Array.from({ length: 12 }, (_, index) => ({
+    id: `target-${index + 1}`,
+    title: index === 10 ? '' : `Page ${index + 1} <content>`,
+    url: `https://preview.test/tab/${index + 1}`,
+  }));
+  const captures = [];
+  try {
+    const seedPage = await browser.newPage({ viewport: { width: 160, height: 90 } });
+    const preview = await seedPage.screenshot({ type: 'jpeg' });
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
+    await page.addInitScript(() => {
+      window.__monitorOpens = [];
+      window.open = (url) => { window.__monitorOpens.push(url); };
+    });
+    await routeDashboardSnapshot(page, browserPreviewSnapshot());
+    await page.route('**/api/pwdev/sessions/preview-session/pages', (route) => route.fulfill({
+      contentType: 'application/json', body: JSON.stringify({ pages }),
+    }));
+    await page.route('**/api/monitor/preview-browser/thumbnail*', (route) => {
+      captures.push(new URL(route.request().url()).searchParams.get('pageId'));
+      return route.fulfill({ contentType: 'image/jpeg', body: preview });
+    });
+    await page.goto(gui.origin);
+    await page.locator('.browser-preview-tab.selected').waitFor();
+    await page.locator('#interval').selectOption('0');
+    const tabs = page.locator('.browser-preview-tab');
+    const previous = page.getByRole('button', { name: 'Previous tabs', exact: true });
+    const next = page.getByRole('button', { name: 'Next tabs', exact: true });
+    assert.deepEqual(await tabs.allTextContents(), ['1', '2', '3']);
+    assert.equal(await page.locator('.browser-preview-picker').count(), 0);
+    assert.equal(await previous.isDisabled(), true);
+    const captureCount = captures.length;
+    for (let offset = 1; offset <= 9; offset += 1) {
+      await next.click();
+      assert.deepEqual(await tabs.allTextContents(), [offset + 1, offset + 2, offset + 3].map(String));
+    }
+    assert.equal(await next.isDisabled(), true);
+    assert.equal(captures.length, captureCount, 'sliding does not request thumbnails');
+    const lastTab = page.getByRole('button', { name: 'Preview tab 12:', exact: false });
+    await lastTab.hover();
+    assert.equal(await lastTab.getAttribute('title'), 'Page 12 <content>\nhttps://preview.test/tab/12');
+    assert.equal(await tabs.nth(1).getAttribute('title'), '(untitled)\nhttps://preview.test/tab/11');
+    assert.equal(await tabs.locator('content').count(), 0, 'titles are plain text');
+    await lastTab.focus();
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.browser-preview-tab.selected')?.textContent === '12');
+    assert.equal(captures.at(-1), 'target-12', 'thumbnail targets the numbered tab');
+    assert.equal(await lastTab.getAttribute('aria-pressed'), 'true');
+    assert.deepEqual(await page.evaluate(() => window.__monitorOpens), [], 'tab controls do not open the monitor');
+    await page.locator('.browser-preview-media').click();
+    assert.deepEqual(await page.evaluate(() => window.__monitorOpens), ['/monitor/preview-browser?pageId=target-12']);
+
+    // A routine refresh retains the window and exact selected target.
+    const oldImage = await page.locator('.browser-preview img').getAttribute('src');
+    await page.locator('#refresh').click();
+    await page.waitForFunction((src) => {
+      const image = document.querySelector('.browser-preview img');
+      return image?.complete && image.naturalWidth > 0 && image.src !== src;
+    }, oldImage);
+    assert.deepEqual(await tabs.allTextContents(), ['10', '11', '12']);
+    assert.equal(await page.locator('.browser-preview-tab.selected').textContent(), '12');
+    assert.equal(await page.locator('.browser-preview-pages').count(), 1, 'refresh does not duplicate controls');
+    await previous.click();
+    assert.deepEqual(await tabs.allTextContents(), ['9', '10', '11']);
+    assert.equal(captures.at(-1), 'target-12', 'sliding leaves selection unchanged');
+    await next.click();
+    const geometry = await page.locator('.browser-preview-pages').evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return { left: box.left, right: box.right, width: window.innerWidth, overflow: element.scrollWidth > element.clientWidth };
+    });
+    assert.ok(geometry.left >= 0 && geometry.right <= geometry.width && !geometry.overflow, 'double-digit tabs fit the card');
+
+    // Closing the selected tab resets to the first surviving tab.
+    pages = pages.slice(0, 4);
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => document.querySelector('.browser-preview-tab.selected')?.textContent === '1');
+    assert.deepEqual(await tabs.allTextContents(), ['1', '2', '3']);
+    await next.click();
+    assert.deepEqual(await tabs.allTextContents(), ['2', '3', '4']);
+    assert.equal(await next.isDisabled(), true);
+    // Closing an unselected tab clamps the window without losing selection.
+    for (const count of [3, 2, 1, 0]) {
+      pages = pages.slice(0, count);
+      await page.locator('#refresh').click();
+      if (count >= 2) {
+        await page.waitForFunction((n) => document.querySelectorAll('.browser-preview-tab').length === n, count);
+        assert.deepEqual(await tabs.allTextContents(), Array.from({ length: count }, (_, index) => String(index + 1)));
+        assert.equal(await page.locator('.browser-preview-tab-arrow').count(), 0);
+      } else if (count === 1) {
+        await page.locator('.browser-preview-pages').waitFor({ state: 'detached' });
+      } else {
+        await page.getByText('Open a target page to load a preview.').waitFor();
+      }
+    }
+  } finally {
+    await browser.close();
+    await gui.close();
+  }
+});
 }
 
 test('screenshot monitor forwards mapped mouse, keyboard, and paste input', async () => {
@@ -1958,7 +2256,7 @@ test(`dashboard previews exclude mixed-host GUI tabs when opened through ${opera
       const image = document.querySelector('.browser-preview img');
       return image?.complete && image.naturalWidth > 0;
     }, null, { timeout: 2000 });
-    assert.equal(await page.locator('.browser-preview-dot').count(), 0);
+    assert.equal(await page.locator('.browser-preview-tab').count(), 0);
     assert.equal(previewRequests, 1);
     assert.doesNotMatch(await page.locator('.browser-preview').textContent(), /pw-dev|Monitor/);
   } finally {
@@ -1989,7 +2287,7 @@ test('dashboard shows a target-page empty state for a GUI-only session', async (
     await page.goto(gui.origin);
     await page.getByText('Open a target page to load a preview.').waitFor();
     assert.equal(previewRequests, 0);
-    assert.equal(await page.locator('.browser-preview-dot').count(), 0);
+    assert.equal(await page.locator('.browser-preview-tab').count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Monitor' }).count(), 0);
   } finally {
     await browser.close();

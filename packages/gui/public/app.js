@@ -9,8 +9,10 @@ const state = {
   last: undefined,
   browserView: 'diagram',
   previewUrls: new Map(),
+  previewTabCache: new Map(),
   previewPages: new Map(),
   previewPageIds: new Map(),
+  previewTabOffsets: new Map(),
   previewRefreshGenerations: new Map(),
   previewTransitionUrls: new Map(),
   nextPreviewRefreshGeneration: 0,
@@ -786,27 +788,69 @@ function monitorablePreviewPages(pages, guiOrigins) {
   return pages.filter((page) => !isGuiPage(page, guiOrigins));
 }
 
+function clearBrowserPreviewCache(browserId) {
+  const urls = new Set([state.previewUrls.get(browserId)]);
+  for (const entry of state.previewTabCache.get(browserId)?.pages.values() ?? []) urls.add(entry.url);
+  for (const url of urls) if (url) URL.revokeObjectURL(url);
+  state.previewTabCache.delete(browserId);
+  state.previewUrls.delete(browserId);
+  state.previewTransitionUrls.delete(browserId);
+}
+
+function browserPreviewCache(browser) {
+  let cache = state.previewTabCache.get(browser.id);
+  if (cache && cache.sessionId !== browser.sessionId) {
+    clearBrowserPreviewCache(browser.id);
+    state.previewPages.delete(browser.id);
+    state.previewPageIds.delete(browser.id);
+    state.previewTabOffsets.delete(browser.id);
+    state.previewRefreshGenerations.delete(browser.id);
+    cache = undefined;
+  }
+  if (!cache) {
+    cache = { sessionId: browser.sessionId, pages: new Map() };
+    state.previewTabCache.set(browser.id, cache);
+  }
+  return cache;
+}
+
+function showCachedBrowserPreview(browser, pageId) {
+  const cache = browserPreviewCache(browser);
+  const entry = cache.pages.get(pageId);
+  if (entry) {
+    // Touch the entry so eviction keeps recently viewed tabs.
+    cache.pages.delete(pageId);
+    cache.pages.set(pageId, entry);
+    state.previewUrls.set(browser.id, entry.url);
+  } else {
+    state.previewUrls.delete(browser.id);
+  }
+  state.previewTransitionUrls.delete(browser.id);
+}
+
 async function refreshBrowserPreviews(browsers) {
   const knownBrowsers = state.last?.browsers ?? browsers;
   const activeIds = new Set(knownBrowsers.filter((browser) => browser.sessionId).map((browser) => browser.id));
   const trackedIds = new Set([
     ...state.previewUrls.keys(),
+    ...state.previewTabCache.keys(),
     ...state.previewPages.keys(),
     ...state.previewPageIds.keys(),
+    ...state.previewTabOffsets.keys(),
     ...state.previewRefreshGenerations.keys(),
     ...state.previewTransitionUrls.keys(),
   ]);
   for (const browserId of trackedIds) {
     if (activeIds.has(browserId)) continue;
-    const url = state.previewUrls.get(browserId);
-    if (url) URL.revokeObjectURL(url);
-    state.previewUrls.delete(browserId);
+    clearBrowserPreviewCache(browserId);
     state.previewPages.delete(browserId);
     state.previewPageIds.delete(browserId);
+    state.previewTabOffsets.delete(browserId);
     state.previewRefreshGenerations.delete(browserId);
     state.previewTransitionUrls.delete(browserId);
   }
   await Promise.all(browsers.filter((browser) => browser.sessionId).map(async (browser) => {
+    const cache = browserPreviewCache(browser);
     const generation = ++state.nextPreviewRefreshGeneration;
     state.previewRefreshGenerations.set(browser.id, generation);
     const isLatestRefresh = () => state.previewRefreshGenerations.get(browser.id) === generation;
@@ -818,15 +862,21 @@ async function refreshBrowserPreviews(browsers) {
         if (!isLatestRefresh()) return;
         const pages = monitorablePreviewPages(Array.isArray(body.pages) ? body.pages : [], Array.isArray(body.guiOrigins) ? body.guiOrigins : []);
         state.previewPages.set(browser.id, pages);
+        const pageUrls = new Map(pages.map((page) => [page.id, page.url]));
+        for (const [pageId, entry] of cache.pages) {
+          if (pageUrls.has(pageId) && pageUrls.get(pageId) === entry.pageUrl) continue;
+          URL.revokeObjectURL(entry.url);
+          cache.pages.delete(pageId);
+        }
         const selectedPageId = state.previewPageIds.get(browser.id);
-        if (!pages.some((page) => page.id === selectedPageId)) state.previewPageIds.set(browser.id, pages[0]?.id);
+        if (!pages.some((page) => page.id === selectedPageId)) {
+          state.previewPageIds.set(browser.id, pages[0]?.id);
+          state.previewTabOffsets.delete(browser.id);
+        }
       }
       const pageId = state.previewPageIds.get(browser.id);
+      showCachedBrowserPreview(browser, pageId);
       if (!pageId) {
-        const previous = state.previewUrls.get(browser.id);
-        if (previous) URL.revokeObjectURL(previous);
-        state.previewUrls.delete(browser.id);
-        state.previewTransitionUrls.delete(browser.id);
         return;
       }
       const response = await fetch(
@@ -840,12 +890,21 @@ async function refreshBrowserPreviews(browsers) {
         return;
       }
       const previous = state.previewUrls.get(browser.id);
+      const priorEntry = cache.pages.get(pageId);
+      cache.pages.delete(pageId);
+      cache.pages.set(pageId, { url, pageUrl: state.previewPages.get(browser.id)?.find((page) => page.id === pageId)?.url });
       state.previewUrls.set(browser.id, url);
       if (previous) {
         state.previewTransitionUrls.set(browser.id, url);
-        URL.revokeObjectURL(previous);
       } else {
         state.previewTransitionUrls.delete(browser.id);
+      }
+      if (priorEntry) URL.revokeObjectURL(priorEntry.url);
+      // Keep decoded screenshots bounded even in browsers with many tabs.
+      while (cache.pages.size > 12) {
+        const oldestId = cache.pages.keys().next().value;
+        URL.revokeObjectURL(cache.pages.get(oldestId).url);
+        cache.pages.delete(oldestId);
       }
     } catch {
       // Keep the previous preview when a transient monitor capture fails.
@@ -880,7 +939,12 @@ async function createDecodedImageUrl(blob) {
 
 async function selectBrowserPreviewPage(browser, pageId) {
   if (state.previewPageIds.get(browser.id) === pageId) return;
+  if (!state.previewPages.get(browser.id)?.some((page) => page.id === pageId)) return;
   state.previewPageIds.set(browser.id, pageId);
+  showCachedBrowserPreview(browser, pageId);
+  // The selection starts its own capture; the new card observer can reuse it.
+  state.previewFetchedCycles.set(browser.id, state.previewRefreshCycle);
+  if (state.last) renderBrowsers(state.last.browsers);
   await refreshBrowserPreviews([browser]);
   if (state.last) renderBrowsers(state.last.browsers);
 }
@@ -891,37 +955,55 @@ function renderBrowserPreviewTabs(browser) {
   if (pages.length < 2) return undefined;
   const tabs = document.createElement('div');
   tabs.className = 'browser-preview-pages';
+  tabs.setAttribute('role', 'group');
   tabs.setAttribute('aria-label', 'Session pages');
-  const visiblePages = pages.slice(0, 3);
-  const selectedPage = pages.find((page) => page.id === selectedPageId);
-  if (selectedPage && !visiblePages.includes(selectedPage) && visiblePages.length === 3) visiblePages[2] = selectedPage;
-  const visibleIds = new Set(visiblePages.map((page) => page.id));
-  for (const page of visiblePages) {
-    const index = pages.indexOf(page);
-    const dot = document.createElement('button');
-    dot.type = 'button';
-    dot.className = `browser-preview-dot${page.id === selectedPageId ? ' selected' : ''}${page.lease ? ' leased' : ''}`;
-    dot.title = `${page.title || '(untitled)'} · ${page.url}${page.lease ? ` · leased by ${page.lease.owner}` : ' · available'}`;
-    dot.setAttribute('aria-label', `Preview tab ${index + 1}: ${page.title || page.url}`);
-    dot.addEventListener('click', (event) => {
+  const visibleCount = 3;
+  const maxOffset = Math.max(0, pages.length - visibleCount);
+  let offset = Math.min(state.previewTabOffsets.get(browser.id) ?? 0, maxOffset);
+  const numbers = document.createElement('div');
+  numbers.className = 'browser-preview-tab-numbers';
+  const previous = createArrow('Previous tabs', '‹', -1);
+  const next = createArrow('Next tabs', '›', 1);
+  if (maxOffset) tabs.append(previous, numbers, next);
+  else tabs.append(numbers);
+
+  function createArrow(label, text, direction) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'browser-preview-tab-arrow';
+    button.textContent = text;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.addEventListener('click', (event) => {
       event.stopPropagation();
-      void selectBrowserPreviewPage(browser, page.id);
+      offset = Math.max(0, Math.min(offset + direction, maxOffset));
+      renderNumbers();
     });
-    tabs.append(dot);
+    return button;
   }
-  const hiddenPages = pages.filter((page) => !visibleIds.has(page.id));
-  if (hiddenPages.length) {
-    const picker = document.createElement('select');
-    picker.className = 'browser-preview-picker';
-    picker.setAttribute('aria-label', 'Choose another session tab');
-    picker.append(new Option(`+${hiddenPages.length} tabs`, ''));
-    for (const page of hiddenPages) picker.append(new Option(`${page.lease ? '🔒 ' : ''}${page.title || page.url || '(untitled)'}`, page.id));
-    picker.addEventListener('change', (event) => {
-      event.stopPropagation();
-      if (picker.value) void selectBrowserPreviewPage(browser, picker.value);
-    });
-    tabs.append(picker);
+
+  function renderNumbers() {
+    state.previewTabOffsets.set(browser.id, offset);
+    previous.disabled = offset === 0;
+    next.disabled = offset === maxOffset;
+    numbers.replaceChildren();
+    for (let index = offset; index < Math.min(offset + visibleCount, pages.length); index += 1) {
+      const page = pages[index];
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `browser-preview-tab${page.id === selectedPageId ? ' selected' : ''}${page.lease ? ' leased' : ''}`;
+      button.textContent = String(index + 1);
+      button.title = `${page.title || '(untitled)'}\n${page.url || ''}${page.lease ? `\nLeased by ${page.lease.owner}` : ''}`;
+      button.setAttribute('aria-label', `Preview tab ${index + 1}: ${page.title || page.url || '(untitled)'}`);
+      button.setAttribute('aria-pressed', String(page.id === selectedPageId));
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void selectBrowserPreviewPage(browser, page.id);
+      });
+      numbers.append(button);
+    }
   }
+  renderNumbers();
   return tabs;
 }
 
@@ -1057,7 +1139,7 @@ function renderBrowserDiagram(root, browsers) {
     const preview = document.createElement('section');
     preview.className = 'browser-preview';
     const previewUrl = state.previewUrls.get(browser.id);
-    if (browser.sessionId && previewUrl) {
+    if (browser.sessionId && (previewUrl || state.previewPages.get(browser.id)?.length)) {
       const previewMedia = document.createElement('div');
       previewMedia.className = 'browser-preview-media enabled';
       previewMedia.tabIndex = 0;
@@ -1070,14 +1152,19 @@ function renderBrowserDiagram(root, browsers) {
           openBrowserMonitor(browser);
         }
       });
-      const image = document.createElement('img');
-      image.alt = `Latest browser preview for ${browser.name ?? browser.id}`;
-      image.src = previewUrl;
-      if (state.previewTransitionUrls.get(browser.id) === previewUrl) {
-        image.classList.add('preview-updated');
-        state.previewTransitionUrls.delete(browser.id);
+      if (previewUrl) {
+        const image = document.createElement('img');
+        image.alt = `Latest browser preview for ${browser.name ?? browser.id}`;
+        image.src = previewUrl;
+        if (state.previewTransitionUrls.get(browser.id) === previewUrl) {
+          image.classList.add('preview-updated');
+          state.previewTransitionUrls.delete(browser.id);
+        }
+        previewMedia.append(image);
+      } else {
+        previewMedia.classList.add('loading');
+        previewMedia.textContent = 'Loading preview…';
       }
-      previewMedia.append(image);
       preview.append(previewMedia);
       const tabs = renderBrowserPreviewTabs(browser);
       if (tabs) preview.append(tabs);

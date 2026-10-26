@@ -693,6 +693,7 @@ body.modal-open { overflow: hidden; }
 }
 
 .browser-preview-media { min-height: 0; flex: 1; overflow: hidden; }
+.browser-preview-media.loading { display: grid; place-items: center; color: var(--muted); font-size: 13px; }
 .browser-preview-media.enabled { cursor: pointer; }
 .browser-preview-media.enabled:focus-visible { outline: 3px solid rgba(56, 108, 176, .3); outline-offset: -3px; }
 .browser-preview.empty { display: grid; min-height: 340px; place-items: center; padding: 12px; color: var(--muted); font-size: 13px; text-align: center; }
@@ -714,11 +715,14 @@ body.modal-open { overflow: hidden; }
   .browser-preview img.preview-updated { animation: none; }
 }
 .browser-preview-pages { display: flex; min-height: 32px; align-items: center; justify-content: center; gap: 6px; padding: 5px 8px; border-top: 1px solid var(--line); background: var(--surface); }
-.browser-preview-dot { position: relative; min-height: 28px; width: 28px; padding: 0; border: 0; background: transparent; }
-.browser-preview-dot::before { content: ''; position: absolute; inset: 8px; border: 2px solid #7b8794; border-radius: 50%; }
-.browser-preview-dot.selected::before { border-color: var(--blue); background: var(--blue); }
-.browser-preview-dot.leased::before { box-shadow: 0 0 0 2px #f0b429; }
-.browser-preview-picker { min-height: 24px; max-width: 130px; padding: 0 4px; color: var(--muted); font-size: 12px; }
+.browser-preview-tab-numbers { display: flex; align-items: center; gap: 6px; }
+.browser-preview-tab,
+.browser-preview-tab-arrow { flex: 0 0 auto; min-width: 28px; min-height: 28px; padding: 0 5px; font-size: 12px; }
+.browser-preview-tab { border-color: transparent; background: transparent; color: var(--muted); font-variant-numeric: tabular-nums; }
+.browser-preview-tab.selected { border-color: var(--blue); background: var(--blue); color: #fff; }
+.browser-preview-tab.leased { outline: 2px solid #f0b429; outline-offset: -2px; }
+.browser-preview-tab:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+.browser-preview-tab-arrow { font-size: 20px; line-height: 1; }
 
 @media (max-width: 720px) {
   .browser-diagram-content { grid-template-columns: 1fr; }

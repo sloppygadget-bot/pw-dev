@@ -37,6 +37,12 @@ export class BrowserMonitorHub {
     this.dialogPages = new WeakSet();
     /** @type {Map<string, MonitorConnection>} */
     this.connections = new Map();
+    // Lookup aliases can change during tab fallback; ownership must not.
+    /** @type {Set<MonitorConnection>} */
+    this.ownedConnections = new Set();
+    /** @type {Map<string, Promise<unknown>>} */
+    this.connectionPromises = new Map();
+    this.closed = false;
     /** @type {Map<string, Promise<Buffer>>} */
     this.previewPromises = new Map();
     this.thumbnailPromises = new Map();
@@ -65,34 +71,10 @@ export class BrowserMonitorHub {
   }
 
   async stream(browserId, pageId, req, res) {
-    const connection = await this.ensureConnection(browserId, pageId);
-    if (connection.idleTimer) clearTimeout(connection.idleTimer);
-    // A monitor tab may attach to a connection that has remained alive while
-    // the browser navigated elsewhere. Refresh before sending the cached page
-    // metadata so a newly opened tab never starts with stale dimensions.
-    await this.refresh(connection);
-    const initialPages = await this.refreshPageInventory(connection);
-    res.writeHead(200, {
-      'cache-control': 'no-store',
-      'connection': 'keep-alive',
-      'content-type': 'text/event-stream; charset=utf-8',
-      'x-accel-buffering': 'no',
-    });
-    connection.subscribers.add(res);
-    this.writeEvent(res, { type: 'connected', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages: initialPages });
-    this.writeEvent(res, connection.lastPageState ?? { type: 'state', status: 'connecting', browserId });
-    const keepAlive = setInterval(() => {
-      if (!res.destroyed) res.write(': keep-alive\n\n');
-    }, 15_000);
-    const pageInventory = setInterval(() => {
-      void this.refreshPageInventory(connection)
-        .then((pages) => {
-          if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'pages', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages, pageState: connection.lastPageState });
-        })
-        .catch((error) => {
-          if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'error', error: error?.message ?? String(error) });
-        });
-    }, PAGE_INVENTORY_INTERVAL_MS);
+    let connection;
+    let keepAlive;
+    let pageInventory;
+    let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
@@ -101,13 +83,62 @@ export class BrowserMonitorHub {
       req.off('close', cleanup);
       res.off('close', cleanup);
       res.off('finish', cleanup);
+      if (!connection) return;
       connection.subscribers.delete(res);
-      if (connection.subscribers.size === 0) void this.closeConnection(connection);
+      if (connection.subscribers.size === 0) {
+        connection.closeWhenIdle = true;
+        if (!connection.activeOperations) void this.closeConnection(connection);
+      }
     };
-    let cleaned = false;
+    const ended = () => cleaned || req.destroyed || res.destroyed || res.writableEnded;
     req.once('close', cleanup);
     res.once('close', cleanup);
     res.once('finish', cleanup);
+    if (ended()) { cleanup(); return; }
+    try {
+      await this.withConnection(browserId, pageId, async (current) => {
+        connection = current;
+        if (ended()) { cleanup(); connection.closeWhenIdle = true; return; }
+        // A monitor tab may attach to a connection that has remained alive while
+        // the browser navigated elsewhere. Refresh before sending the cached page
+        // metadata so a newly opened tab never starts with stale dimensions.
+        await this.refresh(connection);
+        if (ended()) { cleanup(); return; }
+        const initialPages = await this.refreshPageInventory(connection);
+        if (ended()) { cleanup(); return; }
+        res.writeHead(200, {
+          'cache-control': 'no-store',
+          'connection': 'keep-alive',
+          'content-type': 'text/event-stream; charset=utf-8',
+          'x-accel-buffering': 'no',
+        });
+        connection.subscribers.add(res);
+        this.writeEvent(res, { type: 'connected', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages: initialPages });
+        this.writeEvent(res, connection.lastPageState ?? { type: 'state', status: 'connecting', browserId });
+        keepAlive = setInterval(() => {
+          if (ended()) { cleanup(); return; }
+          if (!res.writableNeedDrain) res.write(': keep-alive\n\n');
+        }, 15_000);
+        let inventoryRunning = false;
+        pageInventory = setInterval(() => {
+          if (ended()) { cleanup(); return; }
+          if (inventoryRunning) return;
+          inventoryRunning = true;
+          void this.refreshPageInventory(connection)
+            .then((pages) => {
+              if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'pages', browserId, sessionId: connection.sessionId, pageId: connection.pageId, pages, pageState: connection.lastPageState });
+            })
+            .catch((error) => {
+              if (!res.destroyed && !res.writableEnded) this.writeEvent(res, { type: 'error', error: error?.message ?? String(error) });
+            })
+            .finally(() => { inventoryRunning = false; });
+        }, PAGE_INVENTORY_INTERVAL_MS);
+      });
+    } catch (error) {
+      cleanup();
+      if (connection?.closing) await connection.closePromise;
+      throw error;
+    }
   }
 
   action(browserId, pageId, payload) {
@@ -116,7 +147,10 @@ export class BrowserMonitorHub {
   }
 
   async performAction(browserId, pageId, payload) {
-    const connection = await this.ensureConnection(browserId, pageId);
+    return this.withConnection(browserId, pageId, (connection) => this.performConnectionAction(connection, payload));
+  }
+
+  async performConnectionAction(connection, payload) {
     const action = payload?.action;
     if (action === 'pointer') {
       const input = validatePointerAction(
@@ -187,8 +221,6 @@ export class BrowserMonitorHub {
     if (existing) return existing;
     const capture = this.capturePreview(browserId, pageId).finally(() => {
       if (this.previewPromises.get(key) === capture) this.previewPromises.delete(key);
-      const connection = this.connections.get(key);
-      if (connection?.subscribers.size === 0) this.scheduleIdleClose(connection);
     });
     this.previewPromises.set(key, capture);
     return capture;
@@ -206,7 +238,10 @@ export class BrowserMonitorHub {
   }
 
   async captureThumbnail(browserId, pageId) {
-    const connection = await this.ensureConnection(browserId, pageId);
+    return this.withConnection(browserId, pageId, (connection) => this.captureConnectionThumbnail(connection));
+  }
+
+  async captureConnectionThumbnail(connection) {
     if (connection.page.isClosed()) throw httpError(409, 'Browser session has no page to monitor');
     const session = await connection.page.context().newCDPSession(connection.page);
     try {
@@ -231,7 +266,10 @@ export class BrowserMonitorHub {
   }
 
   async capturePreview(browserId, pageId) {
-    const connection = await this.ensureConnection(browserId, pageId);
+    return this.withConnection(browserId, pageId, (connection) => this.captureConnectionPreview(connection));
+  }
+
+  async captureConnectionPreview(connection) {
     if (connection.page.isClosed()) throw httpError(409, 'Browser session has no page to monitor');
     await ensureMinimumViewport(connection.page);
     try {
@@ -246,24 +284,62 @@ export class BrowserMonitorHub {
     }
   }
 
-  async close() {
-    const connections = [...new Set(this.connections.values())];
-    this.connections.clear();
-    this.previewPromises.clear();
-    this.thumbnailPromises.clear();
-    this.actionPromises.clear();
-    await Promise.all(connections.map((connection) => this.closeConnection(connection)));
+  close() {
+    if (this.closePromise) return this.closePromise;
+    this.closed = true;
+    this.closePromise = (async () => {
+      await Promise.allSettled([...this.connectionPromises.values()]);
+      const connections = new Set([...this.ownedConnections, ...this.connections.values()]);
+      await Promise.all([...connections].map((connection) => this.closeConnection(connection)));
+      this.connections.clear();
+      this.previewPromises.clear();
+      this.thumbnailPromises.clear();
+      this.actionPromises.clear();
+    })();
+    return this.closePromise;
   }
 
-  async ensureConnection(browserId, pageId) {
+  ensureConnection(browserId, pageId) {
+    // Serialize creation across default/explicit page aliases, not just capture
+    // endpoints: thumbnail, preview, stream and actions all share this gate.
+    return enqueueMonitorActionRequest(this.connectionPromises, browserId, () => this.connect(browserId, pageId));
+  }
+
+  async withConnection(browserId, pageId, operation) {
+    const connection = await this.ensureConnection(browserId, pageId);
+    if (connection.closing) throw httpError(409, 'Monitor connection is closing');
+    connection.activeOperations = (connection.activeOperations ?? 0) + 1;
+    if (connection.idleTimer) clearTimeout(connection.idleTimer);
+    try {
+      return await operation(connection);
+    } finally {
+      connection.activeOperations -= 1;
+      if (!connection.closing && !connection.activeOperations && connection.subscribers.size === 0) {
+        if (connection.closeWhenIdle) await this.closeConnection(connection);
+        else this.scheduleIdleClose(connection);
+      }
+    }
+  }
+
+  async connect(browserId, pageId) {
+    if (this.closed) throw httpError(503, 'Monitor hub is closed');
     const key = monitorKey(browserId, pageId);
-    const existing = this.connections.get(key);
-    if (existing?.browser.isConnected()) {
+    let existing = this.connections.get(key);
+    if (!existing && !pageId) {
+      const candidate = [...this.ownedConnections].find((connection) => connection.browserId === browserId && !connection.closing && connection.browser.isConnected());
+      if (candidate) {
+        const firstPage = (await this.monitorablePages(candidate.browser))[0];
+        existing = firstPage && this.connections.get(monitorKey(browserId, firstPage.id));
+        if (existing) this.connections.set(key, existing);
+      }
+    }
+    if (existing?.browser.isConnected() && !existing.closing) {
       if (existing.idleTimer) clearTimeout(existing.idleTimer);
       if (this.guiOrigins.size) await this.selectMonitorablePage(existing);
+      this.scheduleIdleClose(existing);
       return existing;
     }
-    if (existing) this.connections.delete(key);
+    if (existing) await this.closeConnection(existing);
 
     const browserRecord = await this.fetchJson(`${this.pwDevUrl}/_pwdev/browsers/${encodeURIComponent(browserId)}`);
     const session = browserRecord.body?.browser?.components?.session
@@ -282,40 +358,50 @@ export class BrowserMonitorHub {
       }
     }
     const browser = await connectOverCDP(session.cdpUrl);
-    for (const context of browser.contexts()) {
-      context.on('page', (page) => this.observeDialog(page));
-      for (const page of context.pages()) this.observeDialog(page);
+    let connection;
+    try {
+      if (this.closed) throw httpError(503, 'Monitor hub is closed');
+      for (const context of browser.contexts()) {
+        context.on('page', (page) => this.observeDialog(page));
+        for (const page of context.pages()) this.observeDialog(page);
+      }
+      const pages = await this.monitorablePages(browser);
+      const selected = pageId ? pages.find((entry) => entry.id === pageId) : pages[0];
+      const page = selected?.page;
+      if (!page) {
+        throw httpError(409, 'Browser session has no monitorable page');
+      }
+      await ensureMinimumViewport(page);
+      connection = {
+        browserId,
+        sessionId: session.sessionId,
+        pageId: selected.id,
+        browser,
+        page,
+        subscribers: new Set(),
+        observedPages: new WeakSet(),
+        lastPageState: undefined,
+        actionQueue: Promise.resolve(),
+        bindingName: `__pwdevMonitor_${browserId.replace(/[^A-Za-z0-9_$]/g, '_')}_${Date.now()}`,
+      };
+      this.ownedConnections.add(connection);
+      this.connections.set(key, connection);
+      if (!pageId) this.connections.set(monitorKey(browserId, selected.id), connection);
+      browser.on('disconnected', () => {
+        if (!this.ownedConnections.has(connection) || connection.closing) return;
+        this.broadcast(connection, { type: 'disconnected', browserId, reason: 'browser disconnected' });
+        void this.closeConnection(connection);
+      });
+      for (const entry of pages) this.observePage(connection, entry.page);
+      await this.refresh(connection);
+      if (this.closed) throw httpError(503, 'Monitor hub is closed');
+      this.scheduleIdleClose(connection);
+      return connection;
+    } catch (error) {
+      if (connection) await this.closeConnection(connection);
+      else await browser.close().catch(() => undefined);
+      throw error;
     }
-    const pages = await this.monitorablePages(browser);
-    const selected = pageId ? pages.find((entry) => entry.id === pageId) : pages[0];
-    const page = selected?.page;
-    if (!page) {
-      await browser.close();
-      throw httpError(409, 'Browser session has no monitorable page');
-    }
-    await ensureMinimumViewport(page);
-    const connection = {
-      browserId,
-      sessionId: session.sessionId,
-      pageId: selected.id,
-      browser,
-      page,
-      subscribers: new Set(),
-      observedPages: new WeakSet(),
-      lastPageState: undefined,
-      actionQueue: Promise.resolve(),
-      bindingName: `__pwdevMonitor_${browserId.replace(/[^A-Za-z0-9_$]/g, '_')}_${Date.now()}`,
-    };
-    this.connections.set(key, connection);
-    if (!pageId) this.connections.set(monitorKey(browserId, selected.id), connection);
-    browser.on('disconnected', () => {
-      if (![...this.connections.values()].includes(connection)) return;
-      this.broadcast(connection, { type: 'disconnected', browserId, reason: 'browser disconnected' });
-      void this.closeConnection(connection);
-    });
-    for (const entry of pages) this.observePage(connection, entry.page);
-    await this.refresh(connection);
-    return connection;
   }
 
   async refresh(connection) {
@@ -352,7 +438,7 @@ export class BrowserMonitorHub {
   }
 
   isConnectionActive(connection) {
-    return [...this.connections.values()].includes(connection)
+    return !connection.closing && (this.ownedConnections.has(connection) || [...this.connections.values()].includes(connection))
       && connection.browser.isConnected()
       && !connection.page.isClosed();
   }
@@ -452,24 +538,26 @@ export class BrowserMonitorHub {
 
   scheduleIdleClose(connection) {
     if (connection.idleTimer) clearTimeout(connection.idleTimer);
+    if (connection.closing || connection.activeOperations || connection.subscribers.size) return;
     connection.idleTimer = setTimeout(() => {
-      if (connection.subscribers.size === 0) void this.closeConnection(connection);
+      if (connection.subscribers.size === 0 && !connection.activeOperations) void this.closeConnection(connection);
     }, IDLE_CONNECTION_TIMEOUT_MS);
     connection.idleTimer.unref?.();
   }
 
-  async closeConnection(connection) {
-    if (connection.closing) return;
+  closeConnection(connection) {
+    if (connection.closing) return connection.closePromise ?? Promise.resolve();
     connection.closing = true;
     if (connection.idleTimer) clearTimeout(connection.idleTimer);
     this.forgetConnection(connection);
+    // Publish the promise before ending SSE responses: their cleanup listeners
+    // can re-enter closeConnection synchronously.
+    connection.closePromise = Promise.resolve().then(() => connection.browser.close()).catch(() => {
+      // The browser session may already have disconnected or stopped.
+    }).finally(() => this.ownedConnections.delete(connection));
     for (const subscriber of connection.subscribers) subscriber.end();
     connection.subscribers.clear();
-    try {
-      await connection.browser.close();
-    } catch {
-      // The browser session may already have disconnected or stopped.
-    }
+    return connection.closePromise;
   }
 
   forgetConnection(connection) {
@@ -546,6 +634,7 @@ export class BrowserMonitorHub {
   }
 
   writeEvent(res, event) {
+    if (res.destroyed || res.writableEnded || res.writableNeedDrain) return;
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 }
@@ -673,4 +762,4 @@ function fetchJson(rawUrl) {
   });
 }
 
-/** @typedef {{ browserId: string, sessionId?: string, pageId: string, browser: any, page: any, subscribers: Set<import('node:http').ServerResponse>, observedPages: WeakSet<any>, lastPageState?: Record<string, unknown>, bindingName: string, refreshRequested?: boolean, refreshPromise?: Promise<void>, idleTimer?: NodeJS.Timeout, closing?: boolean }} MonitorConnection */
+/** @typedef {{ browserId: string, sessionId?: string, pageId: string, browser: any, page: any, subscribers: Set<import('node:http').ServerResponse>, observedPages: WeakSet<any>, lastPageState?: Record<string, unknown>, bindingName: string, refreshRequested?: boolean, refreshPromise?: Promise<void>, idleTimer?: NodeJS.Timeout, closing?: boolean, closePromise?: Promise<void>, activeOperations?: number, closeWhenIdle?: boolean }} MonitorConnection */

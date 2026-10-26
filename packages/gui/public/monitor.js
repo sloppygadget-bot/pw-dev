@@ -1,7 +1,7 @@
 const browserId = decodeURIComponent(location.pathname.split('/')[2] || '');
 let pageId = new URLSearchParams(location.search).get('pageId');
 const monitorUrl = (suffix) => `/api/monitor/${encodeURIComponent(browserId)}/${suffix}${pageId ? `?pageId=${encodeURIComponent(pageId)}` : ''}`;
-const eventSource = new EventSource(monitorUrl('events'));
+let eventSource;
 const image = document.querySelector('#mirror-image');
 const imageWrap = document.querySelector('#mirror-frame-wrap');
 const empty = document.querySelector('#mirror-empty');
@@ -15,7 +15,7 @@ const maximizeButton = document.querySelector('#maximize-monitor');
 const backButton = document.querySelector('#nav-back');
 const forwardButton = document.querySelector('#nav-forward');
 const reloadButton = document.querySelector('#nav-reload');
-const pageDots = document.querySelector('#page-dots');
+const pageTabs = document.querySelector('#page-tabs');
 const pageSummary = document.querySelector('#page-summary');
 const inputMeta = document.querySelector('#input-meta');
 const SCREENSHOT_INTERVAL_MS = 1_000;
@@ -39,19 +39,19 @@ const state = {
   activePointer: undefined,
   inputErrorUntil: 0,
   inputErrorTimer: undefined,
+  pageTabOffset: 0,
+  pageTabSelectedId: undefined,
+  pages: [],
+  sessionId: undefined,
+  previewCache: new Map(),
+  captureController: undefined,
+  actionController: undefined,
 };
 
 title.textContent = `Screenshot monitor — ${browserId}`;
 setTargetControls(false);
 
-eventSource.addEventListener('message', (event) => {
-  try {
-    handleEvent(JSON.parse(event.data));
-  } catch {
-    clearTarget('Monitor error', 'Reload this monitor to reconnect.');
-  }
-});
-eventSource.onerror = () => clearTarget('Disconnected', 'Waiting to reconnect…');
+connectMonitorStream();
 refreshButton.addEventListener('click', () => void refreshScreenshot());
 maximizeButton.addEventListener('click', () => setMaximized(!document.body.classList.contains('monitor-maximized')));
 let restoreEscape = false;
@@ -87,12 +87,77 @@ image.addEventListener('load', () => {
   placeClickMarker(state.lastClick);
 });
 window.addEventListener('resize', () => placeClickMarker(state.lastClick));
+window.addEventListener('popstate', () => {
+  const nextPageId = new URLSearchParams(location.search).get('pageId');
+  if (nextPageId !== pageId) selectPage(nextPageId, { updateHistory: false });
+});
 window.addEventListener('beforeunload', () => {
+  eventSource?.close();
+  eventSource = undefined;
+  state.hasTarget = false;
+  state.targetGeneration += 1;
+  state.captureController?.abort();
+  state.actionController?.abort();
   if (state.refreshTimer) clearTimeout(state.refreshTimer);
   if (state.pointerMoveFrame) cancelAnimationFrame(state.pointerMoveFrame);
   if (state.inputErrorTimer) clearTimeout(state.inputErrorTimer);
-  if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+  clearMonitorPreviewCache();
 });
+
+function connectMonitorStream() {
+  eventSource?.close();
+  const source = new EventSource(monitorUrl('events'));
+  eventSource = source;
+  source.addEventListener('message', (event) => {
+    if (eventSource !== source) return;
+    try {
+      handleEvent(JSON.parse(event.data));
+    } catch {
+      clearTarget('Monitor error', 'Reload this monitor to reconnect.');
+    }
+  });
+  source.onerror = () => {
+    if (eventSource === source) clearTarget('Disconnected', 'Waiting to reconnect…');
+  };
+}
+
+function clearMonitorPreviewCache() {
+  for (const entry of state.previewCache.values()) URL.revokeObjectURL(entry.url);
+  state.previewCache.clear();
+  state.previewUrl = undefined;
+}
+
+function displayMonitorPreview(entry) {
+  state.previewUrl = entry.url;
+  image.src = entry.url;
+  image.classList.remove('hidden');
+  empty.classList.add('hidden');
+  imageWrap.style.setProperty('--mirror-aspect', `${entry.width} / ${entry.height}`);
+}
+
+function showCachedMonitorPreview() {
+  const entry = state.previewCache.get(pageId);
+  if (!entry) return;
+  state.previewCache.delete(pageId);
+  state.previewCache.set(pageId, entry);
+  displayMonitorPreview(entry);
+}
+
+function pruneMonitorPreviewCache(pages) {
+  const urls = new Map(pages.map((page) => [page.id, page.url]));
+  for (const [id, entry] of state.previewCache) {
+    if (urls.has(id) && urls.get(id) === entry.pageUrl) continue;
+    URL.revokeObjectURL(entry.url);
+    state.previewCache.delete(id);
+    if (state.previewUrl === entry.url) {
+      state.previewUrl = undefined;
+      image.removeAttribute('src');
+      image.classList.add('hidden');
+      empty.textContent = 'Loading screenshot…';
+      empty.classList.remove('hidden');
+    }
+  }
+}
 
 function setMaximized(maximized) {
   releasePressedKeys();
@@ -107,7 +172,8 @@ function setMaximized(maximized) {
 
 function handleEvent(event) {
   if (event.type === 'no-target') {
-    eventSource.close();
+    eventSource?.close();
+    eventSource = undefined;
     pageId = null;
     const next = new URL(location.href);
     next.searchParams.delete('pageId');
@@ -121,16 +187,24 @@ function handleEvent(event) {
   }
   if (event.type === 'connected' || event.type === 'pages') {
     if (event.type === 'connected') {
+      if (state.sessionId && event.sessionId && state.sessionId !== event.sessionId) {
+        clearTarget('Connecting', 'Waiting for a screenshot…');
+      }
+      state.sessionId = event.sessionId;
       setStatus('Live', 'good');
       subtitle.textContent = `Session ${event.sessionId ?? 'live'}`;
     }
     if (event.pageId && event.pageId !== pageId) {
+      clearTarget('Connecting', 'Loading selected tab…', { preserveCache: true });
       pageId = event.pageId;
       const next = new URL(location.href);
       next.searchParams.set('pageId', pageId);
       history.replaceState(null, '', next);
     }
-    renderPageDots(event.pages ?? [], event.pageId);
+    state.pages = event.pages ?? [];
+    pruneMonitorPreviewCache(state.pages);
+    if (!state.previewUrl) showCachedMonitorPreview();
+    renderPageTabs(state.pages, event.pageId);
     if (event.pageState) updatePageState(event.pageState);
     if (event.pageId && state.viewport) resumeTarget();
     return;
@@ -163,12 +237,18 @@ function resumeTarget() {
   void refreshScreenshot();
 }
 
-function clearTarget(label, message) {
+function clearTarget(label, message, { preserveCache = false } = {}) {
   state.hasTarget = false;
   state.targetGeneration += 1;
+  state.captureController?.abort();
+  state.captureController = undefined;
+  state.refreshing = false;
+  state.actionController?.abort();
   clearTimeout(state.refreshTimer);
   state.refreshTimer = undefined;
   clearTimeout(state.inputErrorTimer);
+  state.inputErrorUntil = 0;
+  state.inputErrorTimer = undefined;
   cancelPendingPointerMove();
   state.actionQueue.length = 0;
   state.pressedKeys.clear();
@@ -177,12 +257,17 @@ function clearTarget(label, message) {
   state.activePointer = undefined;
   state.viewport = undefined;
   state.lastClick = undefined;
-  if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+  if (!preserveCache) {
+    clearMonitorPreviewCache();
+    state.pages = [];
+  }
   state.previewUrl = undefined;
   image.removeAttribute('src');
   image.classList.add('hidden');
   clickMarker.classList.remove('visible');
-  pageDots.replaceChildren();
+  pageTabs.replaceChildren();
+  state.pageTabOffset = 0;
+  state.pageTabSelectedId = undefined;
   pageSummary.textContent = 'No available target';
   navTargetUrl.textContent = 'No target page';
   navTargetUrl.title = message;
@@ -233,21 +318,29 @@ async function refreshScreenshot() {
   }
   state.refreshing = true;
   const generation = state.targetGeneration;
+  const capturedPageId = pageId;
+  const controller = new AbortController();
+  state.captureController = controller;
   refreshButton.disabled = true;
   try {
-    const response = await fetch(monitorUrl('preview'), { cache: 'no-store' });
+    const response = await fetch(monitorUrl('preview'), { cache: 'no-store', signal: controller.signal });
     if (!response.ok) throw new Error(`Screenshot capture failed: ${response.status}`);
     const next = await decodedObjectUrl(await response.blob());
-    if (!state.hasTarget || generation !== state.targetGeneration) {
+    if (!state.hasTarget || generation !== state.targetGeneration || capturedPageId !== pageId) {
       URL.revokeObjectURL(next.url);
       return;
     }
-    const previousUrl = state.previewUrl;
-    state.previewUrl = next.url;
-    image.src = next.url;
-    image.classList.remove('hidden');
-    imageWrap.style.setProperty('--mirror-aspect', `${next.width} / ${next.height}`);
-    if (previousUrl) URL.revokeObjectURL(previousUrl);
+    const previous = state.previewCache.get(capturedPageId);
+    state.previewCache.delete(capturedPageId);
+    state.previewCache.set(capturedPageId, { ...next, pageUrl: state.pages.find((page) => page.id === capturedPageId)?.url });
+    displayMonitorPreview(next);
+    if (previous) URL.revokeObjectURL(previous.url);
+    // Full-size monitor screenshots have a smaller cache than thumbnails.
+    while (state.previewCache.size > 6) {
+      const oldestId = state.previewCache.keys().next().value;
+      URL.revokeObjectURL(state.previewCache.get(oldestId).url);
+      state.previewCache.delete(oldestId);
+    }
     document.querySelector('#update-meta').textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch {
     if (state.hasTarget && generation === state.targetGeneration && !state.previewUrl) {
@@ -255,49 +348,99 @@ async function refreshScreenshot() {
       empty.classList.remove('hidden');
     }
   } finally {
-    state.refreshing = false;
-    refreshButton.disabled = !state.hasTarget;
-    if (state.hasTarget) state.refreshTimer = setTimeout(() => void refreshScreenshot(), SCREENSHOT_INTERVAL_MS);
+    if (generation === state.targetGeneration && state.captureController === controller) {
+      state.captureController = undefined;
+      state.refreshing = false;
+      refreshButton.disabled = !state.hasTarget;
+      if (state.hasTarget) state.refreshTimer = setTimeout(() => void refreshScreenshot(), SCREENSHOT_INTERVAL_MS);
+    }
   }
 }
 
-function renderPageDots(pages, selectedPageId) {
-  pageDots.replaceChildren();
+function renderPageTabs(pages, selectedPageId) {
+  pageTabs.replaceChildren();
   const selectedPage = pages.find((page) => page.id === selectedPageId);
-  const visiblePages = pages.slice(0, 3);
-  if (selectedPage && !visiblePages.includes(selectedPage) && visiblePages.length === 3) visiblePages[2] = selectedPage;
-  const visibleIds = new Set(visiblePages.map((page) => page.id));
-  for (const page of visiblePages) {
-    const index = pages.indexOf(page);
-    const dot = document.createElement('button');
-    dot.type = 'button';
-    dot.className = `page-dot${page.id === selectedPageId ? ' selected' : ''}${page.lease ? ' leased' : ''}`;
-    dot.title = `${page.title || '(untitled)'} · ${page.url}${page.lease ? ` · leased by ${page.lease.owner}` : ' · available'}`;
-    dot.setAttribute('aria-label', `Monitor tab ${index + 1}: ${page.title || page.url}`);
-    dot.addEventListener('click', () => selectPage(page.id));
-    pageDots.append(dot);
+  const visibleCount = 3;
+  const maxOffset = Math.max(0, pages.length - visibleCount);
+  if (state.pageTabSelectedId !== selectedPageId) {
+    const selectedIndex = pages.findIndex((page) => page.id === selectedPageId);
+    state.pageTabOffset = Math.max(0, selectedIndex - visibleCount + 1);
+    state.pageTabSelectedId = selectedPageId;
   }
-  const hiddenPages = pages.filter((page) => !visibleIds.has(page.id));
-  if (hiddenPages.length) {
-    const picker = document.createElement('select');
-    picker.className = 'page-picker';
-    picker.setAttribute('aria-label', 'Choose another session tab');
-    picker.append(new Option(`+${hiddenPages.length} tabs`, ''));
-    for (const page of hiddenPages) picker.append(new Option(`${page.lease ? '🔒 ' : ''}${page.title || page.url || '(untitled)'}`, page.id));
-    picker.addEventListener('change', () => {
-      if (picker.value) selectPage(picker.value);
+  state.pageTabOffset = Math.min(state.pageTabOffset, maxOffset);
+  const numbers = document.createElement('div');
+  numbers.className = 'page-tab-numbers';
+  const previous = createArrow('Previous tabs', '‹', -1);
+  const next = createArrow('Next tabs', '›', 1);
+  if (maxOffset) pageTabs.append(previous, numbers, next);
+  else if (pages.length) pageTabs.append(numbers);
+
+  function createArrow(label, text, direction) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'page-tab-arrow';
+    button.textContent = text;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      state.pageTabOffset = Math.max(0, Math.min(state.pageTabOffset + direction, maxOffset));
+      renderNumbers();
     });
-    pageDots.append(picker);
+    return button;
   }
+
+  function renderNumbers() {
+    previous.disabled = state.pageTabOffset === 0;
+    next.disabled = state.pageTabOffset === maxOffset;
+    numbers.replaceChildren();
+    for (let index = state.pageTabOffset; index < Math.min(state.pageTabOffset + visibleCount, pages.length); index += 1) {
+      const page = pages[index];
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `page-tab${page.id === selectedPageId ? ' selected' : ''}${page.lease ? ' leased' : ''}`;
+      button.textContent = String(index + 1);
+      button.title = `${page.title || '(untitled)'}\n${page.url || ''}${page.lease ? `\nLeased by ${page.lease.owner}` : ''}`;
+      button.setAttribute('aria-label', `Monitor tab ${index + 1}: ${page.title || page.url || '(untitled)'}`);
+      button.setAttribute('aria-pressed', String(page.id === selectedPageId));
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (page.id !== selectedPageId) selectPage(page.id);
+      });
+      numbers.append(button);
+    }
+  }
+  renderNumbers();
   pageSummary.textContent = selectedPage
     ? `${selectedPage.title || '(untitled)'} · ${selectedPage.lease ? `Leased by ${selectedPage.lease.owner}` : 'Available'}`
     : pages.length ? 'Selected tab is no longer available' : 'No open tabs';
 }
 
-function selectPage(nextPageId) {
+function selectPage(nextPageId, { updateHistory = true } = {}) {
+  if (nextPageId === pageId) return;
+  if (updateHistory && !state.pages.some((page) => page.id === nextPageId)) return;
+  // Release held input against the old target before clearing its queue.
+  const releases = [...state.pressedKeys].map((key) => ({ action: 'keyboard', type: 'up', key }));
+  if (state.activePointer) releases.push({ action: 'pointer', type: 'up', ...state.activePointer.point, button: state.activePointer.button });
+  for (const payload of releases) {
+    void fetch(monitorUrl('action'), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload), keepalive: true,
+    }).catch(() => {});
+  }
+  eventSource?.close();
+  eventSource = undefined;
+  clearTarget('Connecting', 'Loading selected tab…', { preserveCache: true });
+  pageId = nextPageId;
   const next = new URL(location.href);
-  next.searchParams.set('pageId', nextPageId);
-  location.assign(next);
+  if (pageId) next.searchParams.set('pageId', pageId);
+  else next.searchParams.delete('pageId');
+  if (updateHistory) history.pushState(null, '', next);
+  renderPageTabs(state.pages, pageId);
+  const selected = state.pages.find((page) => page.id === pageId);
+  if (selected) updatePageState({ url: selected.url, title: selected.title });
+  showCachedMonitorPreview();
+  connectMonitorStream();
 }
 
 function placeClickMarker(click) {
@@ -476,18 +619,24 @@ async function drainActionQueue() {
   try {
     while (state.actionQueue.length) {
       const payload = state.actionQueue.shift();
+      const generation = state.targetGeneration;
+      const controller = new AbortController();
+      state.actionController = controller;
       showInputProgress('Sending input…');
       try {
         const response = await fetch(monitorUrl('action'), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
+          signal: controller.signal,
         });
         const result = await response.json().catch(() => ({}));
         if (!response.ok || result.ok === false) throw new Error(result.error || `Input failed: ${response.status}`);
-        showInputProgress('Input active');
+        if (generation === state.targetGeneration) showInputProgress('Input active');
       } catch (error) {
-        showInputError(error);
+        if (generation === state.targetGeneration) showInputError(error);
+      } finally {
+        if (state.actionController === controller) state.actionController = undefined;
       }
     }
   } finally {
