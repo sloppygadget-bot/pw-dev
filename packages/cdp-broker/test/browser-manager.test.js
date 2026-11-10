@@ -5,7 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createBrowserManager } from '../src/browser-manager.js';
+import { createBrowserManager as createManager } from '../src/browser-manager.js';
+
+// Unit tests must not discover or start real displays on the test host.
+const createBrowserManager = (options) => createManager({ env: { DISPLAY: ':test' }, ...options });
 
 function fakeChild() {
   const child = new EventEmitter();
@@ -47,11 +50,14 @@ test('starts Chrome from remote lifecycle options', async () => {
   assert.equal(instance.chromeHost, '127.0.0.1');
   assert.equal(instance.chromePort, 9333);
   assert.equal(spawned[0].file, '/bin/chrome');
-  assert.deepEqual(waited, [{ host: '127.0.0.1', port: 9333 }]);
+  assert.equal(waited[0].host, '127.0.0.1');
+  assert.equal(waited[0].port, 9333);
   assert.ok(spawned[0].args.includes('--proxy-server=http://127.0.0.1:18899'));
   assert.ok(spawned[0].args.includes('--proxy-bypass-list=<-loopback>'));
   assert.ok(spawned[0].args.includes('--ignore-certificate-errors'));
   assert.ok(spawned[0].args.some((arg) => arg.startsWith('--user-data-dir=')));
+  assert.equal(spawned[0].options.env.DISPLAY, ':test');
+  assert.equal(instance.display, ':test');
 });
 
 test('requires a profile when no default profile or user data dir is configured', async () => {
@@ -245,4 +251,76 @@ test('rejects clearing a profile used by an active Chrome instance', async () =>
   await manager.start({ profile: 'work-okta' });
 
   assert.throws(() => manager.clearProfileData({ profile: 'work-okta' }), /currently in use/);
+});
+
+test('passes the resolved display to headed Chrome and releases it on stop', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-display-manager-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const env = { PATH: '/usr/bin' };
+  let releases = 0;
+  let spawnedEnv;
+  const manager = createBrowserManager({
+    env, chromeExecutable: '/bin/chrome', defaultUserDataDir: dir,
+    displayManager: { acquire: async ({ headless }) => {
+      assert.equal(headless, false);
+      return { display: ':42', release: async () => { releases += 1; } };
+    } },
+    spawnImpl: (file, args, options) => { spawnedEnv = options.env; return fakeChild(); },
+    getFreePortImpl: async () => 9333, waitForChromeImpl: async () => {}, quiet: true,
+  });
+  const instance = await manager.start();
+  assert.deepEqual(spawnedEnv, { PATH: '/usr/bin', DISPLAY: ':42' });
+  assert.equal(env.DISPLAY, undefined);
+  assert.equal(instance.display, ':42');
+  // Display leases are idempotent: exit handling and stop both request release.
+  await manager.stop();
+  assert.ok(releases > 0);
+});
+
+test('Chrome spawn and readiness failures release their display leases', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-display-failure-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const failure of ['spawn', 'ready']) {
+    let released = false;
+    const child = fakeChild();
+    if (failure === 'ready') child.pid = 1234;
+    const manager = createBrowserManager({
+      chromeExecutable: '/bin/chrome', defaultUserDataDir: dir,
+      displayManager: { acquire: async () => ({
+        display: ':42', release: async () => { released = true; },
+      }) },
+      spawnImpl: () => {
+        if (failure === 'spawn') queueMicrotask(() => child.emit('error', new Error('spawn failed')));
+        return child;
+      },
+      getFreePortImpl: async () => 9333,
+      waitForChromeImpl: async () => {
+        if (failure === 'ready') throw new Error('CDP failed');
+        return new Promise(() => {});
+      },
+      quiet: true,
+    });
+    await assert.rejects(manager.start(), failure === 'spawn' ? /spawn failed/ : /CDP failed/);
+    assert.equal(released, true);
+    assert.equal(child.killed, failure === 'ready');
+    assert.deepEqual(manager.listInstances(), []);
+  }
+});
+
+test('an unexpected Chrome exit releases its display and removes the instance', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-display-exit-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const child = fakeChild();
+  let release;
+  const released = new Promise((resolve) => { release = resolve; });
+  const manager = createBrowserManager({
+    chromeExecutable: '/bin/chrome', defaultUserDataDir: dir,
+    displayManager: { acquire: async () => ({ display: ':42', release: async () => release() }) },
+    spawnImpl: () => child,
+    getFreePortImpl: async () => 9333, waitForChromeImpl: async () => {}, quiet: true,
+  });
+  await manager.start();
+  child.emit('exit', 1, null);
+  await released;
+  assert.deepEqual(manager.listInstances(), []);
 });

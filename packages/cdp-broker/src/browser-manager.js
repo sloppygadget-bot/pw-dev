@@ -3,7 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { buildChromeArgs, getFreePort, waitForChrome } from './chrome.js';
+import { buildChromeArgs, buildChromeEnv, getFreePort, waitForChrome } from './chrome.js';
+import { createDisplayManager } from './display.js';
 import { profileDirForName, validateProfileName } from './profiles.js';
 
 const CHROME_STOP_GRACE_MS = 5_000;
@@ -20,6 +21,8 @@ class BrowserManager {
     defaultUserDataDir,
     defaultChromePort,
     headless = false,
+    display,
+    env = process.env,
     proxyServer,
     proxyBypassList,
     ignoreSslErrors = false,
@@ -29,6 +32,7 @@ class BrowserManager {
     spawnImpl = spawn,
     getFreePortImpl = getFreePort,
     waitForChromeImpl = waitForChrome,
+    displayManager,
     log = console.log,
   }) {
     this.chromeExecutable = chromeExecutable;
@@ -36,6 +40,8 @@ class BrowserManager {
     this.defaultUserDataDir = defaultUserDataDir;
     this.defaultChromePort = defaultChromePort;
     this.headless = headless;
+    this.display = display;
+    this.env = env;
     this.proxyServer = proxyServer;
     this.proxyBypassList = proxyBypassList;
     this.ignoreSslErrors = ignoreSslErrors;
@@ -48,6 +54,7 @@ class BrowserManager {
     this.log = (...args) => {
       if (!quiet) log(...args);
     };
+    this.displayManager = displayManager ?? createDisplayManager({ env, log: this.log });
     this.instances = new Map();
   }
 
@@ -89,11 +96,24 @@ class BrowserManager {
       extraArgs: launch.extraArgs,
     });
 
-    this.log(`Launching Chrome: ${this.chromeExecutable}`);
-    this.log(`Chrome profile: ${launch.userDataDir}`);
-    const child = this.spawnImpl(this.chromeExecutable, chromeArgs, {
-      stdio: this.quiet ? 'ignore' : ['ignore', 'inherit', 'inherit'],
+    const displayLease = await this.displayManager.acquire({
+      headless: launch.headless,
+      display: launch.display,
     });
+    let child;
+    try {
+      this.assertNoLaunchConflict(launch);
+      this.log(`Launching Chrome: ${this.chromeExecutable}`);
+      this.log(`Chrome profile: ${launch.userDataDir}`);
+      if (!launch.headless && displayLease.display) this.log(`Chrome display: ${displayLease.display}`);
+      child = this.spawnImpl(this.chromeExecutable, chromeArgs, {
+        env: buildChromeEnv({ headless: launch.headless, display: displayLease.display, env: this.env }),
+        stdio: this.quiet ? 'ignore' : ['ignore', 'inherit', 'inherit'],
+      });
+    } catch (error) {
+      await displayLease.release();
+      throw error;
+    }
 
     const instance = {
       id: makeInstanceId(),
@@ -102,6 +122,8 @@ class BrowserManager {
       chromeHost: '127.0.0.1',
       chromePort,
       headless: launch.headless,
+      display: launch.headless ? undefined : displayLease.display,
+      releaseDisplay: displayLease.release,
       proxyServer: launch.proxyServer,
       proxyForwardId: launch.proxyForwardId,
       networkId: launch.networkId,
@@ -112,19 +134,35 @@ class BrowserManager {
     this.instances.set(instance.id, instance);
 
     child.on('exit', (code, signal) => {
+      instance.exited = true;
       if (this.instances.get(instance.id) === instance) {
         this.instances.delete(instance.id);
       }
       if (!instance.expectedStop && this.onUnexpectedExit) {
         this.onUnexpectedExit({ code, signal, instance: describeInstance(instance) });
       }
+      void instance.releaseDisplay().catch((error) => this.log(`Display cleanup failed: ${error.message}`));
     });
 
+    const readyController = new AbortController();
+    const failed = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => reject(new Error(
+        `Chrome exited before CDP was ready (code=${code}, signal=${signal})`
+      )));
+    });
     try {
-      await this.waitForChromeImpl({ host: '127.0.0.1', port: chromePort });
+      await Promise.race([this.waitForChromeImpl({
+        host: '127.0.0.1', port: chromePort, signal: readyController.signal,
+      }), failed]);
     } catch (error) {
-      await this.stop({ instanceId: instance.id });
+      instance.expectedStop = true;
+      if (child.pid && !instance.exited) await terminateChromeChild(child);
+      this.instances.delete(instance.id);
+      await instance.releaseDisplay();
       throw error;
+    } finally {
+      readyController.abort();
     }
 
     return describeInstance(instance);
@@ -150,6 +188,7 @@ class BrowserManager {
     instance.expectedStop = true;
     await terminateChromeChild(instance.child);
     this.instances.delete(instance.id);
+    await instance.releaseDisplay();
     return { stopped: true, instanceId: instance.id };
   }
 
@@ -159,6 +198,7 @@ class BrowserManager {
       instance.expectedStop = true;
       await terminateChromeChild(instance.child);
       this.instances.delete(instance.id);
+      await instance.releaseDisplay();
     }
     return instances.length;
   }
@@ -210,6 +250,7 @@ class BrowserManager {
       userDataDir: path.resolve(userDataDir),
       chromePort: options.chromePort ?? this.defaultChromePort,
       headless: booleanOption(options.headless, this.headless),
+      display: optionOrDefault(options, 'display', this.display),
       proxyServer: optionOrDefault(options, 'proxyServer', this.proxyServer),
       proxyForwardId: options.proxyForwardId,
       networkId: options.networkId,
@@ -275,6 +316,7 @@ function describeInstance(instance) {
     chromeHost: instance.chromeHost,
     chromePort: instance.chromePort,
     headless: instance.headless,
+    display: instance.display,
     proxyServer: instance.proxyServer,
     proxyForwardId: instance.proxyForwardId,
     networkId: instance.networkId,

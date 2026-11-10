@@ -2,7 +2,22 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
 
-import { buildChromeArgs, findChromeExecutable, waitForChrome } from '../src/chrome.js';
+import { buildChromeArgs, buildChromeEnv, findChromeExecutable, waitForChrome } from '../src/chrome.js';
+
+test('defaults to a desktop window size in headed and headless modes', () => {
+  for (const headless of [false, true]) {
+    const args = buildChromeArgs({ remoteDebuggingPort: 9222, userDataDir: '/tmp/profile', headless });
+    assert.ok(args.includes('--window-size=1680,1000'));
+    assert.equal(args.includes('--headless=new'), headless);
+  }
+});
+
+test('display injection preserves the parent environment and headless settings', () => {
+  const env = { DISPLAY: ':0', PATH: '/usr/bin', XAUTHORITY: '/tmp/authority' };
+  assert.deepEqual(buildChromeEnv({ display: ':1', env }), { ...env, DISPLAY: ':1' });
+  assert.deepEqual(buildChromeEnv({ display: ':1', headless: true, env }), env);
+  assert.equal(env.DISPLAY, ':0');
+});
 
 test('adds proxy and SSL launch options before extra Chrome args', () => {
   assert.deepEqual(

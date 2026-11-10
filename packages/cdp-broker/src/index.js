@@ -1,7 +1,7 @@
 // @ts-check
 
 export { createBrowserManager } from './browser-manager.js';
-export { buildChromeArgs, brokerHome, findChromeExecutable, getFreePort, waitForChrome } from './chrome.js';
+export { buildChromeArgs, buildChromeEnv, brokerHome, findChromeExecutable, getFreePort, waitForChrome } from './chrome.js';
 export { main as runBrokerCli, parseArgs as parseBrokerArgs } from './cli.js';
 export { createNetworkManager } from './networks.js';
 export { profileDirForName, validateProfileName } from './profiles.js';

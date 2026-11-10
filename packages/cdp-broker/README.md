@@ -110,6 +110,29 @@ curl http://127.0.0.1:18080/_broker/client.js
 `/_broker/instructions` remains available as a compatibility alias for
 `/_broker/help`.
 
+## Headed Chrome on Linux without a monitor
+
+Keep `headless: false` in the browser config to use headed rendering. The broker
+inherits `DISPLAY` and `XAUTHORITY`, so an existing desktop or virtual display
+continues to work. To select a display explicitly, start the broker with
+`DISPLAY=:1` (and the matching `XAUTHORITY` if required).
+
+When `DISPLAY` is unset on Linux, the broker looks for an accessible local X
+display using `xdpyinfo`. If none is usable, it starts Xvfb on an automatically
+allocated display with a 1920×1080 screen. Install the system `Xvfb` executable
+for this fallback; `xdpyinfo` is optional and enables reuse of existing displays.
+If Xvfb is unavailable, launching a headed browser reports an error instead of
+switching to headless mode.
+
+Browsers share the broker's virtual display. It stops after the last browser
+using it exits, including on broker shutdown or failed Chrome startup. Displays
+provided by the environment or discovered locally are never stopped by the
+broker. Headless launches and macOS/Windows launches do not start Xvfb.
+
+Chrome windows default to 1680×1000. Override this with
+`--chrome-arg '--window-size=1920,1080'` or the corresponding `chromeArg` launch
+option. Window size is separate from a viewport override set by Playwright.
+
 ## SSH Reverse Tunnel
 
 If the remote host cannot reach your laptop directly, create a reverse tunnel

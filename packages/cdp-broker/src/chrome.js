@@ -4,6 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const LINUX_EXECUTABLES = [
   'google-chrome',
@@ -37,6 +38,9 @@ export function buildChromeArgs({
     '--no-default-browser-check',
     '--disable-popup-blocking',
   ];
+  if (!extraArgs.some((arg) => arg === '--window-size' || arg.startsWith('--window-size='))) {
+    args.push('--window-size=1680,1000');
+  }
   if (headless) args.push('--headless=new');
   if (proxyServer) args.push(`--proxy-server=${proxyServer}`);
   if (proxyBypassList) args.push(`--proxy-bypass-list=${proxyBypassList}`);
@@ -44,6 +48,12 @@ export function buildChromeArgs({
   args.push(...extraArgs);
   args.push('about:blank');
   return args;
+}
+
+export function buildChromeEnv({ headless = false, display, env = process.env } = {}) {
+  const spawnEnv = { ...env };
+  if (!headless && display) spawnEnv.DISPLAY = display;
+  return spawnEnv;
 }
 
 export function findChromeExecutable(explicitPath, options = {}) {
@@ -107,22 +117,26 @@ export async function waitForChrome({
   port,
   timeoutMs = 15000,
   intervalMs = 250,
+  signal,
 }) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
 
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     try {
       await httpGetJson({
         host,
         port,
         path: '/json/version',
         timeoutMs: Math.max(1, Math.min(1000, deadline - Date.now())),
+        signal,
       });
       return;
     } catch (error) {
+      signal?.throwIfAborted();
       lastError = error;
-      await sleep(intervalMs);
+      await sleep(intervalMs, undefined, { signal });
     }
   }
 
@@ -136,7 +150,7 @@ export function brokerHome() {
   return path.join(os.homedir(), '.pw-cdp-broker');
 }
 
-function httpGetJson({ host, port, path: requestPath, timeoutMs }) {
+function httpGetJson({ host, port, path: requestPath, timeoutMs, signal }) {
   return new Promise((resolve, reject) => {
     const request = http.request(
       {
@@ -144,6 +158,7 @@ function httpGetJson({ host, port, path: requestPath, timeoutMs }) {
         port,
         path: requestPath,
         method: 'GET',
+        signal,
       },
       (response) => {
         let body = '';
@@ -170,8 +185,4 @@ function httpGetJson({ host, port, path: requestPath, timeoutMs }) {
     request.once('error', reject);
     request.end();
   });
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
